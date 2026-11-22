@@ -55,7 +55,13 @@ Outcome taxonomy (owner-confirmed):
 
 ``next_run_at`` advances to the first occurrence strictly after the advance
 instant on every fired occurrence (success, failure, or skip) — there is no
-tick-level retry.
+tick-level retry, with one exception. A backup of a server at rest that a stop
+still holds for its final snapshot is refused by :class:`CreateBackup` (409
+``server_assigned``, issue #3998): an archive taken then would lack that
+snapshot. Nothing was attempted and the release is normally seconds away, so the
+occurrence is deferred rather than skipped: no run row, no advance, one INFO
+line, and the next tick runs it again. A pending backup retry stays pending the
+same way.
 
 Missed-run semantics: a non-``backup`` occurrence executes only while it is at
 most :data:`LATE_RUN_GRACE` past its due instant; a staler occurrence does *not*
@@ -148,6 +154,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidLifecycleTransitionError,
     LifecycleTransitionConflictError,
     NoEligibleWorkerError,
+    ServerAssignedError,
     ServerError,
     ServerNotRunningError,
     SnapshotUploadInFlightError,
@@ -366,6 +373,17 @@ class ActionResult:
 
 
 @dataclass(frozen=True)
+class Deferred:
+    """An action :class:`ExecuteScheduleAction` did not attempt, owed at the next tick.
+
+    A backup of a server at rest that a stop still holds for its final snapshot
+    (issue #3998): :class:`CreateBackup` refused it under the lifecycle lock, since
+    an archive taken then would lack that snapshot. Not an outcome: the runner
+    records no run row and does not advance.
+    """
+
+
+@dataclass(frozen=True)
 class ExecuteScheduleAction:
     """Map a schedule action to its existing use case and classify the outcome.
 
@@ -391,7 +409,7 @@ class ExecuteScheduleAction:
         action: ScheduleAction,
         command: str | None,
         only_when_running: bool | None,
-    ) -> ActionResult:
+    ) -> ActionResult | Deferred:
         async with self.uow:
             server = await self.uow.servers.get_by_id(server_id)
         if server is None:
@@ -409,6 +427,11 @@ class ExecuteScheduleAction:
                 ScheduleRunOutcome.SKIPPED, _skip_detail(exc), community_id
             )
         except ServerError as exc:
+            if action is ScheduleAction.BACKUP and isinstance(exc, ServerAssignedError):
+                # A server at rest that a stop still holds: whether the runner's
+                # read already saw that or a stop landed since, CreateBackup
+                # refused it under the lifecycle lock (issue #3998).
+                return Deferred()
             _LOG.warning(
                 "scheduled %s for server %s failed: %r",
                 action.value,
@@ -712,6 +735,9 @@ class RunScheduleTick:
                 if (schedule.id, occurrence, step.offset_minutes) not in self._warned:
                     self._log_missed_step(schedule, step)
         result, started_at, finished_at = await self._execute(schedule)
+        if isinstance(result, Deferred):
+            self._log_deferred(schedule, "occurrence")
+            return
         async with self._bookkeeping_lock:
             recorded = await self._record(
                 schedule,
@@ -740,10 +766,24 @@ class RunScheduleTick:
         ):
             return
         result, started_at, finished_at = await self._execute(schedule)
+        if isinstance(result, Deferred):
+            # Not spent: nothing was attempted (issue #3998).
+            self._backup_retry[schedule_id] = now
+            self._log_deferred(schedule, "retry")
+            return
         # The retry records (and notifies on failure) but never moves next_run_at:
         # it is a catch-up for the failed occurrence, not a new occurrence.
         await self._record(schedule, result, started_at, finished_at, advance=False)
         await self._prune_after_backup(schedule, result)
+
+    def _log_deferred(self, schedule: Schedule, what: str) -> None:
+        _LOG.info(
+            "schedule %s: server %s is at rest but still assigned to a Worker; "
+            "backup %s deferred to the next tick",
+            schedule.id.value,
+            schedule.server_id.value,
+            what,
+        )
 
     async def _claim(self, schedule_id: ScheduleId, what: str) -> Schedule | None:
         """Re-read the schedule under its row lock just before dispatching it.
@@ -885,7 +925,7 @@ class RunScheduleTick:
 
     async def _execute(
         self, schedule: Schedule
-    ) -> tuple[ActionResult, dt.datetime, dt.datetime]:
+    ) -> tuple[ActionResult | Deferred, dt.datetime, dt.datetime]:
         started_at = self.clock.now()
         execute = self.make_execute()
         result = await execute(

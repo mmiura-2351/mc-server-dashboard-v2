@@ -25,6 +25,7 @@ import datetime as dt
 import os
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -50,6 +51,7 @@ from mc_server_dashboard_api.fleet.adapters.real_time_events import (
     InProcessRealTimeEvents,
 )
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId as FleetWorkerId
+from mc_server_dashboard_api.servers.adapters.clock import SystemClock
 from mc_server_dashboard_api.servers.adapters.file_store import (
     StorageFileStoreAdapter,
 )
@@ -77,6 +79,9 @@ from mc_server_dashboard_api.servers.application.stop_convergence import (
 )
 from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
     StopDispatchRefusals,
+)
+from mc_server_dashboard_api.servers.application.stop_intents import (
+    StopIntentCounter,
 )
 from mc_server_dashboard_api.servers.application.unrecorded_stops import (
     UnrecordedStops,
@@ -2431,3 +2436,94 @@ async def test_recovery_whose_release_failed_retries_on_the_short_grace(
         engine, FakeControlPlane(place_to=WorkerId(next_worker)), clock
     )(community_id=community, server_id=server_id)
     assert restarted.assigned_worker_id == WorkerId(next_worker)
+
+
+# --- A stop during a re-sent start's wait (issue #4024) ----------------------
+
+
+class _StopAnswersOnRelease(FakeControlPlane):
+    """A Worker whose stop answers OK once ``release`` is set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stop_sent = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def stop(
+        self, *, worker_id: WorkerId, server_id: ServerId, force: bool = False
+    ) -> CommandOutcome:
+        await super().stop(worker_id=worker_id, server_id=server_id, force=force)
+        self.stop_sent.set()
+        await self.release.wait()
+        return CommandOutcome(status=CommandStatus.OK)
+
+
+class _WaitRunsAStop(FakeStoreGenerationReader):
+    """A store whose wait for the Worker's uploads runs a stop until it is sent."""
+
+    def __init__(self, stop: StopServer, cp: _StopAnswersOnRelease) -> None:
+        super().__init__()
+        self._stop = stop
+        self._cp = cp
+        self.stops: list[asyncio.Task[Server]] = []
+
+    async def uploads_settled(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        timeout: float,
+    ) -> bool:
+        self.stops.append(
+            asyncio.create_task(
+                self._stop(community_id=community_id, server_id=server_id)
+            )
+        )
+        await self._cp.stop_sent.wait()
+        return True
+
+
+async def test_a_stop_during_a_re_sent_starts_wait_takes_its_final_snapshot(
+    engine: AsyncEngine,
+) -> None:
+    """A re-sent start marks the row, and a stop commits during its wait.
+
+    The start sends no hydrate, and finds the row the stop holds by the
+    ``updated_at`` its flip wrote, which the stop's bump recorded. That stamp
+    comes from the wall clock, so this compares it with the value PostgreSQL
+    returns from ``timestamptz``. The start puts the mark back, and the stop,
+    answered after that, takes its final snapshot.
+    """
+
+    clock = SystemClock()
+    server = await _create_server(engine, FakeFileStore(), clock)
+    worker = WorkerId(uuid.uuid4())
+    await _start_server_use_case(engine, FakeControlPlane(place_to=worker), clock)(
+        community_id=server.community_id, server_id=server.id
+    )
+    intents = StopIntentCounter()
+    cp = _StopAnswersOnRelease()
+    stop = replace(_stop_server_use_case(engine, cp, clock), stop_intents=intents)
+    reader = _WaitRunsAStop(stop, cp)
+    start = replace(
+        _start_server_use_case(engine, cp, clock, reader), stop_intents=intents
+    )
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await start.redispatch_start(
+            community_id=server.community_id, server_id=server.id
+        )
+    marked = await _load(engine, server.id)
+    cp.release.set()
+    await reader.stops[0]
+
+    assert marked is not None
+    assert (marked.desired_state, marked.awaiting_hydrate) == (
+        DesiredState.STOPPED,
+        False,
+    )
+    assert [kind for kind, _, _ in cp.dispatched] == ["stop", "snapshot"]
+    released = await _load(engine, server.id)
+    assert released is not None
+    assert released.assigned_worker_id is None

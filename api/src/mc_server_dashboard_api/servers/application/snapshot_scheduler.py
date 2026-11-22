@@ -33,7 +33,8 @@ Nor is it retried: no trigger goes to that server again until the Worker reports
 it again (issue #3387), since only a start puts a working set back.
 
 Two skips do not advance next-due, the pre-dispatch connectivity gate and a
-Worker that has not hydrated its server (issue #3890): nothing is dispatched and
+Worker not known to hold its server's working set (``awaiting_hydrate``, issues
+#3890 and #4024): nothing is dispatched and
 nothing is logged there, so retrying them every tick costs nothing, and the
 snapshot is taken as soon as the Worker reconnects or the hydrate lands.
 
@@ -116,9 +117,10 @@ class RunSnapshotCadenceTick:
 
     An assigned Worker's scratch is a copy of the store, or newer, only once that
     Worker has hydrated the server or holds a set at least as fresh. A start keeps
-    its Worker when the hydrate is refused (issue #3890), and that Worker's scratch
-    may then be a leftover older than the store. Its row carries
-    ``awaiting_hydrate`` until the hydrate lands, and the tick asks that Worker for
+    its Worker when the hydrate is refused (issue #3890), and a re-sent start can
+    leave it after a hydrate that may have swapped its tree in (issue #4024), so
+    that Worker's scratch may be a leftover older than the store. Its row carries
+    ``awaiting_hydrate`` until a hydrate lands, and the tick asks that Worker for
     nothing meanwhile.
 
     Not frozen: it owns the in-memory next-due map mutated across ticks. A single

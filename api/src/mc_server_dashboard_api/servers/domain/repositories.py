@@ -329,8 +329,14 @@ class ServerRepository(abc.ABC):
         Worker must not leave a refused replay's scratch publishable. A newer
         placement on the same Worker cannot have cleared its own mark by then,
         because its hydrate runs on the Worker's per-server lane behind this
-        start, whose answer the caller acts on with this one write. Returns
-        ``True`` when the row changed. Not announced.
+        start, whose answer the caller acts on with this one write.
+
+        A re-sent start sets it too, before it hydrates the Worker it is assigned
+        to (issue #4024). Nothing of that start is on the Worker's lane yet, so
+        a newer placement's hydrate may have landed and cleared the mark since
+        the caller's load: the caller re-reads the row and checks that the intent
+        is still its own in the same unit of work. Returns ``True`` when the row
+        changed. Not announced.
         """
 
     @abc.abstractmethod

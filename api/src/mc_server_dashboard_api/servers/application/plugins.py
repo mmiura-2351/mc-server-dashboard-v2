@@ -307,8 +307,8 @@ class InstallPlugin:
         async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
-                if not server.is_at_rest():
-                    raise ServerFilesUnsettledError(str(server_id.value))
+                if not server.is_quiescent():
+                    raise server.not_quiescent_error(ServerFilesUnsettledError)
 
                 content_dir = content_dir_for_server_type(server.server_type)
                 loader_type = loader_type_for_server_type(server.server_type)
@@ -412,8 +412,8 @@ class RemovePlugin:
         async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
-                if not server.is_at_rest():
-                    raise ServerFilesUnsettledError(str(server_id.value))
+                if not server.is_quiescent():
+                    raise server.not_quiescent_error(ServerFilesUnsettledError)
 
                 plugin = await self.uow.plugins.get_by_id(server_id, plugin_id)
                 if plugin is None:
@@ -475,8 +475,8 @@ class TogglePlugin:
         async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
-                if not server.is_at_rest():
-                    raise ServerFilesUnsettledError(str(server_id.value))
+                if not server.is_quiescent():
+                    raise server.not_quiescent_error(ServerFilesUnsettledError)
 
                 plugin = await self.uow.plugins.get_by_id(server_id, plugin_id)
                 if plugin is None:
@@ -566,8 +566,8 @@ class SetPluginSide:
                     raise InvalidPluginSideError(
                         "paper servers only support server side"
                     )
-                if not server.is_at_rest():
-                    raise ServerFilesUnsettledError(str(server_id.value))
+                if not server.is_quiescent():
+                    raise server.not_quiescent_error(ServerFilesUnsettledError)
 
                 plugin = await self.uow.plugins.get_by_id(server_id, plugin_id)
                 if plugin is None:

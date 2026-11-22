@@ -1040,8 +1040,8 @@ class ApplyPluginResolution:
             # Per-dep isolation covers install failures (catalog unreachable,
             # bad/oversized/tampered jar, an id already installed at this path).
             # The lifecycle gate errors (``ServerFilesUnsettledError`` /
-            # ``ServerBusyError``) from the install are NOT swallowed -- they must
-            # abort the whole apply with a 409.
+            # ``ServerAssignedError`` / ``ServerBusyError``) from the install are
+            # NOT swallowed -- they must abort the whole apply with a 409.
             try:
                 plugin = await self.install_from_catalog(
                     community_id=community_id,

@@ -2406,9 +2406,19 @@ export interface paths {
          *
          *     An assignment-aware fence (issue #1703) adds a second input: the server's
          *     currently-assigned worker id. The pre-stream guard ALLOWS a stale-base publish
-         *     from a different publisher when that publisher IS the assigned worker (the wedge
-         *     case: the old worker's late final snapshot advanced the store, and the new assigned
-         *     worker's base now lags). A commit-time fence re-reads the assignment AFTER the
+         *     from a different publisher when that publisher IS the assigned worker. Its
+         *     original case, an old worker's late final snapshot advancing the store behind a
+         *     re-placed one, is closed by the fences below (issue #3544) and by the start's
+         *     settled read of the generation (issue #3552). The live case is adoption (issue
+         *     #3865): a start writes ``eula.txt`` or owed group files, stamping an
+         *     ``api-edit`` ``current``, then adopts the instance its placed worker already
+         *     runs instead of hydrating it, and that instance's base lags the sentinel. A
+         *     restore or an at-rest edit reaches the allowance only through that same
+         *     adoption: the doors refuse a server still assigned to a worker
+         *     (``Server.is_quiescent``, issue #3998), so none lands under a stop's final
+         *     snapshot, but one made after the release is still published over when a start
+         *     then adopts a live instance from before it (issue #4004, item 4). A
+         *     commit-time fence re-reads the assignment AFTER the
          *     upload stream and refuses when the publisher is NOT the currently-assigned worker
          *     (409 ``publisher_not_assigned``): this prevents a late commit from a re-placed
          *     worker from wedging the new session. The commit runs the same fence again under
@@ -2417,17 +2427,19 @@ export interface paths {
          *     fence is permissive when no worker is assigned (``None``): the held-assignment
          *     final-snapshot window and the post-clear no-replacement case must still land.
          *
-         *     A placement whose Worker has not hydrated the server yet (``awaiting_hydrate``,
-         *     issue #3890) accepts no publish from that Worker at all, before the upload (409
-         *     ``publisher_awaiting_hydrate``): its scratch may be a leftover older than the
-         *     store, whatever base it declares. No base (a scratch whose generation marker
-         *     reads 0), a stale base, one whose ``current`` it published itself and the
+         *     A placement whose Worker is not known to hold the store's working set
+         *     (``awaiting_hydrate``: it has not hydrated the server under this assignment,
+         *     issue #3890, or a re-sent start marked it for a new hydrate that has not cleared
+         *     the mark, issue #4024) accepts no publish from that Worker at all, before the
+         *     upload (409 ``publisher_awaiting_hydrate``): its scratch may be a leftover older
+         *     than the store, whatever base it declares. No base (a scratch whose generation
+         *     marker reads 0), a stale base, one whose ``current`` it published itself and the
          *     current one are all refused, and so is a publish that does not name its Worker,
          *     which cannot be told from it. A late final snapshot of that Worker's previous
          *     assignment that starts uploading after the placement is refused the same way:
-         *     its scratch stays on the Worker, and the store wins. An upload that passed
-         *     this check before the placement was marked still commits, since the
-         *     commit-time fence stays keyed on the Worker id.
+         *     its scratch stays on the Worker, and the store wins. An upload that passed this
+         *     check before the placement was marked still commits, since the commit-time fence
+         *     stays keyed on the Worker id.
          *
          *     A publish that names its Worker counts as in flight from the moment it
          *     arrives until it has committed or been refused (issue #3950). A start that

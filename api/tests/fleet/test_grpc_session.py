@@ -43,6 +43,9 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     ReclaimDeletedServerCommand,
 )
 from mc_server_dashboard_api.fleet.domain.entities import WorkerStatus
+from mc_server_dashboard_api.fleet.domain.late_snapshot_sink import (
+    LateSnapshotResultSink,
+)
 from mc_server_dashboard_api.fleet.domain.real_time_events import EventStream
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
 from mcsd.controlplane.v1 import control_plane_pb2 as pb
@@ -3156,5 +3159,399 @@ async def test_a_held_report_gets_a_last_attempt_when_the_worker_closes_the_stre
             (_SERVER_B, _WORKER_ID, "running"),
         ]
         assert sink.attempts == {_SERVER_A: 2, _SERVER_B: 1}
+    finally:
+        await h.stop()
+
+
+class _OutageLateSnapshotSink(LateSnapshotResultSink):
+    """Fails the first clear with an outage, then records each server it clears."""
+
+    def __init__(self) -> None:
+        self.attempts = 0
+        self.cleared: list[str] = []
+
+    async def clear_held_assignment_on_late_snapshot(
+        self, *, server_id: str, worker_id: str, succeeded: bool, message: str | None
+    ) -> None:
+        self.attempts += 1
+        if self.attempts == 1:
+            raise _OUTAGE("connect call failed")
+        self.cleared.append(server_id)
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_held_late_final_snapshot_result_releases_on_its_retry() -> None:
+    # Issue #4023: the release a late final-snapshot result drives fails while
+    # the database is down, so the result is held like any report. Its retry
+    # must apply the release, rather than find nothing to release.
+    sink = _OutageLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        control_plane=state,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        # An abandoned final snapshot of this session: its record is made after
+        # the registration, whose open_session drops the Worker's earlier ones.
+        state.register_pending(
+            "snapshot-1", WorkerId(_WORKER_ID), snapshot_server_id=_SERVER_A
+        )
+        state.discard_pending("snapshot-1")
+        await call.write(
+            pb.WorkerMessage(
+                correlation_id="snapshot-1",
+                command_result=pb.CommandResult(success=True),
+            )
+        )
+        await _wait_until(lambda: sink.cleared, "the held release was not applied")
+
+        assert sink.cleared == [_SERVER_A]
+        assert sink.attempts == 2
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+# ---------------------------------------------------------------------------
+# Log lines and metrics read while a report is held (issue #4028)
+# ---------------------------------------------------------------------------
+
+# A short server id keeps a flood well inside the stream's flow-control window,
+# so the Worker's writes complete even when the reader stops reading.
+_FLOOD_SERVER = "s"
+
+
+def _dropped(logs: int, metrics: int) -> str:
+    return (
+        f"dropped {logs} log lines and {metrics} metric samples during a database hold"
+    )
+
+
+def _log_message(server_id: str, line: str) -> pb.WorkerMessage:
+    return pb.WorkerMessage(
+        event=pb.Event(server_id=server_id, log_line=pb.LogLine(line=line))
+    )
+
+
+def _metrics_message(server_id: str, cpu_millis: int) -> pb.WorkerMessage:
+    return pb.WorkerMessage(
+        event=pb.Event(server_id=server_id, metrics=pb.Metrics(cpu_millis=cpu_millis))
+    )
+
+
+def _command_result_message(command_id: str) -> pb.WorkerMessage:
+    return pb.WorkerMessage(
+        correlation_id=command_id, command_result=pb.CommandResult(success=True)
+    )
+
+
+class _RecordingControlPlane(ControlPlaneState):
+    """Records each command result it resolves, with the reports applied by then."""
+
+    def __init__(self, observed: list[tuple[str, str, str]]) -> None:
+        super().__init__()
+        self._observed = observed
+        self.resolved: list[tuple[str, list[tuple[str, str, str]]]] = []
+
+    async def resolve(
+        self, command_id: str, worker_id: WorkerId, result: pb.CommandResult
+    ) -> None:
+        self.resolved.append((command_id, list(self._observed)))
+        await super().resolve(command_id, worker_id, result)
+
+
+async def _write_all(
+    call: aio.StreamStreamCall, messages: list[pb.WorkerMessage]
+) -> None:
+    async def _write() -> None:
+        for message in messages:
+            await call.write(message)
+
+    await asyncio.wait_for(_write(), timeout=30)
+
+
+def _warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == _GRPC_SERVER_LOGGER and r.levelno >= logging.WARNING
+    ]
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_log_flood_during_a_hold_does_not_fill_the_queue(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Queued behind a held report, a busy log stream would fill the queue, stop
+    # the reader, heartbeats included, and end the session with the report when
+    # they lapse. The log lines and metrics read during the hold are dropped
+    # instead, and the held report, the one behind it and a command result land
+    # once the database is back, in order.
+    sink = _OutageSink(down=True)
+    control_plane = _RecordingControlPlane(sink.observed)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        control_plane=control_plane,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await _wait_until(
+            lambda: sink.attempts.get(_SERVER_A, 0) >= 2, "the report was not held"
+        )
+        await call.write(_status_message(_SERVER_B, pb.SERVER_STATE_STOPPED))
+        flood = grpc_server._INBOUND_QUEUE_MAXSIZE + 100
+        await _write_all(
+            call,
+            [_log_message(_FLOOD_SERVER, str(i)) for i in range(flood)]
+            + [_metrics_message(_FLOOD_SERVER, i) for i in range(3)]
+            + [_command_result_message("result-read-during-the-hold")],
+        )
+        beat = _T0 + dt.timedelta(seconds=1)
+        h.clock.set(beat)
+        await call.write(_heartbeat_message())
+        await _wait_for_heartbeat_at(h, beat)
+
+        assert h.registry.list_workers()[0].status is WorkerStatus.ONLINE
+        assert h.real_time_events.published == []
+
+        sink.down = False
+        await _wait_until(lambda: control_plane.resolved, "the result not resolved")
+        reports = [
+            (_SERVER_A, _WORKER_ID, "running"),
+            (_SERVER_B, _WORKER_ID, "stopped"),
+        ]
+        assert sink.observed == reports
+        assert control_plane.resolved == [("result-read-during-the-hold", reports)]
+        assert _logged(caplog, _dropped(flood, 3)) != []
+        # Once the hold is over, log lines are relayed again.
+        await call.write(_log_message(_FLOOD_SERVER, "after"))
+        await _wait_until(lambda: h.real_time_events.published, "no line relayed")
+        assert [e.payload["line"] for _, e in h.real_time_events.published] == ["after"]
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_hold_purges_the_log_lines_queued_before_it_started(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A report's first attempt can run as long as a connect timeout before it
+    # fails and the hold starts, and a busy log stream can fill the queue
+    # meanwhile, which stops the reader. As the hold starts, the log lines
+    # already queued are dropped too, so the reader reads heartbeats again. A
+    # report and a command result queued among them keep their place.
+    gate = asyncio.Event()
+    sink = _OutageSink(gate=gate)
+    control_plane = _RecordingControlPlane(sink.observed)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        control_plane=control_plane,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await call.write(_status_message(_SERVER_B, pb.SERVER_STATE_STOPPED))
+        await call.write(_command_result_message("result-queued-before-the-hold"))
+        flood = grpc_server._INBOUND_QUEUE_MAXSIZE + 100
+        await _write_all(
+            call, [_log_message(_FLOOD_SERVER, str(i)) for i in range(flood)]
+        )
+        beat = _T0 + dt.timedelta(seconds=1)
+        h.clock.set(beat)
+        await call.write(_heartbeat_message())
+        # A's first attempt is still running, so more than the queue holds
+        # stands ahead of the heartbeat.
+        await asyncio.sleep(0.2)
+        assert h.registry.list_workers()[0].last_heartbeat_at == _T0
+
+        sink.down = True
+        gate.set()
+        await _wait_for_heartbeat_at(h, beat)
+        assert h.registry.list_workers()[0].status is WorkerStatus.ONLINE
+
+        sink.down = False
+        await _wait_until(lambda: control_plane.resolved, "the result not resolved")
+        reports = [
+            (_SERVER_A, _WORKER_ID, "running"),
+            (_SERVER_B, _WORKER_ID, "stopped"),
+        ]
+        assert sink.observed == reports
+        assert control_plane.resolved == [("result-queued-before-the-hold", reports)]
+        await call.write(_log_message(_FLOOD_SERVER, "after"))
+        await _wait_until(
+            lambda: (
+                [e.payload["line"] for _, e in h.real_time_events.published][-1:]
+                == ["after"]
+            ),
+            "no line relayed",
+        )
+        # Only a line the stopped reader had already taken can still be relayed.
+        relayed = [e.payload["line"] for _, e in h.real_time_events.published][:-1]
+        assert len(relayed) <= 1
+        assert _logged(caplog, _dropped(flood - len(relayed), 0)) != []
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+@pytest.mark.usefixtures("fast_hold")
+@pytest.mark.parametrize("end", ["applied", "refused"])
+async def test_a_hold_reports_what_it_dropped_in_one_warning(
+    end: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The lines a hold drops are counted, not logged one by one: one WARNING
+    # gives both counts as the hold ends, whether its report is applied or
+    # dropped because the database answers. A log line read after it is
+    # relayed again.
+    caplog.set_level(logging.INFO, logger=_GRPC_SERVER_LOGGER)
+    sink = _OutageSink(down=True)
+    ping = FakeDatabasePing(reachable=False)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        database_ping=ping,
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await _wait_until(
+            lambda: sink.attempts.get(_SERVER_A, 0) >= 2, "the report was not held"
+        )
+        await _write_all(
+            call,
+            [_log_message(_SERVER_A, str(i)) for i in range(3)]
+            + [_metrics_message(_SERVER_A, i) for i in range(2)],
+        )
+        beat = _T0 + dt.timedelta(seconds=1)
+        h.clock.set(beat)
+        await call.write(_heartbeat_message())
+        await _wait_for_heartbeat_at(h, beat)
+
+        if end == "applied":
+            sink.down = False
+        else:
+            ping.reachable = True
+        await _wait_until(lambda: _logged(caplog, _dropped(3, 2)), "no counts logged")
+        await call.write(_log_message(_SERVER_A, "after"))
+        await _wait_until(lambda: h.real_time_events.published, "no line relayed")
+
+        expected = (
+            [_HOLD_STARTED, _dropped(3, 2)]
+            if end == "applied"
+            else [
+                _HOLD_STARTED,
+                _HOLD_REFUSED,
+                _dropped(3, 2),
+                "dropping a worker message after a handler error",
+            ]
+        )
+        assert _warnings(caplog) == expected
+        assert [e.payload["line"] for _, e in h.real_time_events.published] == ["after"]
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_each_hold_of_a_session_counts_only_its_own_drops(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A session can hold one report after another. Each hold's WARNING counts
+    # what was dropped during that hold, not since the session began.
+    sink = _OutageSink(down=True)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        for held, (server, lines) in enumerate(((_SERVER_A, 3), (_SERVER_B, 1)), 1):
+            sink.down = True
+            await call.write(_status_message(server, pb.SERVER_STATE_RUNNING))
+            await _wait_until(
+                lambda server=server: sink.attempts.get(server, 0) >= 2,
+                "the report was not held",
+            )
+            await _write_all(call, [_log_message(server, str(i)) for i in range(lines)])
+            beat = _T0 + dt.timedelta(seconds=held)
+            h.clock.set(beat)
+            await call.write(_heartbeat_message())
+            await _wait_for_heartbeat_at(h, beat)
+            sink.down = False
+            await _wait_until(
+                lambda held=held: len(sink.observed) == held,
+                "the held report was not applied",
+            )
+
+        assert sink.observed == [
+            (_SERVER_A, _WORKER_ID, "running"),
+            (_SERVER_B, _WORKER_ID, "running"),
+        ]
+        assert [m for m in _warnings(caplog) if m.startswith("dropped ")] == [
+            _dropped(3, 0),
+            _dropped(1, 0),
+        ]
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+async def test_without_a_hold_log_lines_queue_in_order_and_back_pressure_the_reader(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Outside a hold nothing is dropped. Behind a slow write, which is no outage,
+    # log lines and metrics queue; the full queue stops the reader, heartbeats
+    # included, and every line and sample is relayed in order once the write
+    # completes.
+    gate = asyncio.Event()
+    sink = _OutageSink(gate=gate)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        flood = grpc_server._INBOUND_QUEUE_MAXSIZE + 100
+        await _write_all(
+            call,
+            [_log_message(_FLOOD_SERVER, str(i)) for i in range(flood)]
+            + [_metrics_message(_FLOOD_SERVER, i) for i in range(3)],
+        )
+        beat = _T0 + dt.timedelta(seconds=1)
+        h.clock.set(beat)
+        await call.write(_heartbeat_message())
+        await asyncio.sleep(0.2)
+
+        assert h.registry.list_workers()[0].last_heartbeat_at == _T0
+        assert h.real_time_events.published == []
+
+        gate.set()
+        await _wait_for_heartbeat_at(h, beat)
+        await _wait_until(
+            lambda: len(h.real_time_events.published) == flood + 3,
+            "not every line and sample relayed",
+        )
+        assert [e.payload for _, e in h.real_time_events.published] == [
+            {"line": str(i), "stream": "stdout"} for i in range(flood)
+        ] + [{"cpu_millis": i, "memory_bytes": 0, "player_count": 0} for i in range(3)]
+        assert sink.observed == [(_SERVER_A, _WORKER_ID, "running")]
+        assert _warnings(caplog) == []
+        await call.done_writing()
     finally:
         await h.stop()

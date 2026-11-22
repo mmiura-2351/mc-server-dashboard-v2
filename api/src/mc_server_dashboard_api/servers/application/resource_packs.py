@@ -257,16 +257,20 @@ class DownloadResourcePack:
 # ---------------------------------------------------------------------------
 
 
-async def _load_server_at_rest(
+async def _load_quiescent_server(
     uow: UnitOfWork, community_id: CommunityId, server_id: ServerId
 ) -> Server:
-    """Return the server, validating it exists, is in community, and is at rest."""
+    """Return the server, validating it exists, is in community, and is quiescent.
+
+    At rest and released (issue #3998): a stop that still holds its Worker would
+    publish its final snapshot over the ``server.properties`` rewrite.
+    """
 
     server = await uow.servers.get_by_id(server_id)
     if server is None or server.community_id != community_id:
         raise ServerNotFoundError(str(server_id.value))
-    if not server.is_at_rest():
-        raise ServerFilesUnsettledError(str(server_id.value))
+    if not server.is_quiescent():
+        raise server.not_quiescent_error(ServerFilesUnsettledError)
     return server
 
 
@@ -323,7 +327,7 @@ class AssignResourcePack:
     ) -> tuple[ResourcePackAssignment, ResourcePack]:
         async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
-                server = await _load_server_at_rest(self.uow, community_id, server_id)
+                server = await _load_quiescent_server(self.uow, community_id, server_id)
 
                 pack = await self.uow.resource_packs.get_by_id(resource_pack_id)
                 if pack is None:
@@ -424,7 +428,7 @@ class UnassignResourcePack:
     ) -> None:
         async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
-                await _load_server_at_rest(self.uow, community_id, server_id)
+                await _load_quiescent_server(self.uow, community_id, server_id)
 
                 assignment = await self.uow.resource_packs.get_assignment_by_server(
                     server_id

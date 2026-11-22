@@ -25,10 +25,11 @@ someone else committed reads the count while a stop of that intent may already
 be past its own read and waiting on its write. A bump made before that write
 would land before the start read the count, and the stop could then be enqueued
 ahead of the start unseen. A stop or drain bumps when its commit raises, too: the
-commit may have landed (a lost response, or a client disconnect cancelling the
-request at that await), and then no stop is sent at all. The cost is a commit
-that truly failed: the intent is still running, but an in-flight start of it is
-refused and waits for the reconciler's re-send.
+commit may have landed (a lost response, or the task cancelled at that await,
+which a client disconnect does not do on the shipped server stack unless the
+handler reads the request body, issue #3950), and then no stop is sent at all.
+The cost is a commit that truly failed: the intent is still running, but an
+in-flight start of it is refused and waits for the reconciler's re-send.
 
 What this does not hold back is a withdrawal that sends no stop and lands after a
 start compares: a stop commit that was still in flight and then lands but
@@ -66,7 +67,9 @@ failed start's or placement's revert of its own intent (``_compensate``,
 ``_unassign``), which also bumps when its commit raises, and the two stop
 convergences above. A revert sends no stop, so a re-sent start of that same
 intent already enqueued when the revert lands is not caught. The final-snapshot
-clears do not bump: the flow that took the snapshot already did.
+clears do not bump: the flow that took the snapshot already did. A stop's and a
+drain's bump also record the ``updated_at`` their flip wrote, so that a re-sent
+start can tell the row that stop or drain holds from a later write (issue #4024).
 
 The value a start reads also identifies its intent: an unchanged count means no
 write in this process has withdrawn the intent since. A failed start's revert
@@ -89,6 +92,7 @@ server's own start left still covers it. Issue #3854 tracks both.
 
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import dataclass, field
 
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
@@ -101,16 +105,32 @@ class StopIntentCounter:
     Also which servers have had a start sent that no stop has stopped yet.
     """
 
-    # Neither drops a deleted server's entry: each holds at most one per server
+    # No field drops a deleted server's entry: each holds at most one per server
     # this process has seen.
     _counts: dict[ServerId, int] = field(default_factory=dict)
     _unstopped_starts: set[ServerId] = field(default_factory=set)
+    _flipped_at: dict[ServerId, dt.datetime | None] = field(default_factory=dict)
 
     def current(self, server_id: ServerId) -> int:
         return self._counts.get(server_id, 0)
 
-    def bump(self, server_id: ServerId) -> None:
+    def bump(
+        self, server_id: ServerId, *, flipped_at: dt.datetime | None = None
+    ) -> None:
+        """Count a withdrawal of the server's start intent.
+
+        ``flipped_at`` is the ``updated_at`` a stop's ``running -> stopped`` flip
+        wrote, for a re-sent start to tell that stop's row from any later write
+        (issue #4024). A withdrawal that wrote no flip of its own passes nothing.
+        """
+
         self._counts[server_id] = self.current(server_id) + 1
+        self._flipped_at[server_id] = flipped_at
+
+    def flipped_at(self, server_id: ServerId) -> dt.datetime | None:
+        """The ``updated_at`` the latest withdrawal's flip wrote, if it recorded one."""
+
+        return self._flipped_at.get(server_id)
 
     def start_sent(self, server_id: ServerId) -> None:
         """Note a start enqueued for ``server_id``, as it is enqueued."""

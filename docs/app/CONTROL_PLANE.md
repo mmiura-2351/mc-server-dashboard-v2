@@ -517,11 +517,19 @@ too. When more than five drops follow one another, the API ends the session. A
 held message's failures do not count toward them; a drop after the Worker closed
 the stream does.
 
-Log lines and metrics wait in the same queue, so a hold delays them, and they
-share the queue's fate when the session ends. At most 1024 messages wait. Once
-that many do, the API stops reading the stream, heartbeats included, until the
-hold ends: a long outage under a busy log stream ends the session when its
-heartbeats lapse.
+Log lines and metrics wait in the same queue, except while a message is held
+(issue #4028). As the hold starts, the API drops the ones already queued, which
+a busy log stream may have queued while the message's first attempt was still
+failing. It drops the ones it reads during the hold as well, rather than
+queueing them. As the hold ends, one WARNING gives how many of each it dropped.
+So a busy log stream cannot keep the queue full during a hold. Only a line the
+API had read but could not yet queue when the hold started is still queued.
+Dropping moves nothing, so the lines and samples relayed keep their order
+against status frames, which the Web UI relies on: a status frame that puts a
+server at rest clears its metrics. At most 1024 messages wait. Once that many
+do, the API stops reading the stream, heartbeats included, until one leaves the
+queue. During a hold only reports and command results can fill it, and none
+leaves until the hold ends.
 
 The delivery guarantee: a report is applied at least once across transient
 database errors within a session; a report held when the session ends is lost;
@@ -849,14 +857,37 @@ Notes:
   start that replays a launch refused for a missing working set (Section 7)
   sends its hydrate after a start, and handles a refusal of it as it would a
   refused start: `UNAVAILABLE` and `EXPIRED` give the Worker back there.
-- **Nothing publishes a snapshot from a Worker that has not hydrated the
-  server.** A Worker kept by the previous note has not hydrated the server, and
+- **Nothing publishes a snapshot from a Worker that is not known to hold the
+  store's working set.** A Worker kept by the previous note has not hydrated the
+  server, and
   its scratch may be a leftover older than the store: a previous run's that no
   final snapshot published, since overtaken by a run on another Worker, a backup
   restore or an at-rest file edit. Publishing it would replace the store's
   newer working set. So the write that places a server on a Worker for a start
-  marks it `awaiting_hydrate` (DATABASE.md Section 7), and while the mark is
-  set:
+  marks it `awaiting_hydrate` (DATABASE.md Section 7). A start re-sent to the
+  Worker the server is assigned to marks it too when it is about to hydrate that
+  Worker, before it waits for the Worker's uploads (next note): the Worker does
+  not hold the store's working set either (issue #4024). It marks the server
+  only while the start's intent is still the server's, so it never marks again a
+  newer placement on the same Worker whose hydrate has landed. When its hydrate
+  cannot have replaced the Worker's working set, the re-sent start puts the mark
+  back as it found it: the Worker refused the hydrate before the pull (`BUSY`,
+  `UNAVAILABLE` or `EXPIRED`, or `INVALID_STATE`, which clears the mark anyway,
+  below), or the hydrate was never sent: the wait ran out, the start's intent
+  was withdrawn, the Worker had no session to send it on, or the API has no
+  data-plane URL or Worker credential to send it with. A hydrate that failed,
+  timed out, or lost its session while it awaited its answer may have swapped
+  the new tree in, as the Worker can report a failed transfer after its swap, so
+  the mark stays until a hydrate lands. The start puts the mark back only while
+  it is still its own: while the row is as the start marked it, or while the one
+  stop or drain that withdrew the start holds it, as its flip left it. For that
+  stop the put-back is best effort: the stop reads the mark for its final
+  snapshot as soon as the Worker answers it, and if that comes before the
+  start's wait ends, the stop takes no final snapshot. Any other write to the
+  row between the mark and the put-back keeps the mark, and so does an error the
+  start does not handle, a cancellation, or an API restart before the hydrate:
+  each errs on the safe side, and the mark waits for the next hydrate that
+  lands. While the mark is set:
   - the periodic snapshot skips the server but keeps it due, so the first tick
     after the mark clears takes it;
   - a final snapshot is not taken, whether a stop, a replayed stop or the
@@ -903,6 +934,9 @@ Notes:
     then gives the server back, such an upload lands as it would have anyway.
   - A start that skips the hydrate does not wait: its Worker runs on the tree
     such an upload packed, or a newer one.
+  - An upload from the Worker that arrives only after the wait has passed is
+    refused: every start that hydrates has marked the server
+    `awaiting_hydrate` (previous note) before it waits.
   - The wait comes after the start's placement commit and holds nothing: no
     lifecycle lock, database session or storage lock. In practice it lasts as
     long as a commit: an upload whose Worker went away mid-body aborts at the
@@ -939,31 +973,6 @@ Notes:
     ended and after a start's wait passed, so request bodies must stream to
     the API ([`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md), "The data-plane
     URL for a cross-host worker").
-  - Not covered either: an upload from the Worker that reaches the data plane
-    only after a `redispatch_start`'s wait has passed, and before its hydrate
-    is served. A start that places the server marks the row
-    `awaiting_hydrate`, which refuses such an upload, but a
-    `redispatch_start` does not mark it, so the upload would commit after the
-    hydrate read the older generation. Marking the row there too is issue
-    #4024. Until then, three things keep the case out, and a change to any of
-    them must be read against it:
-    - A request whose Worker has gone cannot register late and still stage a
-      body: on the shipped uvicorn (h11), the handler's first read of a
-      request whose connection has closed answers a disconnect, even with
-      body bytes buffered.
-    - A snapshot of a stopped server holds the Worker's reservation of the
-      server until its upload ends, even after the command has answered, so
-      the Worker refuses the hydrate `BUSY` meanwhile.
-    - A snapshot of a running server holds no reservation. While the instance
-      runs, the Worker refuses the hydrate `INVALID_STATE`. Once it has
-      exited, only the Worker's per-server lane and the reconciler grace keep
-      the upload ahead of the hydrate: a `redispatch_start` that hydrates
-      waits the full `reconciler.grace_seconds` (660 s by default), and the
-      Worker's transfer deadline, the larger of the hydrate and snapshot
-      budgets plus 60 s (Section 5.2), is also 660 s by default. That is no
-      slack, and the grace floor (CONFIGURATION.md Section 5.1, note 3) does
-      not require the grace to exceed the transfer deadline: its stock value
-      is 630 s.
 - **Expiry.** `ApiCommand.expires_after` is how long the Worker may hold a
   command before it starts executing it. It is measured from when the Worker
   received the command, so the two hosts' clocks never meet. The API stamps it

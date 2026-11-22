@@ -32,6 +32,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PluginAlreadyExistsError,
     PluginNotFoundError,
     PortRangeExhaustedError,
+    ServerAssignedError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
     UnsupportedPluginServerTypeError,
@@ -50,6 +51,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerId,
     ServerName,
     ServerType,
+    WorkerId,
 )
 from tests.servers.executor_starvation import (
     IN_FLIGHT,
@@ -708,6 +710,62 @@ async def test_install_requires_at_rest() -> None:
             display_name="Test",
             content=b"jar",
         )
+
+
+@pytest.mark.parametrize(
+    "observed", [ObservedState.STOPPED, ObservedState.CRASHED, ObservedState.UNKNOWN]
+)
+@pytest.mark.parametrize("door", ["install", "remove", "toggle", "side"])
+async def test_a_plugin_door_refuses_a_server_a_worker_still_holds(
+    door: str, observed: ObservedState
+) -> None:
+    # A stop holds its Worker until the final snapshot settles, and that snapshot
+    # publishes over the store (issue #3998): a plugin change made in the window
+    # would be overwritten, leaving its row disagreeing with the working set.
+    uow = FakeUnitOfWork()
+    server = _server(observed_state=observed)
+    server.assigned_worker_id = WorkerId(uuid.uuid4())
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    fs.files["mods/test.jar"] = b"jar"
+    cache = FakePluginCacheStore()
+    plugin = _plugin(server_id=server.id)
+    uow.plugins.seed(plugin)
+    clock = FakeClock(_NOW)
+
+    with pytest.raises(ServerAssignedError):
+        if door == "install":
+            await InstallPlugin(uow=uow, file_store=fs, cache=cache, clock=clock)(
+                community_id=_COMMUNITY,
+                server_id=server.id,
+                filename="other.jar",
+                display_name="Other",
+                content=b"other-jar",
+            )
+        elif door == "remove":
+            await RemovePlugin(uow=uow, file_store=fs, clock=clock)(
+                community_id=_COMMUNITY, server_id=server.id, plugin_id=plugin.id
+            )
+        elif door == "toggle":
+            await TogglePlugin(uow=uow, file_store=fs, cache=cache, clock=clock)(
+                community_id=_COMMUNITY,
+                server_id=server.id,
+                plugin_id=plugin.id,
+                enable=False,
+            )
+        else:
+            await SetPluginSide(uow=uow, file_store=fs, cache=cache, clock=clock)(
+                community_id=_COMMUNITY,
+                server_id=server.id,
+                plugin_id=plugin.id,
+                side="client",
+            )
+
+    assert fs.files == {"mods/test.jar": b"jar"}
+    assert fs.writes == []
+    assert cache.blobs == {}
+    assert uow.plugins.by_id == {plugin.id: plugin}
+    assert plugin.enabled is True
 
 
 # -- RemovePlugin --

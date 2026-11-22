@@ -324,6 +324,47 @@ async def test_start_is_refused_when_the_snapshot_hold_is_released_mid_start() -
     ]
 
 
+async def test_a_group_edit_during_the_final_snapshot_is_left_to_the_start() -> None:
+    # The group fan-out skips a server at rest that a Worker still holds, as it
+    # skips a running one (issue #3998): the final snapshot publishes over the
+    # store and would overwrite the write. The change stays owed, and the start
+    # that follows the release makes it.
+    uow = FakeUnitOfWork()
+    server = _server(worker=_WORKER)
+    uow.servers.seed(server)
+    group = PlayerGroup(
+        id=GroupId.new(),
+        community_id=_COMMUNITY,
+        name=GroupName("admins"),
+        kind=GroupKind.OP,
+        players=[Player(_REMOVED, "removed")],
+    )
+    uow.groups.seed(group)
+    await uow.groups.attach(group.id, server.id)
+    store = _VersionedFileStore()
+
+    await RemovePlayer(uow=uow, file_store=store)(
+        community_id=_COMMUNITY, group_id=group.id, player_uuid=_REMOVED
+    )
+
+    assert store.files["ops.json"] == _STALE_OPS.encode()
+    assert store.generation == _GENERATION
+    assert [p.kind for p in await uow.groups.list_sync_pending(server.id)] == [
+        GroupKind.OP
+    ]
+
+    # The final snapshot settles and the stop releases the server.
+    assert await uow.servers.clear_assignment_after_final_snapshot(server.id, _WORKER)
+    cp = FakeControlPlane(place_to=_WORKER, held={(_WORKER, server.id): _GENERATION})
+    await _start(uow, store, cp)(community_id=_COMMUNITY, server_id=server.id)
+
+    assert json.loads(store.files["ops.json"]) == []
+    assert cp.dispatched == [
+        ("hydrate", _WORKER, server.id),
+        ("start", _WORKER, server.id),
+    ]
+
+
 # --- the reconciler's placement of an unassigned server ----------------------
 
 

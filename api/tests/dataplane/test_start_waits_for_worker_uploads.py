@@ -508,6 +508,244 @@ def test_a_rerun_after_a_worker_restart_hydrates_the_snapshot_it_waited_for(
     assert asyncio.run(_live(storage, server)) == (2, b"packed-by-a")
 
 
+class _UploadAtTheHydrate(_WorkerServesHydrates):
+    """Runs ``arrives`` as each hydrate is sent, before its pull is served."""
+
+    def __init__(
+        self,
+        storage: Storage,
+        *,
+        held: dict[tuple[WorkerId, ServerId], int],
+        place_to: WorkerId | None = None,
+    ) -> None:
+        super().__init__(storage, held=held, place_to=place_to)
+        self.arrives: Callable[[], Awaitable[None]] = _nothing
+
+    async def hydrate(
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        timeout_seconds: float | None = None,
+    ) -> CommandOutcome:
+        await self.arrives()
+        return await super().hydrate(
+            worker_id=worker_id,
+            community_id=community_id,
+            server_id=server_id,
+            timeout_seconds=timeout_seconds,
+        )
+
+
+async def _upload_after_the_wait(
+    app: FastAPI,
+    storage: Storage,
+    uow: FakeUnitOfWork,
+    uploads: _WatchedUploads,
+    cp: _UploadAtTheHydrate,
+    server: Server,
+    *,
+    start: Callable[[], Coroutine[Any, Any, object]],
+) -> tuple[Response, BaseException | None]:
+    """Run ``start`` with Worker A's upload arriving after its wait; return both.
+
+    A's upload reaches the data plane as the start sends its hydrate, after the
+    wait for A's uploads has passed. The pull is served once the upload has been
+    answered or its body is staged, and its commit is held until the start has
+    finished.
+    """
+
+    _bind(app, storage, uow, uploads)
+    staged = asyncio.Event()
+    release = asyncio.Event()
+    real_write_snapshot = storage.write_snapshot
+
+    async def _write_snapshot(
+        handle: SnapshotHandle,
+        stream: AsyncIterator[bytes],
+        *,
+        expected_base: int | None = None,
+    ) -> None:
+        await real_write_snapshot(handle, stream, expected_base=expected_base)
+        staged.set()
+        await release.wait()
+
+    storage.write_snapshot = _write_snapshot  # type: ignore[method-assign]
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            posted: list[asyncio.Task[Response]] = []
+
+            async def _arrives() -> None:
+                upload = asyncio.create_task(
+                    client.post(
+                        f"/api/data-plane/communities/{server.community_id.value}"
+                        f"/servers/{server.id.value}/snapshot",
+                        content=_tar(b"packed-by-a"),
+                        headers={
+                            "Authorization": f"Bearer {_CREDENTIAL}",
+                            "X-Worker-Id": str(_WORKER_A.value),
+                            "X-Working-Set-Base-Generation": "1",
+                        },
+                    )
+                )
+                posted.append(upload)
+                body = asyncio.create_task(staged.wait())
+                await asyncio.wait({upload, body}, return_when=asyncio.FIRST_COMPLETED)
+                body.cancel()
+
+            cp.arrives = _arrives
+            error: BaseException | None = None
+            try:
+                await start()
+            except Exception as exc:
+                error = exc
+            release.set()
+            [upload] = posted
+            return await upload, error
+    finally:
+        storage.write_snapshot = real_write_snapshot  # type: ignore[method-assign]
+
+
+# 7 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(7 * 10 + 30)
+@pytest.mark.parametrize("entry", ["start", "redispatch_start"])
+@_BACKENDS
+def test_an_upload_that_arrives_after_the_wait_is_refused_and_the_store_kept(
+    tmp_path: Path,
+    shared_app: FastAPI,
+    make_storage: Callable[[Path], Storage],
+    entry: str,
+) -> None:
+    # Issue #4024. A's upload reaches the data plane only once the start's wait
+    # for A's uploads has passed, as the start sends A its hydrate. Committed
+    # after the hydrate's pull, it would publish a world the run on A does not
+    # contain. A start that places the server on A has marked the row
+    # ``awaiting_hydrate``, and so has a re-sent start that hydrates A, so the
+    # data plane refuses the upload before it stages anything: the hydrate
+    # serves the store's generation, and the store keeps it.
+    storage = make_storage(tmp_path)
+    resend = entry == "redispatch_start"
+    server = _server(
+        desired=DesiredState.RUNNING if resend else DesiredState.STOPPED,
+        observed=ObservedState.UNKNOWN if resend else ObservedState.STOPPED,
+        on_a=resend,
+    )
+    asyncio.run(_publish(storage, server, b"a-g1"))
+    uow = FakeUnitOfWork()
+    uow.servers.seed(server)
+    cp = _UploadAtTheHydrate(
+        storage, place_to=_WORKER_A, held={(_WORKER_A, server.id): 0}
+    )
+    uploads = _WatchedUploads()
+    use_case = _start(uow, cp, storage, uploads)
+    start = use_case.redispatch_start if resend else use_case
+
+    resp, error = asyncio.run(
+        _upload_after_the_wait(
+            shared_app,
+            storage,
+            uow,
+            uploads,
+            cp,
+            server,
+            start=lambda: start(community_id=server.community_id, server_id=server.id),
+        )
+    )
+
+    assert error is None
+    assert _kinds(cp) == ["hydrate", "start"]
+    assert (resp.status_code, cp.served, asyncio.run(_live(storage, server))) == (
+        409,
+        [1],
+        (1, b"a-g1"),
+    )
+    assert resp.json()["reason"] == "publisher_awaiting_hydrate"
+
+
+async def _post_snapshot(
+    app: FastAPI,
+    storage: Storage,
+    uow: FakeUnitOfWork,
+    uploads: SnapshotUploads,
+    server: Server,
+) -> Response:
+    """Post Worker A's snapshot of ``server`` at base 1; return the answer."""
+
+    _bind(app, storage, uow, uploads)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        return await client.post(
+            f"/api/data-plane/communities/{server.community_id.value}"
+            f"/servers/{server.id.value}/snapshot",
+            content=_tar(b"packed-by-a"),
+            headers={
+                "Authorization": f"Bearer {_CREDENTIAL}",
+                "X-Worker-Id": str(_WORKER_A.value),
+                "X-Working-Set-Base-Generation": "1",
+            },
+        )
+
+
+# 14 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(14 * 10 + 30)
+@pytest.mark.parametrize(
+    ("hydrate", "status", "live"),
+    [
+        (
+            CommandOutcome(status=CommandStatus.BUSY, message="in flight"),
+            204,
+            (2, b"packed-by-a"),
+        ),
+        (
+            CommandOutcome(status=CommandStatus.TRANSFER_FAILED, message="unpack"),
+            409,
+            (1, b"a-g1"),
+        ),
+    ],
+    ids=["refused-before-the-pull", "transfer-failed"],
+)
+@_BACKENDS
+def test_a_resent_start_whose_hydrate_failed_marks_the_row_by_what_it_left(
+    tmp_path: Path,
+    shared_app: FastAPI,
+    make_storage: Callable[[Path], Storage],
+    hydrate: CommandOutcome,
+    status: int,
+    live: tuple[int, bytes],
+) -> None:
+    # Issue #4024. A re-sent start marked the row before it hydrated A. Refused
+    # before the pull, the hydrate left A's working set as it was, so the start
+    # put the mark back, and A's next snapshot lands. A failed transfer may have
+    # swapped the new tree in, so the mark stays, and the snapshot is refused
+    # until a hydrate lands.
+    storage = make_storage(tmp_path)
+    server = _server(
+        desired=DesiredState.RUNNING, observed=ObservedState.UNKNOWN, on_a=True
+    )
+    asyncio.run(_publish(storage, server, b"a-g1"))
+    uow = FakeUnitOfWork()
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        held={(_WORKER_A, server.id): 0}, outcomes={"hydrate": hydrate}
+    )
+    uploads = _WatchedUploads()
+
+    with pytest.raises(CommandDispatchError):
+        asyncio.run(
+            _start(uow, cp, storage, uploads).redispatch_start(
+                community_id=server.community_id, server_id=server.id
+            )
+        )
+    resp = asyncio.run(_post_snapshot(shared_app, storage, uow, uploads, server))
+
+    assert _kinds(cp) == ["hydrate"]
+    assert (resp.status_code, asyncio.run(_live(storage, server))) == (status, live)
+
+
 # 16 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
 @pytest.mark.timeout(16 * 10 + 30)
 @_BACKENDS

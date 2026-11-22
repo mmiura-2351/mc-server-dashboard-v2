@@ -52,6 +52,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ResourcePackInUseError,
     ResourcePackNotFoundError,
     ResourcePackStorageUnavailableError,
+    ServerAssignedError,
     ServerBusyError,
     ServerFileStorageUnavailableError,
     ServerFilesUnsettledError,
@@ -1427,6 +1428,26 @@ class TestUnassignEndpoint:
         with TestClient(app) as client:  # type: ignore[arg-type]
             resp = client.delete(_ASSIGN_PATH)
         assert resp.status_code == 409
+
+
+@pytest.mark.parametrize("route", ["assign", "unassign"])
+def test_a_server_a_worker_still_holds_is_409_server_assigned(route: str) -> None:
+    # At rest, but the stop still holds its Worker for the final snapshot, which
+    # would publish over the server.properties rewrite (issue #3998).
+    uc = _FakeUseCase(error=ServerAssignedError("nope"))
+    if route == "assign":
+        app = _assignment_app(assign=uc)
+    else:
+        app = _assignment_app(unassign=uc)
+    with TestClient(app) as client:  # type: ignore[arg-type]
+        if route == "assign":
+            resp = client.post(
+                _ASSIGN_PATH, json={"resource_pack_id": str(uuid.uuid4())}
+            )
+        else:
+            resp = client.delete(_ASSIGN_PATH)
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "server_assigned"
 
 
 class TestGetAssignmentEndpoint:

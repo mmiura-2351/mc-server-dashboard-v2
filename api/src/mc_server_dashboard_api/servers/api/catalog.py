@@ -28,6 +28,7 @@ from mc_server_dashboard_api.dependencies import (
 from mc_server_dashboard_api.http_body_limit import RequestBodyLimitRoute
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.servers.api.plugins import PluginResponse
+from mc_server_dashboard_api.servers.api.server_assigned import server_assigned
 from mc_server_dashboard_api.servers.application.catalog import (
     GetCatalogProject,
     InstallFromCatalog,
@@ -56,6 +57,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PluginCacheStorageUnavailableError,
     PortAlreadyTakenError,
     PortRangeExhaustedError,
+    ServerAssignedError,
     ServerBusyError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
@@ -358,6 +360,16 @@ async def install_from_catalog(
             server_id,
         )
         raise _conflict("server_unsettled") from exc
+    except ServerAssignedError as exc:
+        # At rest, but a stop still holds its Worker for the final snapshot,
+        # which would publish over the install (issue #3998).
+        await _record_failure(
+            recorder,
+            authorized,
+            community_id,
+            server_id,
+        )
+        raise server_assigned() from exc
     except ServerBusyError as exc:
         await _record_failure(
             recorder,

@@ -404,7 +404,7 @@ def _is_settled(server: Server) -> bool:
             server.observed_state is ObservedState.RUNNING
             and server.assigned_worker_id is not None
         )
-    return server.assigned_worker_id is None and server.is_at_rest()
+    return server.is_quiescent()
 
 
 # Cap on how many per-server actions dispatch concurrently in one tick (#871).

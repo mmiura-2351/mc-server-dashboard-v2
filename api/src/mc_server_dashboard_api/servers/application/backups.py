@@ -5,8 +5,12 @@ assume an authorized member and only do the backup work. Create branches on serv
 state per the 6.9 table:
 
 - **at rest** (``server.is_at_rest()``: desired=stopped, observed in
-  {stopped, unknown}) -> archive directly from the authoritative Storage copy,
-  through the :class:`BackupArchiveStore` seam (FR-BAK-2).
+  {stopped, unknown, crashed}) -> archive directly from the authoritative
+  Storage copy, through the :class:`BackupArchiveStore` seam (FR-BAK-2). The
+  server must also be released (``server.is_quiescent()``): while a stop still
+  holds its Worker, ``current`` lacks the final snapshot in flight, so the create
+  is refused 409 ``server_assigned`` (issue #3998). Restore is refused the same
+  way, since that snapshot would publish over it.
 - **running** (desired=running, observed=running, a worker assigned) ->
   on-demand snapshot (the :class:`SnapshotServer` hook, PR #114) whose worker
   path quiesces safely (save-off + non-blocking save-all + settle-wait), so the
@@ -222,9 +226,11 @@ class CreateBackup:
                 await self.snapshot_server(
                     community_id=server.community_id, server_id=server.id
                 )
-            elif not server.is_at_rest():
+            elif not server.is_quiescent():
                 # starting / stopping / restarting / crashed / mismatch: no source.
-                raise BackupUnsettledError(str(server_id.value))
+                # At rest but still held for the final snapshot: ``current`` lacks
+                # that snapshot, so archiving it now would miss it (issue #3998).
+                raise server.not_quiescent_error(BackupUnsettledError)
 
             # Commit the metadata row BEFORE writing the archive (#1707): a crash
             # after the row commit but before the archive write leaves a dangling
@@ -476,8 +482,8 @@ class RestoreBackup:
                     if backup.health is BackupHealth.UNREADABLE:
                         raise BackupUnreadableError(str(backup_id.value))
                     storage_ref = backup.storage_ref
-                if not server.is_at_rest():
-                    raise ServerNotStoppedError(str(server_id.value))
+                if not server.is_quiescent():
+                    raise server.not_quiescent_error(ServerNotStoppedError)
                 try:
                     # The store confirms the lock under its own per-server lock,
                     # after the slow staging and right before it publishes (issue

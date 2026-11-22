@@ -5,9 +5,11 @@ assume an authorized member and only do the file work. Reads and edits branch on
 server state per the 6.9 table:
 
 - **at rest** (``server.is_at_rest()``: desired=stopped, observed in
-  {stopped, unknown}) → the authoritative Storage copy, through the
+  {stopped, unknown, crashed}) → the authoritative Storage copy, through the
   :class:`FileStore` seam. Edits are versioned (FR-FILE-3) and history/rollback
-  act here.
+  act here. An edit also needs the server released (``server.is_quiescent()``):
+  while a stop still holds its Worker for the final snapshot, that snapshot would
+  publish over the edit, so it is refused 409 ``server_assigned`` (issue #3998).
 - **running** (desired=running, observed=running, a worker assigned) → the
   Worker's live working set, through the :class:`ControlPlane` seam's
   ReadFile/EditFile (ARCHITECTURE.md Section 7.2). A running edit first snapshots
@@ -710,7 +712,7 @@ class WriteFile:
 
             _guard_content_dir(server.server_type, rel_path)
 
-            if server.is_at_rest():
+            if server.is_quiescent():
                 await self._guard_platform_managed_keys(
                     community_id=community_id,
                     server_id=server_id,
@@ -757,8 +759,9 @@ class WriteFile:
             # a final snapshot of the crashed working set, which would CLOBBER any
             # authoritative edit made while crashed. Requiring stop-first guarantees
             # that final snapshot lands before any at-rest edit. (A smarter crashed-edit
-            # flow is possible post-M1.)
-            raise ServerFilesUnsettledError(str(server_id.value))
+            # flow is possible post-M1.) A server at rest that the stop still holds for
+            # that final snapshot lands here too, as ``server_assigned`` (#3998).
+            raise server.not_quiescent_error(ServerFilesUnsettledError)
 
     async def _guard_platform_managed_keys(
         self,
@@ -939,8 +942,8 @@ class RollbackFile:
         async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
-            if not server.is_at_rest():
-                raise ServerNotStoppedError(str(server_id.value))
+            if not server.is_quiescent():
+                raise server.not_quiescent_error(ServerNotStoppedError)
             if _is_root_server_properties(rel_path):
                 # Republishing a retained version is a write of those bytes, so a
                 # version predating a re-port or an RCON rotation would reinstate
@@ -1221,8 +1224,8 @@ class UploadFile:
         async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
-            if not server.is_at_rest():
-                raise ServerFilesUnsettledError(str(server_id.value))
+            if not server.is_quiescent():
+                raise server.not_quiescent_error(ServerFilesUnsettledError)
 
             _guard_content_dir(server.server_type, _join(dir_path, filename))
 
@@ -1568,8 +1571,8 @@ class DeleteFile:
         async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
-            if not server.is_at_rest():
-                raise ServerFilesUnsettledError(str(server_id.value))
+            if not server.is_quiescent():
+                raise server.not_quiescent_error(ServerFilesUnsettledError)
 
             _guard_content_dir(server.server_type, rel_path)
 
@@ -1647,8 +1650,8 @@ class MakeDir:
         async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
-            if not server.is_at_rest():
-                raise ServerFilesUnsettledError(str(server_id.value))
+            if not server.is_quiescent():
+                raise server.not_quiescent_error(ServerFilesUnsettledError)
             # The write relies on the lifecycle lock (issue #3927).
             await lock.ensure_held()
             await self.file_store.make_dir(
@@ -1751,8 +1754,8 @@ class RenameFile:
         async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
-            if not server.is_at_rest():
-                raise ServerFilesUnsettledError(str(server_id.value))
+            if not server.is_quiescent():
+                raise server.not_quiescent_error(ServerFilesUnsettledError)
 
             _guard_content_dir(server.server_type, from_path)
             _guard_content_dir(server.server_type, to_path)

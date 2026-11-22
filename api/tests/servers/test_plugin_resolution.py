@@ -33,6 +33,7 @@ from mc_server_dashboard_api.servers.domain.catalog_provider import (
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
+    ServerAssignedError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
 )
@@ -49,6 +50,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerId,
     ServerName,
     ServerType,
+    WorkerId,
 )
 from tests.servers.fakes import (
     FakeCatalogProvider,
@@ -1357,6 +1359,44 @@ class TestApplyPluginResolution:
                 server_id=server.id,
                 applied_by=uuid.uuid4(),
             )
+
+    @pytest.mark.parametrize(
+        "observed",
+        [ObservedState.STOPPED, ObservedState.CRASHED, ObservedState.UNKNOWN],
+    )
+    async def test_apply_refuses_a_server_a_worker_still_holds(
+        self, observed: ObservedState
+    ) -> None:
+        # The install it applies through refuses a server at rest that a stop
+        # still holds for its final snapshot (issue #3998); the refusal aborts the
+        # whole apply rather than landing in ``failed``.
+        server = _server()
+        server.observed_state = observed
+        server.assigned_worker_id = WorkerId(uuid.uuid4())
+        uow = FakeUnitOfWork()
+        a = _plugin(
+            server_id=server.id,
+            mod_identifier="mod-a",
+            dependencies=[_dep("fabric-api", project_id="FABRICAPI")],
+        )
+        _seed(uow, server, a)
+        catalog = FakeCatalogProvider()
+        jar = _fabric_jar(mod_id="fabric-api")
+        version = _version(file_content=jar)
+        catalog.seed_project(_project(), versions=[version])
+        _seed_downloadable(catalog, version, jar)
+        file_store = FakeFileStore()
+        install = _install_uc(uow, catalog, file_store, FakePluginCacheStore())
+
+        with pytest.raises(ServerAssignedError):
+            await ApplyPluginResolution(uow, catalog, install)(
+                community_id=_COMMUNITY,
+                server_id=server.id,
+                applied_by=uuid.uuid4(),
+            )
+
+        assert file_store.writes == []
+        assert list(uow.plugins.by_id) == [a.id]
 
     async def test_apply_per_dep_failure_isolated(self) -> None:
         # Two needs_import deps; one has no downloadable bytes (install fails),

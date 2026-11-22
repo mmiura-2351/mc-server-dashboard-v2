@@ -90,6 +90,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PluginNotFoundError,
     PortAlreadyTakenError,
     PortRangeExhaustedError,
+    ServerAssignedError,
     ServerBusyError,
     ServerFileStorageUnavailableError,
     ServerFilesUnsettledError,
@@ -705,6 +706,62 @@ def test_disable_plugin_unsettled_is_409() -> None:
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/disable"))
     assert resp.status_code == 409
     assert resp.json()["reason"] == "server_unsettled"
+
+
+@pytest.mark.parametrize(
+    ("route", "operation"),
+    [
+        ("install", ops.PLUGIN_INSTALL),
+        ("resolve-apply", ops.PLUGIN_RESOLVE),
+        ("update", ops.PLUGIN_UPDATE),
+        ("remove", ops.PLUGIN_REMOVE),
+        ("enable", ops.PLUGIN_ENABLE),
+        ("disable", ops.PLUGIN_DISABLE),
+        ("side", ops.PLUGIN_SET_SIDE),
+    ],
+)
+def test_a_server_a_worker_still_holds_is_409_server_assigned_and_denied(
+    route: str, operation: str
+) -> None:
+    # At rest, but the stop still holds its Worker for the final snapshot, which
+    # would publish over the plugin change (issue #3998).
+    recorder = RecordingAuditRecorder()
+    error = ServerAssignedError("x")
+    fake = _FakeUseCase(error=error)
+    overrides: dict[str, dict[str, Any]] = {
+        "install": {"install": _FakeInstall(error=error)},
+        "resolve-apply": {"resolve_apply": fake},
+        "update": {"update": fake},
+        "remove": {"remove": fake},
+        "enable": {"toggle": fake},
+        "disable": {"toggle": fake},
+        "side": {"set_side": fake},
+    }
+    app = _app(member=True, allow=True, recorder=recorder, **overrides[route])
+    client = _client(app)
+    base = _url(uuid.uuid4(), uuid.uuid4())
+    pid = uuid.uuid4()
+    if route == "install":
+        resp = client.post(
+            base,
+            data={"display_name": "Test"},
+            files={"file": ("test.jar", b"jar-bytes", "application/java-archive")},
+        )
+    elif route == "resolve-apply":
+        resp = client.post(f"{base}/resolve/apply")
+    elif route == "update":
+        resp = client.post(f"{base}/{pid}/update", json={"version_id": "v1"})
+    elif route == "remove":
+        resp = client.delete(f"{base}/{pid}")
+    elif route == "side":
+        resp = client.post(f"{base}/{pid}/side", json={"side": "client"})
+    else:
+        resp = client.post(f"{base}/{pid}/{route}")
+
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "server_assigned"
+    assert [e.operation for e in recorder.events] == [operation]
+    assert recorder.events[0].outcome is Outcome.DENIED
 
 
 # --- check updates (batch) ------------------------------------------------

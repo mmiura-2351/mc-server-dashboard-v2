@@ -676,8 +676,10 @@ class UpdateServer:
                     and game_port is None
                     and (config is None or changed_keys <= _SAFE_CONFIG_KEYS)
                 )
-                if not safe_only and not server.is_at_rest():
-                    raise ServerNotStoppedError(str(server_id.value))
+                # The gated edits rewrite server.properties, which a final
+                # snapshot still in flight would publish over (issue #3998).
+                if not safe_only and not server.is_quiescent():
+                    raise server.not_quiescent_error(ServerNotStoppedError)
                 if new_name is not None and new_name != server.name:
                     clash = await self.uow.servers.get_by_community_and_name(
                         community_id, new_name

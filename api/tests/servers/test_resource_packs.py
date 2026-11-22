@@ -39,6 +39,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ResourcePackInUseError,
     ResourcePackNotFoundError,
     ResourcePackStorageUnavailableError,
+    ServerAssignedError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
     WorkingSetSeedFailedError,
@@ -56,6 +57,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerId,
     ServerName,
     ServerType,
+    WorkerId,
 )
 from tests.servers.executor_starvation import (
     IN_FLIGHT,
@@ -1210,6 +1212,64 @@ class TestUnassignResourcePack:
         uc = UnassignResourcePack(uow=uow, file_store=file_store)
         with pytest.raises(ServerFilesUnsettledError):
             await uc(community_id=_COMMUNITY_ID, server_id=server.id)
+
+
+@pytest.mark.parametrize(
+    "observed", [ObservedState.STOPPED, ObservedState.CRASHED, ObservedState.UNKNOWN]
+)
+@pytest.mark.parametrize("door", ["assign", "unassign"])
+async def test_a_resource_pack_door_refuses_a_server_a_worker_still_holds(
+    door: str, observed: ObservedState
+) -> None:
+    # A stop holds its Worker until the final snapshot settles, and that snapshot
+    # publishes over the store (issue #3998): the pack pointer written into
+    # server.properties in the window would be overwritten, leaving the
+    # assignment row disagreeing with the file.
+    server = _at_rest_server()
+    server.observed_state = observed
+    server.assigned_worker_id = WorkerId(uuid.uuid4())
+    servers = FakeServerRepository()
+    servers.seed(server)
+    uow = FakeUnitOfWork(servers=servers)
+    pack = _seed_pack(uow)
+    assignment = ResourcePackAssignment(
+        server_id=server.id,
+        resource_pack_id=pack.id,
+        require_resource_pack=False,
+        resource_pack_prompt=None,
+        assigned_by=uuid.uuid4(),
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    if door == "unassign":
+        await uow.resource_packs.add_assignment(assignment)
+    file_store = FakeFileStore()
+    file_store.files["server.properties"] = b"motd=hi\n"
+    commits = uow.commits
+
+    with pytest.raises(ServerAssignedError):
+        if door == "assign":
+            await AssignResourcePack(
+                uow=uow, file_store=file_store, clock=FakeClock(_NOW)
+            )(
+                community_id=_COMMUNITY_ID,
+                server_id=server.id,
+                resource_pack_id=pack.id,
+                require_resource_pack=False,
+                resource_pack_prompt=None,
+                assigned_by=uuid.uuid4(),
+                public_base_url=_BASE_URL,
+            )
+        else:
+            await UnassignResourcePack(uow=uow, file_store=file_store)(
+                community_id=_COMMUNITY_ID, server_id=server.id
+            )
+
+    assert file_store.files == {"server.properties": b"motd=hi\n"}
+    assert file_store.writes == []
+    assert uow.commits == commits
+    expected = {server.id: assignment} if door == "unassign" else {}
+    assert uow.resource_packs.assignments == expected
 
 
 class TestGetResourcePackAssignment:
