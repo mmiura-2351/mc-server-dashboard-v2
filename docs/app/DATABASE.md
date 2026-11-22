@@ -897,11 +897,16 @@ DB cascade.
 
 Creating a backup is the same two-store write in the other order (issue #4086). A
 create or an upload writes the archive first and inserts the row, with its size,
-in one transaction once the archive exists. A failure after the archive write, a
-cancellation included, deletes the archive again, best effort. So no row is
-recorded ahead of its archive. A crash, or a delete that fails, leaves an archive
-with no row instead: no listing shows it, and the server's delete prunes it
-(STORAGE.md Section 3.3).
+in one transaction once the archive exists. The INSERT is sent in a savepoint
+before the COMMIT, so a refused INSERT raises before any COMMIT is sent. A failure
+after the archive write and before the COMMIT is sent, a cancellation included,
+deletes the archive again, best effort. So no row is recorded ahead of its
+archive. Once the COMMIT is sent, its outcome is unknown: a COMMIT can apply and
+still raise, as when its answer is lost with the connection or the caller is
+cancelled while awaiting it. The archive is then kept and a WARNING logged, so a
+row that did land keeps its archive. A crash, a delete that fails, or an
+unconfirmed COMMIT that did not apply leaves an archive with no row instead: no
+listing shows it, and the server's delete prunes it (STORAGE.md Section 3.3).
 
 Backups are downloadable and uploadable: download streams the
 archive in its native `tar.gz` form (no recompression); upload validates the

@@ -439,11 +439,14 @@ depend on a Worker.
 **Archive before row.** A backup's create and its upload write the archive
 first, under a `BackupKey` the application generated, and record the backup's DB
 row only once it exists, with its size (issue #4086). A failure after the archive
-write, a cancellation included, deletes the archive again through
-`delete_backup`, best effort: a delete that fails is logged as a `WARNING`. So no
-row is recorded ahead of its archive. What a crash, or a delete that failed,
-leaves is an archive with no row: no listing shows it, and `DeleteServer` deletes
-it with the server's other non-retained archives (Section 2.1).
+write and before the row's COMMIT is sent, a cancellation included, deletes the
+archive again through `delete_backup`, best effort: a delete that fails is logged
+as a `WARNING`. So no row is recorded ahead of its archive. Once the COMMIT is
+sent, a failure keeps the archive and is logged as a `WARNING`: a COMMIT can apply
+and still raise, so the row may stand (DATABASE.md Section 8). What a crash, a
+delete that failed, or an unconfirmed COMMIT that did not apply leaves is an
+archive with no row: no listing shows it, and `DeleteServer` deletes it with the
+server's other non-retained archives (Section 2.1).
 
 **One archive member rule.** Both backends judge a backup archive's members by
 one rule, shared code in both adapters (`refuse_unrestorable_member`), wherever
