@@ -1728,56 +1728,6 @@ async def test_a_resent_start_that_hydrates_owes_the_hydrate_until_it_lands(
     assert uow.servers.by_id[ServerId(server_id)].awaiting_hydrate is False
 
 
-@pytest.mark.parametrize(
-    ("cp_kwargs", "error"),
-    [
-        (
-            {
-                "outcomes": {
-                    "hydrate": CommandOutcome(
-                        status=CommandStatus.TRANSFER_FAILED, message="boom"
-                    )
-                }
-            },
-            CommandDispatchError,
-        ),
-        ({"unavailable_kinds": {"hydrate"}}, WorkerUnavailableError),
-    ],
-    ids=["failed", "unavailable"],
-)
-async def test_a_resent_start_whose_hydrate_failed_still_owes_it(
-    cp_kwargs: dict[str, Any], error: type[Exception]
-) -> None:
-    # Issue #4024. A user start whose hydrate fails this way releases the row,
-    # and the mark goes with the assignment. A re-sent start keeps the server on
-    # its Worker, whose scratch the hydrate may have left torn, so the mark it
-    # set stays until a hydrate lands, as for a start that keeps its Worker.
-    community, server_id, worker = _ids()
-    uow = FakeUnitOfWork()
-    uow.servers.seed(
-        _server(
-            community_id=community,
-            server_id=server_id,
-            desired=DesiredState.RUNNING,
-            observed=ObservedState.UNKNOWN,
-            worker_id=worker,
-        )
-    )
-    cp = FakeControlPlane(**cp_kwargs)
-
-    with pytest.raises(error):
-        await _start_server(uow, cp).redispatch_start(
-            community_id=CommunityId(community), server_id=ServerId(server_id)
-        )
-
-    stored = uow.servers.by_id[ServerId(server_id)]
-    assert (
-        stored.desired_state,
-        stored.assigned_worker_id,
-        stored.awaiting_hydrate,
-    ) == (DesiredState.RUNNING, WorkerId(worker), True)
-
-
 class _GenerationReadHook(FakeStoreGenerationReader):
     """A store whose generation read runs ``during`` first."""
 

@@ -640,9 +640,10 @@ def get_resolved_jar_lookup(request: Request) -> ResolvedJarLookup:
 class WorkerAssignment:
     """A server's assigned Worker, as the data plane reads it (issue #1703).
 
-    ``awaiting_hydrate`` is the row's mark that this Worker has not hydrated the
-    server under the assignment yet (issue #3890): its scratch may be older than
-    the store.
+    ``awaiting_hydrate`` is the row's mark that this Worker is not known to hold
+    the store's working set: it has not hydrated the server under the assignment
+    yet (issue #3890), or a re-sent start's hydrate of it has not landed (issue
+    #4024). Its scratch may be older than the store.
     """
 
     worker_id: str

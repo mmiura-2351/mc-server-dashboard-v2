@@ -472,7 +472,7 @@
     {"kind": "ServerCommand", "precondition": "untracked_container", "code": "unaffected", "why": "the manager asks the driver's LeftoverGuard only before it touches a stopped server's working set (hydrate, stopped-id snapshot); a console command reads the tracked instances only, so it answers as under instance_stopped"},
     {"kind": "ServerCommand", "precondition": "backend_unavailable", "code": "unaffected", "why": "ServerCommand never invokes driver.Start, so a start classification cannot arise for it"},
 
-    {"kind": "HydrateTrigger", "precondition": "instance_running", "code": "invalid_state", "api": ["lifecycle.py:StartServer.__call__", "lifecycle.py:StartServer.place_and_start", "lifecycle.py:StartServer.redispatch_start"]},
+    {"kind": "HydrateTrigger", "precondition": "instance_running", "code": "invalid_state", "api": ["lifecycle.py:StartServer.__call__", "lifecycle.py:StartServer.place_and_start", "lifecycle.py:StartServer.redispatch_start", "lifecycle.py:_HYDRATE_REFUSALS_BEFORE_THE_SWAP"]},
     {"kind": "HydrateTrigger", "precondition": "running_working_set_absent", "code": "unaffected", "why": "reserve()'s running refusal precedes any working-set inspection, so a hydrate over a running instance is decided before it looks at the scratch: the {HydrateTrigger, instance_running} row is this cell's answer"},
     {"kind": "HydrateTrigger", "precondition": "instance_stopped", "code": "ok"},
     {"kind": "HydrateTrigger", "precondition": "working_set_absent", "code": "ok", "why": "hydrating is what CREATES the working set, so an absent one is the normal case, not a refusal"},

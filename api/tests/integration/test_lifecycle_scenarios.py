@@ -2085,11 +2085,7 @@ async def test_dead_failed_stop_orphan_window_ends_in_snapshot_and_release(
             server_id=str(server_id.value), worker_id=str(worker), state=state
         )
 
-    # The Worker holds the working set its instance ran on, so the replay skips
-    # the hydrate and is refused on the start leg. A replay that hydrated would
-    # mark the row, and the stop below would then release it without a snapshot,
-    # as after a user start whose hydrate was refused (issue #4024).
-    refusing = _orphan_holding_worker(worker, server_id, holds_working_set=True)
+    refusing = _orphan_holding_worker(worker, server_id)
     await _reconciler_tick(engine, refusing, clock)
     during = await _load(engine, server_id)
     assert during is not None

@@ -868,7 +868,16 @@ Notes:
   Worker, before it waits for the Worker's uploads (next note): the Worker does
   not hold the store's working set either (issue #4024). It marks the server
   only while the start's intent is still the server's, so it never marks again
-  a newer placement on the same Worker whose hydrate has landed. While the mark
+  a newer placement on the same Worker whose hydrate has landed. When its
+  hydrate cannot have replaced the Worker's working set, the re-sent start puts
+  the mark back as it found it: the Worker refused the hydrate before the pull
+  (`BUSY`, `UNAVAILABLE` or `EXPIRED`, or `INVALID_STATE`, which clears the mark
+  anyway, below), or the hydrate was never sent because the wait ran out or the
+  start's intent was withdrawn. A hydrate that failed or got no answer may have
+  swapped the new tree in, as the Worker can report a failed transfer after its
+  swap, so the mark stays until a hydrate lands. The start puts the mark back
+  only while it is still its own: while the row is as the start marked it, or
+  stopped on that Worker by the one stop that withdrew the start. While the mark
   is set:
   - the periodic snapshot skips the server but keeps it due, so the first tick
     after the mark clears takes it;

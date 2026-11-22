@@ -503,8 +503,10 @@ async def publish_snapshot(
     fence is permissive when no worker is assigned (``None``): the held-assignment
     final-snapshot window and the post-clear no-replacement case must still land.
 
-    A placement whose Worker has not hydrated the server yet (``awaiting_hydrate``,
-    issue #3890) accepts no publish from that Worker at all, before the upload (409
+    A placement whose Worker is not known to hold the store's working set
+    (``awaiting_hydrate``: it has not hydrated the server under this assignment,
+    issue #3890, or a re-sent start's hydrate of it has not landed, issue #4024)
+    accepts no publish from that Worker at all, before the upload (409
     ``publisher_awaiting_hydrate``): its scratch may be a leftover older than the
     store, whatever base it declares. No base (a scratch whose generation marker
     reads 0), a stale base, one whose ``current`` it published itself and the
@@ -553,8 +555,8 @@ async def publish_snapshot(
             and (publisher is None or publisher == assigned.worker_id)
         ):
             _logger.warning(
-                "snapshot publish refused: worker %s has not hydrated server %s "
-                "under its assignment (publisher %s)",
+                "snapshot publish refused: worker %s is not known to hold the "
+                "store's working set of server %s (publisher %s)",
                 assigned.worker_id,
                 server_id,
                 publisher,

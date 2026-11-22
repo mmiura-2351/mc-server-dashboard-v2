@@ -274,7 +274,9 @@ class _CommitLandsThenRaises(FakeUnitOfWork):
     """A unit of work whose ``at``-th commit lands, then raises ``error``.
 
     That is an ambiguous commit: a lost response raises a database error, and a
-    client disconnect cancels the request task at the same await.
+    task cancelled at the same await raises ``CancelledError``. A client
+    disconnect does not cancel it on the shipped server stack unless the handler
+    reads the request body (issue #3950).
     """
 
     def __init__(
@@ -639,9 +641,9 @@ async def test_a_re_sent_start_sees_a_stop_that_was_waiting_on_its_write() -> No
     # the stop then commits and is sent while the re-send re-reads. A bump made
     # before the write would precede the re-send's read of the counter, and the
     # start would follow the stop out. The bump follows the commit, so it is seen.
-    # The re-send marked the row before its hydrate and does not clear the mark
-    # of a row no longer its own, so the release takes no snapshot, as after a
-    # user start (issue #4024).
+    # The re-send marked the row before its hydrate, which landed, so the mark
+    # stays: the re-send does not clear the mark of a row no longer its own, and
+    # the release takes no snapshot, as after a user start (issue #4024).
     world = _World(desired=DesiredState.RUNNING, assigned=True)
     write = asyncio.Event()
     world.repo.pause_next_flip = write
