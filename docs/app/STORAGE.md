@@ -996,10 +996,12 @@ reads the backup rows. For each server row:
    The grace covers a writer that lost its lock (DATABASE.md Section 7) and goes
    on writing, and a store that stamps a multipart object with the time its
    upload began. So it must be longer than any backup takes to write.
-4. For a server with an archive left, take its lifecycle lock, read its rows
-   again under it, and delete each archive they still do not name, each after a
-   check that the lock is still held. A server whose lock stays busy past the
-   wait budget is skipped until the next pass. A delete that fails ends that
+4. For a server with an archive left, take its lifecycle lock and read the
+   server's row and its backup rows again under it. A server whose row is gone
+   was deleted during the pass and is left alone: `DeleteServer` commits under
+   the same lock. Otherwise delete each archive the rows still do not name, each
+   after a check that the lock is still held. A server whose lock stays busy past
+   the wait budget is skipped until the next pass. A delete that fails ends that
    server's pass with a WARNING.
 
 Each reclaimed archive is logged at INFO with its server, its ref and its age.

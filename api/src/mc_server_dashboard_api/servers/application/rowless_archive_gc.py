@@ -21,9 +21,11 @@ therefore be longer than any backup takes.
 
 **Lock and re-read.** The rows are read after the archives are listed. For a
 server with a leftover past the grace, the pass takes the lifecycle lock, reads
-the rows again under it, and deletes only what they still do not name, each
-delete after a check that the lock is still held. A server whose lock stays busy
-past its wait budget is skipped until the next pass.
+the server and its rows again under it, and deletes only what the rows still do
+not name, each delete after a check that the lock is still held. A server
+deleted since the pass listed the servers is left alone: ``DeleteServer``
+commits under the same lock. A server whose lock stays busy past its wait budget
+is skipped until the next pass.
 
 **Ownership.** A store another database also uses holds archives no row of this
 database names. The pass therefore asks the owner marker first and is refused,
@@ -48,7 +50,6 @@ from mc_server_dashboard_api.servers.domain.errors import ServerBusyError
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import LifecycleLock
 from mc_server_dashboard_api.servers.domain.store_ownership import StoreOwnership
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
-from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 
 _LOG = logging.getLogger(__name__)
 
@@ -89,7 +90,9 @@ class ReclaimRowlessBackupArchives:
                 exc_info=True,
             )
             return
-        named = await self._named(server.id)
+        async with self.uow:
+            rows = await self.uow.backups.list_for_server(server.id)
+        named = {row.storage_ref for row in rows}
         now = self.clock.now()
         leftovers = [
             archive
@@ -101,8 +104,16 @@ class ReclaimRowlessBackupArchives:
             return
         try:
             async with self.lifecycle_lock.hold(server.id) as lock:
-                # A row committed since the read above names its archive now.
-                named = await self._named(server.id)
+                # A row committed since the read above names its archive now. A
+                # server deleted since the pass listed the servers has no rows
+                # left, and DeleteServer keeps one of its archives on purpose
+                # (issue #4165). It commits under this lock, so a row read here
+                # is a live server's.
+                async with self.uow:
+                    if await self.uow.servers.get_by_id(server.id) is None:
+                        return
+                    rows = await self.uow.backups.list_for_server(server.id)
+                named = {row.storage_ref for row in rows}
                 for archive in leftovers:
                     if archive.storage_ref in named:
                         continue
@@ -138,8 +149,3 @@ class ReclaimRowlessBackupArchives:
                 "(another lifecycle operation holds it); the next pass retries",
                 server.id.value,
             )
-
-    async def _named(self, server_id: ServerId) -> set[str]:
-        async with self.uow:
-            rows = await self.uow.backups.list_for_server(server_id)
-        return {row.storage_ref for row in rows}

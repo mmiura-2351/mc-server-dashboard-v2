@@ -28,6 +28,7 @@ from mc_server_dashboard_api.servers.domain.backup import (
     BackupId,
     BackupSource,
 )
+from mc_server_dashboard_api.servers.domain.backup_store import StoredArchive
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupStorageUnavailableError,
@@ -238,6 +239,44 @@ async def test_rereads_the_rows_under_the_lock_before_deleting() -> None:
     lock.uow = env.uow
     env.archive(server, "named-meanwhile", age=_OLD)
     env.archive(server, "leftover", age=_OLD)
+
+    await env.reclaim()
+
+    assert env.deleted() == {"leftover"}
+
+
+class _DeletedDuringListing(FakeBackupArchiveStore):
+    """Deletes ``server``'s row, its backup rows cascading, while its archives
+    are listed: a ``DeleteServer`` that commits after the pass listed the
+    servers. ``DeleteServer`` keeps the newest archive with no row (STORAGE.md
+    Section 2.1)."""
+
+    def __init__(self, server: Server) -> None:
+        super().__init__()
+        self.server = server
+        self.uow: SessionTrackingUnitOfWork | None = None
+
+    async def list_archives(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> list[StoredArchive]:
+        assert self.uow is not None
+        if server_id == self.server.id:
+            del self.uow.servers.by_id[server_id]
+            for row in await self.uow.backups.list_for_server(server_id):
+                del self.uow.backups.by_id[row.id]
+        return await super().list_archives(
+            community_id=community_id, server_id=server_id
+        )
+
+
+async def test_keeps_the_archives_of_a_server_deleted_during_the_pass() -> None:
+    deleted, live = _server(), _server()
+    store = _DeletedDuringListing(deleted)
+    env = _Env([deleted, live], store=store)
+    store.uow = env.uow
+    env.archive(deleted, "kept-on-delete", age=_OLD)
+    env.row(deleted, "kept-on-delete")
+    env.archive(live, "leftover", age=_OLD)
 
     await env.reclaim()
 
