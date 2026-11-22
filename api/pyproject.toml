@@ -21,7 +21,7 @@ dependencies = [
     # 0.162.2 (2026-11-07) is the newest release outside the 7-day cooldown
     # (Section 3) as of this change; cap the next minor. 0.142.0+ ships the
     # native OpenTelemetry HTTP metrics the app records with (#3563).
-    "fastapi>=0.162.2,<0.163",          # 2026-11-07
+    "fastapi>=0.163.1,<0.164",          # 2026-11-07
     "uvicorn>=0.48.0,<0.55",            # 2026-05-24
     # Structured-concurrency primitives. Already in the tree through Starlette,
     # which cancels a streaming response through an anyio cancel scope when the
