@@ -2147,18 +2147,25 @@ _SKIPPED_MARK = (
 
 
 class _UnansweredMarkSink(_StalledRegistrationSink):
-    """A database that answers neither the registration's rebuild nor the
-    teardown's mark-unknown."""
+    """A database that refuses the registration, by failing its rebuild or not
+    answering it, and does not answer the teardown's mark-unknown."""
 
-    def __init__(self) -> None:
-        super().__init__(rebuild=True, lookup=False)
+    def __init__(self, *, refusal: str) -> None:
+        super().__init__(rebuild=refusal == "unanswered", lookup=False)
+        self._refusal = refusal
+
+    async def running_assignment_ids(self, *, worker_id: str) -> dict[str, int]:
+        if self._refusal == "failed":
+            raise RuntimeError("the rebuild failed")
+        return await super().running_assignment_ids(worker_id=worker_id)
 
     async def mark_worker_servers_unknown(self, *, worker_id: str) -> None:
         await asyncio.Event().wait()
 
 
+@pytest.mark.parametrize("refusal", ["unanswered", "failed"])
 async def test_a_refused_registrations_mark_unknown_is_skipped_at_the_deadline(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, refusal: str
 ) -> None:
     caplog.set_level(logging.INFO, logger=_GRPC_SERVER_LOGGER)
     monkeypatch.setattr(
@@ -2169,7 +2176,7 @@ async def test_a_refused_registrations_mark_unknown_is_skipped_at_the_deadline(
     h = _Harness(
         InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
         FakeClock(_T0),
-        state_sink=_UnansweredMarkSink(),
+        state_sink=_UnansweredMarkSink(refusal=refusal),
     )
     try:
         stub = await h.start()
