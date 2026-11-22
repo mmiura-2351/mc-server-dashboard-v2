@@ -499,14 +499,19 @@ waiting when its expiry runs out is answered `EXPIRED` and is never executed
 they arrive, except heartbeats, which it records as it reads them (Section 4.3).
 When handling a message fails because the database is unavailable, the API holds
 the message and retries it in place, and the messages behind it wait (issue
-#3614). A first attempt still running after 3 s is cancelled and held the same
-way (issue #4042). A database that hangs rather than refuses fails a statement
-only at `database.statement_timeout_seconds` (CONFIGURATION.md Section 5.2), and
-by then a busy log stream behind the message would have filled the queue and
-ended the session: the Worker drops a stream whose send stalls for 10 s. The
-retries back off from 0.5 s, doubling up to 10 s, with no time budget. A held
-`StatusChange` is stamped when its write lands, not when it arrived. The hold
-ends when the message is applied, or when the session ends:
+#3614). The hold also starts when a first attempt is still running after 3 s,
+and the API goes on awaiting that attempt (issue #4042): a database that hangs
+rather than refuses fails a statement only at `database.statement_timeout_seconds`
+(CONFIGURATION.md Section 5.2), or at up to twice that on a connection gone
+silent, and by then a busy log stream behind the message would have filled the
+queue and ended the session, since the Worker drops a stream whose send stalls
+for 10 s. Cancelling the attempt instead could abandon a commit that still
+lands, and its retry would find the row already written and announce nothing.
+If the attempt then succeeds, the hold ends; if it fails as an outage, the
+retries follow. Only the first attempt has the 3 s deadline. The retries back
+off from 0.5 s, doubling up to 10 s, with no time budget. A held `StatusChange`
+is stamped when its write lands, not when it arrived. The hold ends when the
+message is applied, or when the session ends:
 
 - When the Worker closes the stream, the held message gets one last attempt,
   and so does each message queued behind it. Any failure then drops the message.

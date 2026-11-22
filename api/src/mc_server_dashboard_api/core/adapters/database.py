@@ -65,7 +65,9 @@ class _DriverTimeoutPool(AsyncAdaptedQueuePool):
     ``handle_error``, which sees only the ping's driver errors (issue #4042).
     """
 
-    # Log as the pool it extends, under SQLAlchemy's own quiet namespace.
+    # Log as the pool it extends, under SQLAlchemy's own quiet namespace, rather
+    # than at INFO under this module's. ``_sqla_logger_namespace`` is private to
+    # SQLAlchemy; tests/core/test_create_engine_pool.py pins the name it gives.
     _sqla_logger_namespace = "sqlalchemy.pool.impl.AsyncAdaptedQueuePool"
 
     def connect(self) -> PoolProxiedConnection:
@@ -106,8 +108,10 @@ def create_engine(
     seconds (issue #4042). Either one omitted keeps asyncpg's own default: 60 s
     for a connect, no bound for a statement. Both are the driver's, not the
     server's ``statement_timeout``, so they also fail a connection that went
-    silent, on which no server-side timeout can answer. A bound that runs out
-    raises :class:`DatabaseTimeoutError`, wherever the engine meets it.
+    silent, on which no server-side timeout can answer, though such a statement
+    fails at up to twice its bound: the driver waits the bound once more for the
+    server to confirm its cancel. A bound that runs out raises
+    :class:`DatabaseTimeoutError`, wherever the engine meets it.
     """
 
     kwargs: dict[str, object] = {

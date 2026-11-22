@@ -422,6 +422,8 @@ def test_each_app_engine_bounds_a_connect_the_server_never_answers(
     assert isinstance(error, DatabaseConnectError)
 
 
+# A stall guard: without the bound the call never returns.
+@pytest.mark.timeout(10)
 def test_a_statement_the_database_never_answers_answers_503(
     monkeypatch: pytest.MonkeyPatch, logs: pytest.LogCaptureFixture
 ) -> None:

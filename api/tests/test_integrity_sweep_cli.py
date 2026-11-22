@@ -353,6 +353,8 @@ def test_main_lets_a_timeout_that_is_not_the_databases_propagate(
         integrity_sweep_cli.main([])
 
 
+# A stall guard: without the bound the call never returns.
+@pytest.mark.timeout(10)
 def test_main_reports_a_database_that_stopped_answering_cleanly(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

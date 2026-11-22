@@ -338,7 +338,9 @@ class DatabaseSettings(_Section):
     # #4042): a new connection, its authentication included, and each exchange
     # with the server on one. Explicit so a hang fails as an outage within a known
     # ceiling, rather than after asyncpg's 60 s connect default or, for a
-    # statement, never. Migrations are held to neither (migrations/env.py).
+    # statement, never. A connection gone silent fails at up to twice the
+    # statement bound: the driver waits the bound once more for the server to
+    # confirm its cancel. Migrations are held to neither (migrations/env.py).
     connect_timeout_seconds: float = Field(default=5.0, gt=0)
     statement_timeout_seconds: float = Field(default=60.0, gt=0)
 
