@@ -48,6 +48,7 @@ from mc_server_dashboard_api.fleet.adapters.grpc_server import (
 )
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
 from mc_server_dashboard_api.fleet.domain.control_plane import (
+    CommandResultCode,
     ReclaimDeletedServerCommand,
 )
 from mc_server_dashboard_api.fleet.domain.entities import WorkerStatus
@@ -3488,7 +3489,7 @@ class _OutageLateSnapshotSink(LateSnapshotResultSink):
         *,
         server_id: str,
         worker_id: str,
-        succeeded: bool,
+        code: CommandResultCode,
         message: str | None,
         retry: bool = False,
     ) -> None:

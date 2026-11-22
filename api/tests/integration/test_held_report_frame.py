@@ -39,6 +39,7 @@ from mc_server_dashboard_api.core.adapters.database import (
 from mc_server_dashboard_api.fleet.adapters import grpc_server
 from mc_server_dashboard_api.fleet.adapters.control_plane import ControlPlaneState
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
+from mc_server_dashboard_api.fleet.domain.control_plane import CommandResultCode
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
 from mc_server_dashboard_api.servers.adapters.late_snapshot_result_sink import (
     ServersLateSnapshotResultSink,
@@ -448,7 +449,7 @@ async def test_a_retry_that_makes_the_release_publishes_one_frame(
     await sink.clear_held_assignment_on_late_snapshot(
         server_id=str(server.id.value),
         worker_id=_WORKER_ID,
-        succeeded=True,
+        code=CommandResultCode.OK,
         message=None,
         retry=True,
     )
@@ -483,7 +484,7 @@ async def test_a_retry_leaves_a_row_another_worker_holds(
     await sink.clear_held_assignment_on_late_snapshot(
         server_id=str(server.id.value),
         worker_id=_WORKER_ID,
-        succeeded=False,
+        code=CommandResultCode.TRANSFER_FAILED,
         message="upload aborted by transfer bound",
         retry=True,
     )

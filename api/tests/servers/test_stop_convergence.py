@@ -26,7 +26,10 @@ from mc_server_dashboard_api.fleet.adapters.control_plane import (
     GrpcControlPlane,
 )
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
-from mc_server_dashboard_api.fleet.domain.control_plane import WorkerNotConnectedError
+from mc_server_dashboard_api.fleet.domain.control_plane import (
+    CommandResultCode,
+    WorkerNotConnectedError,
+)
 from mc_server_dashboard_api.fleet.domain.late_snapshot_sink import (
     LateSnapshotResultSink,
 )
@@ -282,8 +285,10 @@ async def test_late_result_does_not_release_while_another_flow_snapshots() -> No
     await _stop_server(repo, cp, guard).clear_assignment_after_late_snapshot(
         server_id=server.id,
         worker_id=server.assigned_worker_id,
-        succeeded=False,
-        message="upload aborted by transfer bound",
+        outcome=CommandOutcome(
+            status=CommandStatus.TRANSFER_FAILED,
+            message="upload aborted by transfer bound",
+        ),
     )
 
     assert _assigned(repo, server) == server.assigned_worker_id
@@ -306,8 +311,7 @@ async def test_late_result_releases_when_no_flow_is_converging() -> None:
     ).clear_assignment_after_late_snapshot(
         server_id=server.id,
         worker_id=server.assigned_worker_id,
-        succeeded=True,
-        message=None,
+        outcome=CommandOutcome(status=CommandStatus.OK),
     )
 
     assert _assigned(repo, server) is None
@@ -463,7 +467,7 @@ class _Sink(LateSnapshotResultSink):
         *,
         server_id: str,
         worker_id: str,
-        succeeded: bool,
+        code: CommandResultCode,
         message: str | None,
         retry: bool = False,
     ) -> None:
@@ -472,8 +476,9 @@ class _Sink(LateSnapshotResultSink):
         ).clear_assignment_after_late_snapshot(
             server_id=ServerId(uuid.UUID(server_id)),
             worker_id=WorkerId(uuid.UUID(worker_id)),
-            succeeded=succeeded,
-            message=message,
+            outcome=CommandOutcome(
+                status=CommandStatus(code.value), message=message or ""
+            ),
             retry=retry,
         )
 
@@ -849,8 +854,14 @@ async def test_a_held_retry_finding_the_row_released_says_so(
     ).clear_assignment_after_late_snapshot(
         server_id=server.id,
         worker_id=server.assigned_worker_id,
-        succeeded=succeeded,
-        message=None if succeeded else "upload aborted by transfer bound",
+        outcome=(
+            CommandOutcome(status=CommandStatus.OK)
+            if succeeded
+            else CommandOutcome(
+                status=CommandStatus.TRANSFER_FAILED,
+                message="upload aborted by transfer bound",
+            )
+        ),
         retry=True,
     )
 
@@ -876,8 +887,10 @@ async def test_a_held_retry_leaves_a_row_another_worker_holds(
     ).clear_assignment_after_late_snapshot(
         server_id=server.id,
         worker_id=WorkerId(uuid.uuid4()),
-        succeeded=False,
-        message="upload aborted by transfer bound",
+        outcome=CommandOutcome(
+            status=CommandStatus.TRANSFER_FAILED,
+            message="upload aborted by transfer bound",
+        ),
         retry=True,
     )
 
