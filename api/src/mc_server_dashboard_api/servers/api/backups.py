@@ -497,11 +497,13 @@ async def set_backup_retention(
 
     The policy is `{keep_last}` XOR `{daily, weekly, monthly}`; it applies only
     to `source=scheduled` backups — manual/uploaded rows are never auto-deleted.
-    Backups whose `health` is `healthy`, `unknown` or `unreadable` are chosen as
-    keepers first: a `quarantined` one keeps a keep-N slot only when too few
-    backups that are not `quarantined` are left to fill the N, and a tier bucket
-    only when the bucket holds no backup that is not `quarantined`. Every
-    scheduled backup no slot or bucket keeps is deleted.
+    Backups are chosen as keepers in three ranks: first those whose
+    `size_bytes` is recorded and whose `health` is `healthy`, `unknown` or
+    `unreadable`, then a `quarantined` one whose `size_bytes` is recorded, then
+    one whose `size_bytes` is null, whatever its `health`. A backup keeps a
+    keep-N slot only when too few backups of the ranks above it are left to
+    fill the N, and a tier bucket only when the bucket holds none of them.
+    Every scheduled backup no slot or bucket keeps is deleted.
     Setting it prunes immediately (best-effort), and every successful scheduled
     backup run prunes thereafter; each pruned backup is audited as
     `backup:delete` with no actor. The write itself is audited as
