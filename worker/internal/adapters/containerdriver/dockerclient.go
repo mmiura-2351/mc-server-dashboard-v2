@@ -123,6 +123,9 @@ type hostConfig struct {
 	PidsLimit      int64             `json:"PidsLimit,omitempty"`
 	ReadonlyRootfs bool              `json:"ReadonlyRootfs,omitempty"`
 	Tmpfs          map[string]string `json:"Tmpfs,omitempty"`
+	// LogConfig bounds the container's log (issue #4150); nil (omitted) leaves
+	// the daemon's default.
+	LogConfig *LogConfig `json:"LogConfig,omitempty"`
 }
 
 type portBinding struct {
@@ -150,6 +153,7 @@ func (c *EngineClient) Create(ctx context.Context, spec CreateSpec) (string, err
 			Binds: spec.Binds, CPUShares: spec.CPUShares, Memory: spec.MemoryLimitBytes,
 			CapDrop: spec.CapDrop, SecurityOpt: spec.SecurityOpt,
 			PidsLimit: spec.PidsLimit, ReadonlyRootfs: spec.ReadonlyRootfs, Tmpfs: spec.Tmpfs,
+			LogConfig: spec.LogConfig,
 		},
 	}
 	if len(spec.Ports) > 0 {

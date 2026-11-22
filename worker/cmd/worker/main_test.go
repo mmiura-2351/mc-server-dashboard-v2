@@ -125,6 +125,20 @@ func runFromEnv(ctx context.Context) error {
 	return run(ctx, cfg, newLogger(cfg.Log))
 }
 
+// The container driver bounds its containers' logs at the Worker's configured
+// size and file count, not at the driver's own defaults (issue #4150).
+func TestContainerDriverOptionsCarryTheLogBound(t *testing.T) {
+	var cfg config.Config
+	cfg.Driver.Container.LogMaxSize = "10m"
+	cfg.Driver.Container.LogMaxFile = 3
+
+	opts := containerDriverOptions(cfg, slog.New(slog.DiscardHandler))
+
+	if opts.LogMaxSize != "10m" || opts.LogMaxFile != 3 {
+		t.Fatalf("LogMaxSize, LogMaxFile = %q, %d, want 10m, 3", opts.LogMaxSize, opts.LogMaxFile)
+	}
+}
+
 // TestResolveRconHost pins the RCON host-resolution gate (issue #218): only a
 // container-driven server consults the container driver's resolver; every other
 // server (and a worker with no container driver built) dials the host loopback

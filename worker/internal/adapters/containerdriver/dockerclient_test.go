@@ -207,6 +207,35 @@ func TestEngineClientCreateEncodesHardening(t *testing.T) {
 	}
 }
 
+// The log config is encoded as the host-config LogConfig: the log driver as Type
+// and its options, all strings, as Config, which is where the Engine reads them
+// (issue #4150).
+func TestEngineClientCreateEncodesLogConfig(t *testing.T) {
+	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"Id": "abc123"})
+	})
+	c := d.client(t)
+
+	if _, err := c.Create(context.Background(), CreateSpec{
+		Name:      "mcsd-s1",
+		Image:     "img",
+		LogConfig: &LogConfig{Type: "json-file", Config: map[string]string{"max-size": "50m", "max-file": "5"}},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	var body struct {
+		HostConfig struct {
+			LogConfig json.RawMessage `json:"LogConfig"`
+		} `json:"HostConfig"`
+	}
+	if err := json.Unmarshal([]byte(d.requests[0].body), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if got, want := string(body.HostConfig.LogConfig), `{"Type":"json-file","Config":{"max-file":"5","max-size":"50m"}}`; got != want {
+		t.Fatalf("HostConfig.LogConfig = %s, want %s", got, want)
+	}
+}
+
 // A configured network is encoded as a NetworkingConfig endpoint so the daemon
 // attaches the container to that user-defined network at create time (issue
 // #218). An empty network omits it, keeping the default bridge.

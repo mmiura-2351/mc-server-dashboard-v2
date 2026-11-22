@@ -173,6 +173,17 @@ type CreateSpec struct {
 	PidsLimit      int64
 	ReadonlyRootfs bool
 	Tmpfs          map[string]string
+	// LogConfig is the container's log driver and its options. The driver sets a
+	// bounded json-file log on every container it creates (issue #4150); nil
+	// leaves the daemon's default driver and log-opts.
+	LogConfig *LogConfig
+}
+
+// LogConfig is a container's log driver (Type) and that driver's options
+// (Config), in the shape of the Engine's HostConfig.LogConfig.
+type LogConfig struct {
+	Type   string            `json:"Type"`
+	Config map[string]string `json:"Config,omitempty"`
 }
 
 // PortMapping publishes a container TCP port on a host interface/port.

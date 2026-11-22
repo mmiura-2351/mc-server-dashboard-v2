@@ -232,6 +232,17 @@ func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 	return runner.Run(sigCtx)
 }
 
+// containerDriverOptions is the container driver's configuration, taken from the
+// Worker's.
+func containerDriverOptions(cfg config.Config, logger *slog.Logger) containerdriver.Options {
+	c := cfg.Driver.Container
+	return containerdriver.Options{
+		WorkerID: cfg.Worker.ID, GameBindIP: c.GameBindIP, Network: c.Network, ScratchDir: cfg.Worker.ScratchDir,
+		WorldProgress: instancemanager.WorldProgress, RunAsUID: c.User.UID, RunAsGID: c.User.GID,
+		LogMaxSize: c.LogMaxSize, LogMaxFile: c.LogMaxFile, Logger: logger,
+	}
+}
+
 // buildInstanceManager wires the advertised execution drivers and the instance
 // manager that handles lifecycle/console commands (issue #89). RCON for both
 // graceful stop and ServerCommand forwarding is opened from the server's
@@ -283,7 +294,7 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, genKey *instan
 				docker,
 				containerdriver.NewImageSelector(cfg.Driver.Container.Images),
 				openContainerControl,
-				containerdriver.Options{WorkerID: wc.ID, GameBindIP: cfg.Driver.Container.GameBindIP, Network: cfg.Driver.Container.Network, ScratchDir: wc.ScratchDir, WorldProgress: instancemanager.WorldProgress, RunAsUID: cfg.Driver.Container.User.UID, RunAsGID: cfg.Driver.Container.User.GID, Logger: logger},
+				containerDriverOptions(cfg, logger),
 			)
 			containerRconHost = cd.RconHost
 			containerGameHost = cd.GameHost
