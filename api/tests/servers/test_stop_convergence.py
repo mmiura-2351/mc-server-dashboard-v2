@@ -78,6 +78,10 @@ from tests.servers.fakes import (
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 _LIFECYCLE_LOGGER = "mc_server_dashboard_api.servers.application.lifecycle"
+_FOUND_RELEASED = (
+    " (held retry: found the server already released, by an earlier attempt of "
+    "this result or by another flow)"
+)
 _LONG_AGO = _NOW - dt.timedelta(hours=1)
 _FAILED = CommandOutcome(
     status=CommandStatus.TRANSFER_FAILED, message="upload aborted by transfer bound"
@@ -819,8 +823,38 @@ async def test_a_late_result_finding_its_release_made_announces_it_only_on_retry
 
     await worker.report_ok(abandoned, retry=retry)
 
-    assert len(_late_releases(caplog, server)) == releases
+    lines = _late_releases(caplog, server)
+    assert len(lines) == releases
+    # The retry did not make the release it logs, and the line says so.
+    assert all(line.endswith(_FOUND_RELEASED) for line in lines)
     assert _assigned(repo, server) is None
+
+
+async def test_a_held_retry_leaves_a_row_another_worker_holds(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #4062: a retry also takes an unassigned row as released, and no
+    # other. The retried late result finds the server held at (stopped,
+    # stopped) by another Worker, whose release waits on that Worker's own final
+    # snapshot: that Worker keeps the row, and nothing is logged.
+    caplog.set_level(logging.INFO, logger=_LIFECYCLE_LOGGER)
+    server = _server(desired=DesiredState.STOPPED, observed=ObservedState.STOPPED)
+    holder = server.assigned_worker_id
+    repo = FakeServerRepository()
+    repo.seed(server)
+
+    await _stop_server(
+        repo, FakeControlPlane(), StopConvergenceGuard()
+    ).clear_assignment_after_late_snapshot(
+        server_id=server.id,
+        worker_id=WorkerId(uuid.uuid4()),
+        succeeded=False,
+        message="upload aborted by transfer bound",
+        retry=True,
+    )
+
+    assert _assigned(repo, server) == holder
+    assert _late_releases(caplog, server) == []
 
 
 async def test_a_duplicate_late_result_does_not_release_a_later_hold() -> None:

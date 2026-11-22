@@ -55,7 +55,7 @@ from mc_server_dashboard_api.servers.application.unrecorded_stops import (
 from mc_server_dashboard_api.servers.domain.value_objects import ObservedState
 from mcsd.controlplane.v1 import control_plane_pb2 as pb
 from tests.fleet.fakes import FakeClock, FakeDatabasePing
-from tests.fleet.test_grpc_session import (  # noqa: F401
+from tests.fleet.test_grpc_session import (
     _GRPC_SERVER_LOGGER,
     _HOLD_APPLIED,
     _HOLD_STARTED,
@@ -69,7 +69,7 @@ from tests.fleet.test_grpc_session import (  # noqa: F401
     _registered,
     _status_message,
     _wait_until,
-    fast_hold,
+    fast_hold,  # noqa: F401
 )
 from tests.integration.test_lifecycle_scenarios import _load
 from tests.integration.test_observed_state_status_events import (  # noqa: F401
@@ -270,6 +270,14 @@ def _applied_attempts(caplog: pytest.LogCaptureFixture) -> list[object]:
     return [record.__dict__["attempts"] for record in _logged(caplog, _HOLD_APPLIED)]
 
 
+def _late_releases(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == _LIFECYCLE_LOGGER and r.getMessage().startswith("released worker ")
+    ]
+
+
 @pytest.mark.usefixtures("fast_hold")
 async def test_a_report_whose_commit_answer_was_lost_reaches_subscribers(
     world: _World,  # noqa: F811
@@ -391,13 +399,10 @@ async def test_a_late_snapshot_release_whose_commit_answer_was_lost_is_announced
     assert proxy.cuts == 1
     assert _applied_attempts(caplog) == [2]
     assert frames == [_RELEASED]
-    released = [
-        r
-        for r in caplog.records
-        if r.name == _LIFECYCLE_LOGGER
-        and r.getMessage().startswith(f"released worker {_WORKER_ID} for server")
-    ]
+    released = _late_releases(caplog)
     assert len(released) == 1
+    # The retry found the release made, and its line says so.
+    assert "held retry" in released[0]
 
 
 async def test_a_retry_that_changes_the_state_publishes_one_frame(
@@ -423,9 +428,11 @@ async def test_a_retry_that_changes_the_state_publishes_one_frame(
 
 async def test_a_retry_that_makes_the_release_publishes_one_frame(
     world: _World,  # noqa: F811
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     # The release a retry repeats did not land: the retry makes it, and stages
-    # its one frame.
+    # its one frame. It logs the release as made now.
+    caplog.set_level(logging.INFO, logger=_LIFECYCLE_LOGGER)
     worker = uuid.UUID(_WORKER_ID)
     server = await _wedged_stop(world, worker, "stopped")
     sink = ServersLateSnapshotResultSink(
@@ -447,3 +454,42 @@ async def test_a_retry_that_makes_the_release_publishes_one_frame(
     )
 
     assert [event.payload for event in await _received(watching)] == [_RELEASED]
+    released = _late_releases(caplog)
+    assert len(released) == 1
+    assert "held retry" not in released[0]
+
+
+async def test_a_retry_leaves_a_row_another_worker_holds(
+    world: _World,  # noqa: F811
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A retry also takes an unassigned row as released, and no other. This
+    # Worker's retried late result finds the server held at (stopped, stopped)
+    # by another Worker: that Worker keeps the row, and nothing is published or
+    # logged.
+    caplog.set_level(logging.INFO, logger=_LIFECYCLE_LOGGER)
+    holder = uuid.uuid4()
+    server = await _wedged_stop(world, holder, "stopped")
+    sink = ServersLateSnapshotResultSink(
+        create_session_factory(world.engine),
+        control_plane=FakeControlPlane(),
+        clock=world.clock,
+        stop_convergence=StopConvergenceGuard(),
+        unrecorded_stops=UnrecordedStops(),
+        real_time_events=world.bus,
+    )
+    watching = world.watch(server)
+
+    await sink.clear_held_assignment_on_late_snapshot(
+        server_id=str(server.id.value),
+        worker_id=_WORKER_ID,
+        succeeded=False,
+        message="upload aborted by transfer bound",
+        retry=True,
+    )
+
+    row = await _load(world.engine, server.id)
+    assert row is not None and row.assigned_worker_id is not None
+    assert row.assigned_worker_id.value == holder
+    assert await _received(watching) == []
+    assert _late_releases(caplog) == []
