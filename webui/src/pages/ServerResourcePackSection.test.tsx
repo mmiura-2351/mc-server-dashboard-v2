@@ -1,5 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
@@ -8,7 +15,7 @@ import { ToastProvider } from "../components/Toast.tsx";
 import { t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { meta } from "../test/meta.ts";
-import { installMockWebSocket } from "../test/mockWebSocket.ts";
+import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
 import { ServerDetailPage } from "./ServerDetailPage.tsx";
 
 const CID = "c1";
@@ -518,6 +525,78 @@ describe("ServerResourcePackSection — unsettled mutation errors", () => {
 });
 
 describe("ServerResourcePackSection — a server the stop still holds", () => {
+  // A stop holds its Worker until the final snapshot settles, and the API
+  // refuses an assign or unassign until the release (409 server_assigned,
+  // #3998): the actions are held, with the reason (#4003).
+  const held = { assigned_worker_id: "worker-a" };
+
+  function packCard() {
+    return within(
+      screen
+        .getByRole("heading", { name: t("serverDetail.resourcePack.heading") })
+        .closest(".card") as HTMLElement,
+    );
+  }
+
+  it.each([
+    ["Assign", null, [t("serverDetail.resourcePack.assign")]],
+    [
+      "Change and Remove",
+      ASSIGNMENT,
+      [
+        t("serverDetail.resourcePack.change"),
+        t("serverDetail.resourcePack.remove"),
+      ],
+    ],
+  ] as const)(
+    "holds %s with the reason",
+    async (_actions, assignment, names) => {
+      routeGet({ srv: held, assignment });
+      await openSettings();
+
+      await screen.findByRole("button", { name: names[0] });
+      for (const name of names) {
+        expect(packCard().getByRole("button", { name })).toBeDisabled();
+      }
+      expect(packCard().getByText(t("common.serverAssigned"))).toBeVisible();
+      expect(
+        packCard().queryByText(t("serverDetail.resourcePack.notAtRest")),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it("frees the actions on the release frame", async () => {
+    routeGet({ srv: held, assignment: ASSIGNMENT });
+    await openSettings();
+
+    const change = await screen.findByRole("button", {
+      name: t("serverDetail.resourcePack.change"),
+    });
+    expect(change).toBeDisabled();
+
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        JSON.stringify({
+          stream: "status",
+          ts: "t",
+          payload: { assigned_worker_id: null },
+        }),
+      );
+    });
+
+    // The frame alone frees them: every REST read still answers worker-a.
+    await waitFor(() => expect(change).toBeEnabled());
+    expect(
+      packCard().getByRole("button", {
+        name: t("serverDetail.resourcePack.remove"),
+      }),
+    ).toBeEnabled();
+    expect(
+      screen.queryByText(t("common.serverAssigned")),
+    ).not.toBeInTheDocument();
+  });
+
   // The cache showed the server released when the API found it assigned
   // (#3998): the toast names the release, not stopping the server (#4003).
   it.each([
