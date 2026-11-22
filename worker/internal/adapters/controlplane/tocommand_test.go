@@ -89,6 +89,14 @@ func TestToCommandMapsPayload(t *testing.T) {
 			want: session.Command{Kind: "SnapshotTrigger", TransferURL: "https://api/snapshot", TransferToken: "tok"},
 		},
 		{
+			// Only a stop's final snapshot sets it (issue #4053).
+			name: "final snapshot trigger",
+			cmd: &controlplanev1.ApiCommand{Command: &controlplanev1.ApiCommand_Snapshot{Snapshot: &controlplanev1.SnapshotTrigger{
+				TransferUrl: "https://api/snapshot", TransferToken: "tok", Final: true,
+			}}},
+			want: session.Command{Kind: "SnapshotTrigger", TransferURL: "https://api/snapshot", TransferToken: "tok", Final: true},
+		},
+		{
 			name: "read file",
 			cmd:  &controlplanev1.ApiCommand{Command: &controlplanev1.ApiCommand_ReadFile{ReadFile: &controlplanev1.ReadFile{Path: "server.properties"}}},
 			want: session.Command{Kind: "ReadFile", Path: "server.properties"},

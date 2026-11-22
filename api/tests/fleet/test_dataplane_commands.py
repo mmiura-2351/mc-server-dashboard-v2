@@ -37,6 +37,26 @@ def test_snapshot_command_maps_to_snapshot_trigger() -> None:
     assert api.snapshot.transfer_token == "t"
 
 
+def test_snapshot_command_carries_final_in_proto() -> None:
+    # The flag must reach the wire SnapshotTrigger so the Worker ends a stopped
+    # server's leftovers before the stop's final snapshot packs (issue #4053).
+    api = _to_api_command(
+        "cmd-5",
+        "server-5",
+        SnapshotCommand(transfer_url="u", transfer_token="t", final=True),
+    )
+    assert api.WhichOneof("command") == "snapshot"
+    assert api.snapshot.final is True
+
+
+def test_snapshot_command_defaults_final_false_in_proto() -> None:
+    api = _to_api_command(
+        "cmd-6", "server-6", SnapshotCommand(transfer_url="u", transfer_token="t")
+    )
+    assert api.WhichOneof("command") == "snapshot"
+    assert api.snapshot.final is False
+
+
 def test_stop_command_carries_force_in_proto() -> None:
     # The force flag must reach the wire StopServer message so the Worker takes
     # the immediate-kill path (issue #270).
