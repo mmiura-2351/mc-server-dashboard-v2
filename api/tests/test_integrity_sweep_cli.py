@@ -708,13 +708,6 @@ def test_a_busy_row_alone_does_not_fail_the_pass(
             "dangling backups: refusing to delete: the marker names another\n",
         ),
         (
-            BackupStorageUnavailableError("srv-1"),
-            1,
-            "dangling backups aborted: the object store failed while deleting the "
-            "archive of a dangling row on server srv-1, so the pass stopped. Rows "
-            "already deleted this run stay deleted, and it is safe to re-run.\n",
-        ),
-        (
             LifecycleLockLostError("srv-2"),
             3,
             "dangling backups aborted: the lifecycle lock on server srv-2 was lost, "
@@ -729,7 +722,7 @@ def test_a_busy_row_alone_does_not_fail_the_pass(
             "run stay deleted, and it is safe to re-run.\n",
         ),
     ],
-    ids=["store-not-owned", "store-outage", "lock-lost", "database-failed"],
+    ids=["store-not-owned", "lock-lost", "database-failed"],
 )
 def test_a_dangling_pass_that_stops_says_so_in_one_line(
     error: Exception,

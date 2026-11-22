@@ -199,10 +199,11 @@ async def test_apply_stops_when_the_store_stops_being_this_databases_mid_pass(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # The fs root's mount drops after the first deletion and leaves the empty
-    # mount point, so every later HEAD answers NotFound, the sound row's too.
-    # The marker went with the mount: the check before the next deletion
-    # refuses, the command exits 2, and the sound row is kept.
+    # The fs root's mount drops after the first deletion, before the next
+    # HEAD, and leaves the empty mount point, so every later HEAD answers
+    # NotFound, the sound row's too. The marker went with the mount: the check
+    # before the next deletion refuses, the command exits 2, and the sound row
+    # is kept.
     root = tmp_path / "root"
     root.mkdir()
     community, server = await _seed_server(engine)
@@ -222,22 +223,25 @@ async def test_apply_stops_when_the_store_stops_being_this_databases_mid_pass(
     _point_the_command_at(monkeypatch, root)
 
     unmounted = tmp_path / "unmounted"
+    heads = 0
 
-    class _MountDropsAfterTheFirstDelete(StorageBackupStoreAdapter):
-        async def delete(
+    class _MountDropsBeforeTheSecondHead(StorageBackupStoreAdapter):
+        async def size(
             self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
-        ) -> None:
-            await super().delete(
-                community_id=community_id, server_id=server_id, storage_ref=storage_ref
-            )
-            if not unmounted.exists():
+        ) -> int:
+            nonlocal heads
+            heads += 1
+            if heads == 2:
                 root.rename(unmounted)
                 root.mkdir()
+            return await super().size(
+                community_id=community_id, server_id=server_id, storage_ref=storage_ref
+            )
 
     monkeypatch.setattr(
         integrity_sweep_cli,
         "StorageBackupStoreAdapter",
-        _MountDropsAfterTheFirstDelete,
+        _MountDropsBeforeTheSecondHead,
     )
 
     # ``main`` runs its own event loop, so it runs in a thread of its own.

@@ -36,21 +36,22 @@ alone does not prove a store outage.
 ``--delete-dangling`` runs :class:`DeleteDanglingBackups` instead of the sweep
 (issue #4107): it lists the backup rows whose archive the store reports missing,
 with a HEAD per row rather than a full read, and deletes nothing. ``--apply``
-deletes the rows it lists, each audited as ``backup:delete_dangling``; it runs
-only while the store owner marker names this database's installation
-(STORAGE.md Section 4.3), since a store that is not this database's answers
-NotFound for every row. The marker is checked before the pass and again before
-each deletion. ``--server`` scopes it the same way::
+deletes the rows it lists, each audited as ``backup:delete_dangling``. It deletes
+the row only and sends the store no archive delete (issue #4158), so a NotFound
+that was false leaves the archive in the store, with no row. It runs only while
+the store owner marker names this database's installation (STORAGE.md Section
+4.3), since a store that is not this database's answers NotFound for every row.
+The marker is checked before the pass and again before each deletion.
+``--server`` scopes it the same way::
 
     cd api && uv run python -m mc_server_dashboard_api.integrity_sweep_cli \
         --delete-dangling [--apply] [--server <server-uuid>]
 
 Its exit status keeps the meanings above: 0 when the pass completed; 1 when it
 completed but skipped a row the store could not answer for (an outage, a
-timeout), or stopped when deleting an archive met an outage; 2 on a bad
-argument, ``--apply`` without ``--delete-dangling`` among them, on a bad
-configuration, or when ``--apply`` refuses a store not marked for this
-database, before the pass or mid-pass; 3 when the database failed or a
+timeout); 2 on a bad argument, ``--apply`` without ``--delete-dangling`` among
+them, on a bad configuration, or when ``--apply`` refuses a store not marked for
+this database, before the pass or mid-pass; 3 when the database failed or a
 lifecycle lock was lost. Rows already deleted stay deleted, so a re-run is
 safe.
 """
@@ -377,15 +378,6 @@ def _delete_dangling(
     except StoreNotOwnedError as exc:
         sys.stderr.write(f"dangling backups: refusing to delete: {exc}\n")
         return 2
-    except BackupStorageUnavailableError as exc:
-        # The HEAD answered NotFound, then the (idempotent) archive delete of
-        # the row met an outage: the row was not deleted.
-        sys.stderr.write(
-            f"dangling backups aborted: the object store failed while deleting "
-            f"the archive of a dangling row on server {exc}, {stopped} it is safe "
-            f"to re-run.\n"
-        )
-        return 1
     except LifecycleLockLostError as exc:
         _LOG.debug("dangling backups: the lifecycle lock was lost", exc_info=True)
         sys.stderr.write(
