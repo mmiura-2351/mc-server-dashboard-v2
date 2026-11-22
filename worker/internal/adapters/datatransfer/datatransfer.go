@@ -524,7 +524,7 @@ func unpackAndSwap(r io.Reader, destDir string, marker []byte, log *slog.Logger)
 			// under an intermediate name a later sweep would delete (issue #910).
 			asideAt = displaced
 		}
-		if err := os.Rename(destDir, asideAt); err != nil {
+		if err := asideRename(destDir, asideAt); err != nil {
 			return err
 		}
 	} else if !os.IsNotExist(err) {
@@ -568,7 +568,7 @@ func unpackAndSwap(r io.Reader, destDir string, marker []byte, log *slog.Logger)
 	// and a re-park above, are durable: a power loss must not roll the displace rename
 	// back, and the marker the caller writes next (writeGeneration, also fsynced) can
 	// then never become durable before the destDir tree it describes (issue #787).
-	if err := fsyncDir(parent); err != nil {
+	if err := fsyncParent(parent); err != nil {
 		return err
 	}
 	return nil
@@ -657,6 +657,15 @@ const displacedPrefix = ".displaced-"
 // renames within one parent dir are symmetric, so there is no static-perms way to
 // fail only this one). Production always uses os.Rename.
 var swapRename = os.Rename
+
+// asideRename is the rename that parks the live working set aside before the swap-in,
+// and fsyncParent the scratch root's fsync after the swap. Both go through a package
+// var so a test can fail each of them (issue #4041), for the reason swapRename does.
+// Production always uses os.Rename and fsyncDir.
+var (
+	asideRename = os.Rename
+	fsyncParent = fsyncDir
+)
 
 // readDir lists a directory by path. displacedSlotHoldsWorkingSet reads the
 // .displaced-<id> slot through it, so a test can inject a permission failure on
