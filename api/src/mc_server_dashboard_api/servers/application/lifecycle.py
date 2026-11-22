@@ -2610,7 +2610,7 @@ class StopServer:
         Only a release clears the recorded refusal, with the assignment. A retry
         left unanswered (a timeout or a session end) keeps the row and the refusal
         alike (issue #4111): the snapshot the row is held for is still owed, and
-        a stop while its Worker is gone must not take the row for one never
+        a stop while its Worker is gone must not mistake the row for one never
         refused. A later refusal rewrites it. It is written only from here and
         from the late result of a final snapshot, both under the stop-convergence
         claim, so the value this reads before the dispatch is still the row's
@@ -3007,9 +3007,8 @@ class StopServer:
         already gone when the operator's stop began is released at once, as
         documented, unless the row records a refused final snapshot: that stop
         never reaches here (issue #4111). The owed stop's own release, once the
-        Worker has answered it,
-        keeps the row the same way when its final snapshot fails on a session end
-        (issue #3981).
+        Worker has answered it, keeps the row the same way when its final snapshot
+        fails on a session end (issue #3981).
 
         Step A also withdraws the intent again, with a bump, as
         :meth:`_redispatch_stop` does and for the same reasons: the write that
