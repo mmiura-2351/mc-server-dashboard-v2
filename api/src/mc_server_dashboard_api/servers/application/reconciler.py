@@ -207,6 +207,8 @@ The record also covers a final snapshot the Worker REFUSED ``BUSY`` or
 ``UNAVAILABLE`` (issue #3697), which holds the row instead of releasing it. The
 refusal is recorded once it is answered, and again on every refused retry, so the
 stale-stop arm retries the snapshot on the short grace rather than the full one.
+The record only selects that grace, which is measured from the row's last report
+or intent commit (``_since``), not from the refusal.
 The #930 floor is met, since the Worker answered, and so is #847 in the form it
 takes here: the short grace only re-drives the snapshot, and the row is released
 only once a snapshot settles. A refusal is superseded like any record, a later

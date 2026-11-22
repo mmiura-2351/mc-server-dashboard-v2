@@ -2663,13 +2663,19 @@ async def test_the_3701_sequence_ends_in_a_published_snapshot_and_a_release(
     assert held.observed_state is ObservedState.CRASHED
     assert held.assigned_worker_id == worker
     assert held.final_snapshot_refusal is FinalSnapshotRefusal.UNAVAILABLE
+    # A refused start writes nothing. That is pinned with a write owed by
+    # test_start_does_not_write_while_the_final_snapshot_holds_the_server
+    # (tests/servers/test_start_group_sync.py), and the store generation staying
+    # put under a refusal hold on real storage by
+    # test_a_server_held_by_a_refused_final_snapshot_keeps_its_world_for_the_retry
+    # (tests/dataplane/test_final_snapshot_held_assignment.py).
     with pytest.raises(LifecycleTransitionConflictError):
         await _start_server_use_case(
             engine, FakeControlPlane(place_to=WorkerId(uuid.uuid4())), clock
         )(community_id=community, server_id=server_id)
-    assert store.generation == 1
 
-    # The short grace runs from the refusal: the marker's write moved no stamp.
+    # The refusal selects the short grace, which runs from the row's last report
+    # or intent commit: the marker's write moved no stamp, so the record stands.
     refused_at = unrecorded.recorded_at(server_id)
     assert refused_at is not None
     since = max(held.updated_at, held.observed_at or held.updated_at)

@@ -30,6 +30,7 @@ from mc_server_dashboard_api.fleet.domain.late_snapshot_sink import (
     LateSnapshotResultSink,
 )
 from mc_server_dashboard_api.fleet.domain.real_time_events import RealTimeEvents
+from mc_server_dashboard_api.servers.adapters.control_plane import _STATUS_BY_CODE
 from mc_server_dashboard_api.servers.adapters.unit_of_work import SqlAlchemyUnitOfWork
 from mc_server_dashboard_api.servers.application.lifecycle import StopServer
 from mc_server_dashboard_api.servers.application.stop_convergence import (
@@ -41,7 +42,6 @@ from mc_server_dashboard_api.servers.application.unrecorded_stops import (
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
-    CommandStatus,
     ControlPlane,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId, WorkerId
@@ -126,9 +126,6 @@ class ServersLateSnapshotResultSink(LateSnapshotResultSink):
         await stop_server.clear_assignment_after_late_snapshot(
             server_id=ServerId(parsed),
             worker_id=WorkerId(parsed_worker),
-            # The two enums mirror the same wire codes, value for value.
-            outcome=CommandOutcome(
-                status=CommandStatus(code.value), message=message or ""
-            ),
+            outcome=CommandOutcome(status=_STATUS_BY_CODE[code], message=message or ""),
             retry=retry,
         )

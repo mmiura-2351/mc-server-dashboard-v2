@@ -8512,9 +8512,11 @@ async def test_a_held_retry_of_a_late_refusal_leaves_a_released_row_alone(
 async def test_an_operator_stop_of_a_held_row_whose_worker_is_gone_releases_it() -> (
     None
 ):
-    # Unchanged (PM ruling 2(a) on #3697): a stop of a row whose Worker is
-    # already gone releases it at once without the snapshot, refusal or not. It
-    # is the documented way to free a server from a Worker that never returns.
+    # Unchanged #3491 behaviour, which PM ruling 2(a) on #3697 does not cover: a
+    # stop of a row whose Worker is already gone releases it at once without the
+    # snapshot or the grace, refusal or not. It is the documented way to free a
+    # server from a Worker that never returns, and a known gap for a held row
+    # (issue #4111), which this pins until that issue changes it.
     community, server_id, worker = _ids()
     cp = FakeControlPlane(connected={WorkerId(worker): False})
     uow = FakeUnitOfWork()
