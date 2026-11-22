@@ -1479,10 +1479,17 @@ async def test_an_occurrence_whose_record_fails_runs_once_until_it_is_recorded(
     stored = env.uow.schedules.by_id[schedule.id]
     assert stored.next_run_at == _NOW.replace(hour=13, minute=0, second=0)
     assert stored.last_run_at == _NOW
-    assert len(_lines_naming(caplog, logging.WARNING, schedule)) == 1
+    assert _lines_naming(caplog, logging.WARNING, schedule) == [
+        f"schedule {schedule.id.value}: the success run of its backup could not "
+        "be recorded; the record is retried each tick, and the backup is not run "
+        "again"
+    ]
     assert [
         line for line in _lines_naming(caplog, logging.INFO, schedule) if "owed" in line
-    ] == [f"schedule {schedule.id.value}: the owed run of its backup is recorded"]
+    ] == [
+        f"schedule {schedule.id.value}: the owed success run of its backup is "
+        "recorded, 0:01:40 after it ran"
+    ]
 
 
 async def test_a_failed_occurrence_whose_record_fails_records_one_failure() -> None:
@@ -1582,6 +1589,32 @@ async def test_an_owed_record_of_a_deleted_schedule_is_audited_once_and_dropped(
         in infos
     )
     assert not [line for line in infos if "owed" in line]
+
+
+async def test_a_record_owed_for_hours_warns_once_an_hour(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    env = _env()
+    schedule = _backup_schedule(env)
+    _RecordsFail(env)
+
+    for minutes in range(0, 140, 10):
+        await _tick_at(env, _NOW + dt.timedelta(minutes=minutes))
+
+    warnings = _lines_naming(caplog, logging.WARNING, schedule)
+    assert len(warnings) == 3
+    assert warnings[1:] == [
+        f"schedule {schedule.id.value}: the success run of its backup is still "
+        f"not recorded, owed for {owed}; the record is retried each tick"
+        for owed in ("1:00:00", "2:00:00")
+    ]
+    debugs = [
+        line
+        for line in _lines_naming(caplog, logging.DEBUG, schedule)
+        if "could not be recorded" in line
+    ]
+    assert len(debugs) == 11
 
 
 # A record that commits late advances as if it had committed when its run
@@ -2329,9 +2362,11 @@ async def test_a_retry_whose_claim_raises_stays_armed_for_a_later_tick(
         env.uow.schedules.by_id[schedule.id], _NOW + dt.timedelta(days=1)
     )
 
-    # The retry's claim cannot read the row once, as on a database still down.
+    # The retry's claim cannot read the row for three ticks, as on a database
+    # still down.
+    caplog.set_level(logging.DEBUG)
     real_lock = env.uow.schedules.lock
-    failures = [RuntimeError("database down")]
+    failures = [RuntimeError("database down")] * 3
 
     async def failing_lock(schedule_id: ScheduleId) -> Schedule | None:
         if failures:
@@ -2340,16 +2375,35 @@ async def test_a_retry_whose_claim_raises_stays_armed_for_a_later_tick(
 
     env.uow.schedules.lock = failing_lock  # type: ignore[method-assign]
     retry_at = _NOW + dt.timedelta(minutes=30)
-    await _tick_at(env, retry_at)
+    for tick in range(3):
+        await _tick_at(env, retry_at + tick * _TICK)
     assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
 
-    await _tick_at(env, retry_at + _TICK)
+    await _tick_at(env, retry_at + 3 * _TICK)
 
     assert _runs(env, schedule) == [
         ScheduleRunOutcome.FAILURE,
         ScheduleRunOutcome.SUCCESS,
     ]
-    assert len(_lines_naming(caplog, logging.WARNING, schedule)) == 1
+    # A WARNING with its traceback on the first failing tick, DEBUG on the
+    # later ones, and no ERROR: the claim failure is not the tick's.
+    warnings = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and str(schedule.id.value) in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert warnings[0].exc_info is not None
+    assert [
+        line
+        for line in _lines_naming(caplog, logging.DEBUG, schedule)
+        if "could not be claimed" in line
+    ] == [
+        f"schedule {schedule.id.value}: its backup retry still could not be "
+        "claimed; it is kept for the next tick"
+    ] * 2
+    assert _lines_naming(caplog, logging.ERROR, schedule) == []
 
 
 async def test_a_retry_whose_server_read_raises_stays_armed_for_a_later_tick() -> None:

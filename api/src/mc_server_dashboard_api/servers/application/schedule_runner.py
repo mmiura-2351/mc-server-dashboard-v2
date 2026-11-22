@@ -213,6 +213,8 @@ _LOG = logging.getLogger(__name__)
 _HISTORY_CAP = 50
 # One bounded retry ~30 minutes after a failed backup occurrence (owner-confirmed).
 _BACKUP_RETRY_DELAY = dt.timedelta(minutes=30)
+# How often a record that stays owed (issue #4108) is logged at WARNING again.
+_OWED_WARNING_INTERVAL = dt.timedelta(hours=1)
 # The notification discriminator a client routes on (issue #1836 payload).
 _NOTIFY_KIND = "schedule_failed"
 # The one-shot recovery discriminator, fired when a schedule that was notifying
@@ -655,10 +657,15 @@ class RunScheduleTick:
         default_factory=dict
     )
     # Per schedule, the occurrence that ran but whose record and advance raised
-    # (issue #4108). Each tick records it again before its poll, and the
-    # schedule runs nothing while it is owed. Dropped once the record returns.
-    # In-memory, like _backup_retry: a restart runs the occurrence once more.
-    _owed: dict[ScheduleId, _Ran] = field(default_factory=dict)
+    # (issue #4108), and when that was last logged at WARNING. Each tick
+    # records it again before its poll, and the schedule runs nothing while it
+    # is owed. Dropped once the record returns. In-memory, like _backup_retry:
+    # a restart runs the occurrence once more.
+    _owed: dict[ScheduleId, tuple[_Ran, dt.datetime]] = field(default_factory=dict)
+    # Per schedule, the armed instant of a backup retry whose claim raised
+    # (issue #4098): later ticks that fail to claim it log at DEBUG only.
+    # Dropped once a claim returns.
+    _retry_unclaimed: dict[ScheduleId, dt.datetime] = field(default_factory=dict)
     # Schedules currently in a failing state, so a sustained failure notifies once
     # rather than every occurrence (issue #2269). Each maps to the outcome already
     # notified for the incident: a FAILURE or UNKNOWN notifies only when the id is
@@ -686,8 +693,8 @@ class RunScheduleTick:
         # First the records earlier ticks owe (issue #4108): one that commits
         # advances its schedule from when it ran, so the poll below lists it
         # again only for an occurrence that came due meanwhile.
-        for ran in list(self._owed.values()):
-            await self._record_owed(ran)
+        for ran, warned_at in list(self._owed.values()):
+            await self._record_owed(ran, warned_at)
         async with self.uow:
             due = await self.uow.schedules.list_due(now)
             # A schedule deleted between ticks never reaches the claim or the record
@@ -829,12 +836,12 @@ class RunScheduleTick:
                 # It ran, and a second run would repeat it (a backup as one
                 # more archive): only the record is retried (issue #4108). A
                 # skip past the bound attempted nothing, so it runs again.
-                self._owed[schedule.id] = ran
+                self._owed[schedule.id] = (ran, self.clock.now())
                 _LOG.warning(
-                    "schedule %s: its %s ran, but the run could not be recorded; "
-                    "the record is retried each tick, and the %s does not run "
-                    "again",
+                    "schedule %s: the %s run of its %s could not be recorded; "
+                    "the record is retried each tick, and the %s is not run again",
                     schedule.id.value,
+                    result.outcome.value,
                     schedule.action.value,
                     schedule.action.value,
                 )
@@ -871,21 +878,37 @@ class RunScheduleTick:
             await self._prune_after_backup(schedule, ran.result)
         return recorded
 
-    async def _record_owed(self, ran: _Ran) -> None:
+    async def _record_owed(self, ran: _Ran, warned_at: dt.datetime) -> None:
         """Record an occurrence that ran on an earlier tick (issue #4108).
 
         With the outcome and times of that run. A record that raises again
-        leaves it owed, logged at DEBUG only: the WARNING when it was first
-        owed stands for the whole outage.
+        leaves it owed, logged at WARNING at most once per
+        :data:`_OWED_WARNING_INTERVAL` since ``warned_at``, and at DEBUG on the
+        ticks between: an outage is logged by the poll each tick, but a record
+        that keeps failing while the poll works holds the schedule until a
+        restart.
         """
 
         schedule = ran.schedule
         try:
             recorded = await self._settle(ran)
         except Exception:  # noqa: BLE001 - owed until a later tick records it
-            _LOG.debug(
-                "schedule %s: its owed run still could not be recorded",
+            now = self.clock.now()
+            if now - warned_at < _OWED_WARNING_INTERVAL:
+                _LOG.debug(
+                    "schedule %s: its owed run still could not be recorded",
+                    schedule.id.value,
+                    exc_info=True,
+                )
+                return
+            self._owed[schedule.id] = (ran, now)
+            _LOG.warning(
+                "schedule %s: the %s run of its %s is still not recorded, owed "
+                "for %s; the record is retried each tick",
                 schedule.id.value,
+                ran.result.outcome.value,
+                schedule.action.value,
+                now - ran.finished_at,
                 exc_info=True,
             )
             return
@@ -894,9 +917,11 @@ class RunScheduleTick:
         del self._owed[schedule.id]
         if recorded:
             _LOG.info(
-                "schedule %s: the owed run of its %s is recorded",
+                "schedule %s: the owed %s run of its %s is recorded, %s after it ran",
                 schedule.id.value,
+                ran.result.outcome.value,
                 schedule.action.value,
+                self.clock.now() - ran.finished_at,
             )
 
     async def _run_retry(self, schedule_id: ScheduleId, retry_at: dt.datetime) -> None:
@@ -904,7 +929,17 @@ class RunScheduleTick:
             schedule = await self._claim(schedule_id, "backup retry")
         except Exception:  # noqa: BLE001 - a claim that raises attempted nothing
             # Nothing was attempted, so the retry stays armed for the next tick
-            # (issue #4098): canonically, the database is still down.
+            # (issue #4098): canonically, the database is still down. Only its
+            # first failing tick warns; the poll logs an outage every tick.
+            if self._retry_unclaimed.get(schedule_id) == retry_at:
+                _LOG.debug(
+                    "schedule %s: its backup retry still could not be claimed; "
+                    "it is kept for the next tick",
+                    schedule_id.value,
+                    exc_info=True,
+                )
+                return
+            self._retry_unclaimed[schedule_id] = retry_at
             _LOG.warning(
                 "schedule %s: its backup retry could not be claimed; "
                 "it is kept for the next tick",
@@ -912,6 +947,7 @@ class RunScheduleTick:
                 exc_info=True,
             )
             return
+        self._retry_unclaimed.pop(schedule_id, None)
         if (
             schedule is None
             or not schedule.enabled
