@@ -271,6 +271,59 @@ When `MCD_API_WEBUI__DIST_DIR` is unset (the default outside compose), the API
 mounts nothing and serves only the API surface — that is the development posture,
 where Vite serves the UI and proxies the API (WEBUI_SPEC 7.7).
 
+### Container log rotation
+
+Docker's `json-file` log driver keeps everything a container writes to stdout
+and stderr. Unless told otherwise it keeps it in one file per container that
+never rotates, under `/var/lib/docker/containers/` on the host's root
+filesystem, for as long as the container exists. The stack therefore bounds
+every log it creates:
+
+- **The compose services.** `compose.yaml` gives every service the same
+  `logging:` setting, the `x-logging` anchor at the top of the file: the
+  `json-file` driver, rotated at `max-size` 50m, keeping at most `max-file` 5
+  files, the live one included. Each service holds at most 250 MB of log. To
+  change the bound, edit the anchor.
+- **The Minecraft server containers.** They are not compose services: the
+  worker creates them, and sets the same kind of bound on each, the launch
+  container and the Forge install container alike. `driver.container.log_max_size`
+  and `driver.container.log_max_file` set it, `50m` and `5` by default
+  ([`../app/CONFIGURATION.md`](../app/CONFIGURATION.md#63-execution-and-scratch)
+  Section 6.3). Compose forwards `MCD_WORKER_DRIVER_CONTAINER_LOG_MAX_SIZE` and
+  `MCD_WORKER_DRIVER_CONTAINER_LOG_MAX_FILE` from `.env`.
+
+`docker compose logs` and `docker logs` read the rotated files too, so they show
+what the bound retains, and nothing older.
+
+**The daemon-level alternative.** The Docker daemon's own default, `log-driver`
+and `log-opts` in `/etc/docker/daemon.json` (the option values must be strings),
+bounds every container that sets no logging of its own:
+
+```json
+{
+  "log-driver": "json-file",
+  "log-opts": { "max-size": "50m", "max-file": "5" }
+}
+```
+
+It takes effect when the daemon restarts, and only for containers created after
+that. It does **not** change the bound of this stack's containers: a container's
+own setting takes precedence over the daemon default, and every container here
+sets one. It is the way to bound the other containers on the host, and a
+backstop for any container created without a setting.
+
+**Existing deployments.** A container's logging is fixed when it is created, so
+a container from before this setting keeps its unbounded log until it is
+recreated. Recreating it removes the old container, and its log with it.
+
+- The compose services are recreated by the `docker compose up -d` of the
+  update (Section 9, or `make update`): `compose.yaml` changed, so compose
+  recreates every service. That includes the worker, and recreating the worker
+  stops the Minecraft servers it runs, as any worker update does.
+- A Minecraft server's container picks the bound up the next time the server
+  starts, because every start creates a new container. A server stopped by the
+  worker's recreation gets it at its next start.
+
 ## 5. Storage backend: `object` on SeaweedFS (default)
 
 The shipped deployment stores all server working sets, snapshots, and backups in
