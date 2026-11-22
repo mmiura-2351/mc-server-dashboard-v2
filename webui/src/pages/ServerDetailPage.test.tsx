@@ -1570,6 +1570,110 @@ describe("ServerDetailPage a server held by a refused final snapshot (#4057)", (
       ).toBeEnabled();
     });
   });
+
+  // Settled either way, the release refetches the server and the list. A
+  // success holds the controls until that refetch answers, as a lifecycle
+  // success does (#3860): until then the cache still shows the server held.
+  // The socket is installed but never opens, so no drop refetch stands in for
+  // the settle refetch.
+  describe("the release's settle refetch", () => {
+    const serverPath = `/api/communities/${CID}/servers/${SID}`;
+    const stopButton = () => screen.getByRole("button", { name: /Stop/ });
+    let restoreWs: () => void;
+    beforeEach(() => {
+      restoreWs = installMockWebSocket();
+    });
+    afterEach(() => restoreWs());
+
+    it("holds the controls through a release that succeeds until the refetch answers", async () => {
+      const released = server({
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      });
+      mockApi.get.mockResolvedValue(held("busy"));
+      let answerPost!: (value: unknown) => void;
+      mockApi.post.mockReturnValue(
+        new Promise((resolve) => {
+          answerPost = resolve;
+        }),
+      );
+      const { queryClient } = renderPage();
+      queryClient.setQueryData(serversKey(CID), [held("busy")]);
+
+      const dialog = await openRelease();
+      fireEvent.click(
+        within(dialog).getByRole("button", {
+          name: t("serverDetail.release.confirm"),
+        }),
+      );
+      await waitFor(() => expect(stopButton()).toBeDisabled());
+
+      let answerRefetch!: (value: unknown) => void;
+      mockApi.get.mockReturnValue(
+        new Promise((resolve) => {
+          answerRefetch = resolve;
+        }),
+      );
+      const reads = mockApi.get.mock.calls.length;
+      await act(async () => answerPost(released));
+
+      await waitFor(() =>
+        expect(
+          mockApi.get.mock.calls.slice(reads).map(([path]) => path),
+        ).toContain(serverPath),
+      );
+      expect(queryClient.getQueryState(serversKey(CID))?.isInvalidated).toBe(
+        true,
+      );
+      // A settled mutation renders a task later; flush it, so a success that
+      // did not wait for the refetch would show here.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(stopButton()).toBeDisabled();
+
+      act(() => answerRefetch(released));
+      await waitFor(() => expect(releaseButton()).not.toBeInTheDocument());
+      expect(
+        screen.getByRole("button", { name: t("serverDetail.start") }),
+      ).toBeEnabled();
+    });
+
+    it("refetches after a release that fails and frees the controls at once", async () => {
+      mockApi.get.mockResolvedValue(held("busy"));
+      mockApi.post.mockRejectedValue(
+        new ApiError(409, { reason: "invalid_transition" }),
+      );
+      const { queryClient } = renderPage();
+      queryClient.setQueryData(serversKey(CID), [held("busy")]);
+
+      const dialog = await openRelease();
+      // The refetch never answers: a failure does not wait for it.
+      mockApi.get.mockReturnValue(new Promise(() => {}));
+      const reads = mockApi.get.mock.calls.length;
+      fireEvent.click(
+        within(dialog).getByRole("button", {
+          name: t("serverDetail.release.confirm"),
+        }),
+      );
+
+      expect(
+        await screen.findByText(
+          aboutServer("survival", t("serverDetail.release.error.notHeld")),
+        ),
+      ).toBeInTheDocument();
+      await waitFor(() =>
+        expect(
+          mockApi.get.mock.calls.slice(reads).map(([path]) => path),
+        ).toContain(serverPath),
+      );
+      expect(queryClient.getQueryState(serversKey(CID))?.isInvalidated).toBe(
+        true,
+      );
+      await waitFor(() => expect(stopButton()).toBeEnabled());
+    });
+  });
 });
 
 describe("ServerDetailPage export (minted grant, #2353)", () => {

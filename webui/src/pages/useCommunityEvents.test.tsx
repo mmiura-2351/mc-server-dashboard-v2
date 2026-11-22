@@ -479,6 +479,38 @@ describe("useCommunityEvents", () => {
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: serversKey(CID) });
   });
 
+  // The snapshot replaces the live states (#1795): a state a frame set for a
+  // server the snapshot does not list goes with it, so that server no longer
+  // counts as one the list lacks.
+  it.each([
+    ["assigned_worker_id", { assigned_worker_id: null }],
+    ["final_snapshot_refusal", { final_snapshot_refusal: "busy" }],
+  ] as const)(
+    "drops a frame's %s for a server the snapshot does not list",
+    (_name, payload) => {
+      const { invalidateSpy } = setup([serverRow("s1", "stopped")]);
+      act(() => {
+        MockWebSocket.last().open();
+        MockWebSocket.last().message(
+          JSON.stringify({
+            stream: "status",
+            ts: "t",
+            payload,
+            server_id: "s2",
+          }),
+        );
+      });
+      // A server the list lacks: one refetch loads it.
+      expect(invalidateSpy).toHaveBeenCalledTimes(1);
+
+      act(() => {
+        MockWebSocket.last().message(snapshotFrame([["s1", "stopped"]]));
+      });
+      // The snapshot lists s1 alone, as the list does: nothing to load.
+      expect(invalidateSpy).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it("ignores a snapshot that arrives before the list is loaded", () => {
     const { queryClient, invalidateSpy } = setup(undefined);
     act(() => {
@@ -861,9 +893,10 @@ describe("useCommunityEvents with REST reads in flight (#3213)", () => {
     expect(cached()).toEqual([{ id: "s1", observed_state: "unknown" }]);
   });
 
-  // The same supersede for the intent (#3428) and the assignment (#3818): a
-  // read that started after the frame repairs a frame that went missing since,
-  // so a lost release cannot hold Start for good.
+  // The same supersede for the intent (#3428), the assignment (#3818) and the
+  // final-snapshot refusal (#4057): a read that started after the frame
+  // repairs a frame that went missing since, so a lost release cannot hold
+  // Start for good.
   it.each([
     [
       "desired_state",
@@ -884,6 +917,16 @@ describe("useCommunityEvents with REST reads in flight (#3213)", () => {
         server_id: "s1",
       },
       { ...serverRow("s1", "stopped"), assigned_worker_id: null },
+    ],
+    [
+      "final_snapshot_refusal",
+      {
+        stream: "status",
+        ts: "t",
+        payload: { final_snapshot_refusal: "busy" },
+        server_id: "s1",
+      },
+      { ...serverRow("s1", "stopped"), final_snapshot_refusal: null },
     ],
   ] as const)(
     "lets a REST read started after the frame supersede its %s",
