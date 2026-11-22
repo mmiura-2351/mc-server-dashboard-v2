@@ -239,10 +239,10 @@ class IntegritySweep:
                         await self._check_backup(lock, server, backup, actor_id)
                     ] += 1
             except ServerBusyError:
-                # Another lifecycle operation (a backup being published, a restore,
+                # Another lifecycle operation (a backup being deleted, a restore,
                 # ...) held the server past the lock's wait budget; this row may be
-                # mid-publication, so no verdict is safe now. Skip it rather than
-                # fail the pass; a re-run checks it.
+                # mid-delete, so no verdict is safe now. Skip it rather than fail
+                # the pass; a re-run checks it.
                 _LOG.info(
                     "integrity sweep: backup %s skipped, server %s is busy (another "
                     "lifecycle operation holds it); re-run the sweep to check it",
@@ -262,7 +262,7 @@ class IntegritySweep:
         """Probe one backup's archive and persist (and audit) its verdict.
 
         A verdict is written only while ``lock`` still holds (issue #3927): a lock
-        lost during the probe may have let a publication of this backup begin.
+        lost during the probe may have let a delete of this backup begin.
         """
 
         try:

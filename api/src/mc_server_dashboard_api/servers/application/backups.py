@@ -23,7 +23,7 @@ state per the 6.9 table:
 Each create writes the archive **before** it records its :class:`Backup` metadata
 row (source manual or scheduled, the archive ref, its size, the actor), and an
 upload stores its archive the same way (issue #4086). The row is inserted with
-its size in one transaction, so no row is ever visible without its archive. A
+its size in one transaction, so no row is recorded ahead of its archive. A
 failure after the archive write, a cancellation included, deletes the archive
 again (best effort). A crash, or a delete that fails, leaves an archive with no
 row: no listing shows it, and the server's delete prunes it.
@@ -234,7 +234,7 @@ class CreateBackup:
                 raise server.not_quiescent_error(BackupUnsettledError)
 
             # Write the archive BEFORE recording its row (issue #4086), so no row
-            # is ever visible without its archive. A failure after the write
+            # is recorded ahead of its archive. A failure after the write
             # deletes the archive again (best effort, :func:`_discard_archive`).
             storage_ref = uuid.uuid4().hex
             created_at = self.clock.now()

@@ -1997,6 +1997,7 @@ async def test_create_whose_cleanup_cannot_reach_the_database_leaves_no_row() ->
         )
 
     assert uow.backups.by_id == {}
+    assert archive.deleted == []
 
 
 async def test_a_create_cancelled_mid_archive_leaves_no_row() -> None:
@@ -2100,6 +2101,7 @@ async def test_upload_whose_cleanup_cannot_reach_the_database_leaves_no_row() ->
         )
 
     assert uow.backups.by_id == {}
+    assert archive.deleted == []
 
 
 async def test_an_upload_cancelled_mid_store_leaves_no_row() -> None:

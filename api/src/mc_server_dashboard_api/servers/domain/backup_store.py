@@ -55,7 +55,7 @@ class BackupArchiveStore(abc.ABC):
         """Archive the authoritative ``current/`` under the given ref (FR-BAK-1).
 
         The caller pre-generates the ref, writes the archive, and only then records
-        its metadata row (issue #4086), so no row is visible without its archive.
+        its metadata row (issue #4086), so no row is recorded ahead of its archive.
         Raises :class:`BackupNotFoundError` if nothing is published to archive, and
         :class:`BackupTooLargeError`, writing nothing, if the working set's archive
         would be past the decompressed-size cap (#3859).

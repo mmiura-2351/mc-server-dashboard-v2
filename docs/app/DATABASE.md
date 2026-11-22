@@ -899,7 +899,7 @@ Creating a backup is the same two-store write in the other order (issue #4086). 
 create or an upload writes the archive first and inserts the row, with its size,
 in one transaction once the archive exists. A failure after the archive write, a
 cancellation included, deletes the archive again, best effort. So no row is
-visible without its archive. A crash, or a delete that fails, leaves an archive
+recorded ahead of its archive. A crash, or a delete that fails, leaves an archive
 with no row instead: no listing shows it, and the server's delete prunes it
 (STORAGE.md Section 3.3).
 
