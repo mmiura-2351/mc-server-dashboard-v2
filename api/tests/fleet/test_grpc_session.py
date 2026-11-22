@@ -3418,15 +3418,18 @@ async def test_a_hold_purges_the_log_lines_queued_before_it_started(
 
 class _GatedFirstWriteSink(_OutageSink):
     """The first write waits for ``gate``, as one on a database slow to answer;
-    every later one lands at once."""
+    every later one lands at once. ``calls`` counts every write begun, a cut one
+    included."""
 
     def __init__(self, gate: asyncio.Event) -> None:
         super().__init__()
         self._gate: asyncio.Event | None = gate
+        self.calls: dict[str, int] = {}
 
     async def record_observed_state(
         self, *, server_id: str, worker_id: str, state: str, **frame: Any
     ) -> bool:
+        self.calls[server_id] = self.calls.get(server_id, 0) + 1
         if self._gate is not None:
             gate, self._gate = self._gate, None
             await gate.wait()
@@ -3475,7 +3478,150 @@ async def test_a_slow_first_attempt_is_held_while_the_session_lives(
             (_SERVER_B, _WORKER_ID, "stopped"),
         ]
         # The first attempt was awaited, not cut and tried again.
-        assert sink.attempts == {_SERVER_A: 1, _SERVER_B: 1}
+        assert sink.calls == {_SERVER_A: 1, _SERVER_B: 1}
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+class _FailFirstSink(FakeServerStateSink):
+    """The first write fails at once with ``exc``; every later one lands."""
+
+    def __init__(self, exc: type[Exception]) -> None:
+        super().__init__()
+        self._exc: type[Exception] | None = exc
+
+    async def record_observed_state(
+        self, *, server_id: str, worker_id: str, state: str, **frame: Any
+    ) -> bool:
+        if self._exc is not None:
+            exc, self._exc = self._exc, None
+            raise exc("scripted")
+        return await super().record_observed_state(
+            server_id=server_id, worker_id=worker_id, state=state, **frame
+        )
+
+
+def _relayed_lines(h: _Harness) -> list[object]:
+    return [e.payload["line"] for _, e in h.real_time_events.published]
+
+
+@pytest.mark.usefixtures("fast_hold")
+@pytest.mark.parametrize(
+    ("sink", "settled", "holds"),
+    [
+        pytest.param(FakeServerStateSink, "observed", 0, id="applied-at-once"),
+        pytest.param(lambda: _FailFirstSink(_BUG), "dropped", 0, id="own-error"),
+        pytest.param(lambda: _FailFirstSink(_OUTAGE), "observed", 1, id="outage"),
+    ],
+)
+async def test_a_message_done_before_the_deadline_leaves_no_hold_behind(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    sink: Callable[[], FakeServerStateSink],
+    settled: str,
+    holds: int,
+) -> None:
+    # Every message arms the first attempt's deadline (review r2 of #4049). One
+    # that settles before it, however it settles, must disarm it: a deadline
+    # left armed would start a hold nothing ends, and the reader would drop the
+    # Worker's log lines from then on.
+    caplog.set_level(logging.INFO, logger=_GRPC_SERVER_LOGGER)
+    deadline = 0.2
+    monkeypatch.setattr(grpc_server, "_FIRST_ATTEMPT_TIMEOUT_SECONDS", deadline)
+    state_sink = sink()
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=state_sink,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await _wait_until(
+            lambda: (
+                state_sink.observed
+                if settled == "observed"
+                else _logged(caplog, "dropping a worker message after a handler error")
+            ),
+            "the report was not settled",
+        )
+        # Past the deadline: a timer left armed fires now.
+        await asyncio.sleep(deadline * 2)
+        assert len(_logged(caplog, _HOLD_STARTED)) == holds
+        await call.write(_log_message(_FLOOD_SERVER, "after"))
+        await _wait_until(
+            lambda: _relayed_lines(h) == ["after"], "the line was dropped"
+        )
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+class _SlowFailureSink(FakeServerStateSink):
+    """The first write fails with ``DatabaseTimeoutError`` only after ``slow``
+    seconds, as a driver bound past the first attempt's deadline does; every
+    later one lands."""
+
+    def __init__(self, slow: float) -> None:
+        super().__init__()
+        self._slow: float | None = slow
+
+    async def record_observed_state(
+        self, *, server_id: str, worker_id: str, state: str, **frame: Any
+    ) -> bool:
+        if self._slow is not None:
+            slow, self._slow = self._slow, None
+            await asyncio.sleep(slow)
+            raise DatabaseTimeoutError("the database did not answer")
+        return await super().record_observed_state(
+            server_id=server_id, worker_id=worker_id, state=state, **frame
+        )
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_first_attempt_that_fails_after_its_hold_started_logs_why(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The deadline starts the hold with no error to show, so the first
+    # attempt's failure, which comes later, is logged on its own, with its
+    # traceback: which bound ran out (review r2 of #4049). The hold is not
+    # started a second time: one WARNING that it started, one purge.
+    caplog.set_level(logging.INFO, logger=_GRPC_SERVER_LOGGER)
+    monkeypatch.setattr(grpc_server, "_FIRST_ATTEMPT_TIMEOUT_SECONDS", 0.2)
+    purges = 0
+    purge = grpc_server._Hold.start
+
+    def _counted_purge(hold: Any) -> None:
+        nonlocal purges
+        purges += 1
+        purge(hold)
+
+    monkeypatch.setattr(grpc_server._Hold, "start", _counted_purge)
+    sink = _SlowFailureSink(slow=0.4)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+
+        await _wait_until(lambda: sink.observed, "the report did not land")
+        failures = [
+            r
+            for r in caplog.records
+            if r.name == _GRPC_SERVER_LOGGER
+            and r.exc_info is not None
+            and isinstance(r.exc_info[1], DatabaseTimeoutError)
+        ]
+        assert len(failures) == 1
+        assert failures[0].levelno == logging.WARNING
+        assert len(_logged(caplog, _HOLD_STARTED)) == 1
+        assert purges == 1
         await call.done_writing()
     finally:
         await h.stop()

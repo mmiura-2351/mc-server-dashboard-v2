@@ -141,10 +141,10 @@ _HOLD_RETRY_MAX_SECONDS = 10.0
 # driver's bound, ``database.statement_timeout_seconds``, while a busy log stream
 # fills the queue within about a second; the reader then stops, and the session
 # ends 10 s later when the Worker's send stalls, or once the heartbeats lapse. So
-# the hold, and its purge of the queue, starts at this deadline, half the
-# Worker's limit, while the attempt goes on: cancelling it could abandon a commit
-# that still lands, whose frame the retry would not stage again (review r1 of
-# #4049). The driver's bounds end the attempt.
+# the hold, and its purge of the queue, starts at this deadline, under a third of
+# the Worker's limit, while the attempt goes on: cancelling it could abandon a
+# commit that still lands, whose frame the retry would not stage again (review r1
+# of #4049). The driver's bounds end the attempt.
 _FIRST_ATTEMPT_TIMEOUT_SECONDS = 3.0
 
 # Backpressure limit on the queue between the inbound reader task and the
@@ -858,6 +858,14 @@ class WorkerSessionServicer(WorkerServiceServicer):
                     raise
                 if not hold.active:
                     self._start_hold(worker_id, hold, exc)
+                else:
+                    # The deadline started the hold with no error to show; this
+                    # one says which bound ran out.
+                    _LOG.warning(
+                        "a held worker message's first attempt failed",
+                        extra={"worker_id": worker_id.value},
+                        exc_info=exc,
+                    )
             else:
                 if hold.active:
                     _LOG.info(
