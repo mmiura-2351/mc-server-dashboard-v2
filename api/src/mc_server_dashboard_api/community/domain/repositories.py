@@ -71,8 +71,9 @@ class CommunityRepository(abc.ABC):
 
         For a write that locks rows a community deletion cascades to (#4021): the
         deletion waits for this transaction, and a community one deleted first
-        is reported absent. The row is key-share locked, so a rename does not
-        wait for it.
+        is reported absent. The row is key-share locked, so holders do not wait
+        for each other; a rename does, its UPDATE changing the unique name, as
+        it already did for a membership or role INSERT's foreign-key check.
         """
 
     @abc.abstractmethod
@@ -129,9 +130,9 @@ class MembershipRepository(abc.ABC):
     ) -> Membership | None:
         """Return :meth:`get_by_user_and_community`, locked for removal until commit.
 
-        A member removal takes this before any other lock (#3241), so it queues
-        behind a transaction holding the membership instead of deadlocking with
-        it over the rows below the membership.
+        A member removal takes this right after holding the community (#3241,
+        #4021), so it queues behind a transaction holding the membership instead
+        of deadlocking with it over the rows below the membership.
         """
 
     @abc.abstractmethod

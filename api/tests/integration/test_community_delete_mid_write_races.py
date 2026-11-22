@@ -174,7 +174,7 @@ class _World:
     factory: async_sessionmaker[AsyncSession]
     community_id: CommunityId
     owner: UserId
-    # A plain member, holding no role.
+    # A plain member, holding only the custom role below.
     member: UserId
     # A user who is not a member.
     outsider: UserId
@@ -507,7 +507,7 @@ def _write_first(
             cascade_last=("membership",),
             stall=True,
         ),
-        *_write_first(_assign_owner_role, "memberships.list_role_ids", "assign-role"),
+        *_write_first(_assign_owner_role, "memberships.lock_role_ids", "assign-role"),
         *_write_first(
             _assign_owner_role,
             "memberships.hold_for_users",
