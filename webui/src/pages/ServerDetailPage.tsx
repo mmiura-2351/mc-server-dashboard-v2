@@ -1161,6 +1161,11 @@ function Console({
 
   // ↑/↓ browse the local history; at the bottom (index -1) the input is blank.
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    // A key the IME is composing with is the IME's: Enter confirms a
+    // conversion, ↑/↓ pick a candidate (#4012).
+    if (isComposing(event.nativeEvent)) {
+      return;
+    }
     const items = history.current;
     if (event.key === "ArrowUp" && items.length > 0) {
       event.preventDefault();

@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 from mc_server_dashboard_api.community.application.manage_membership import MemberView
 from mc_server_dashboard_api.community.domain.entities import Membership
 from mc_server_dashboard_api.community.domain.errors import (
+    CommunityNotFoundError,
     LastOwnerRemovalError,
     MembershipAlreadyExistsError,
     MembershipNotFoundError,
@@ -200,6 +201,24 @@ def test_add_member_duplicate_returns_409() -> None:
     )
     assert resp.status_code == 409
     assert resp.json()["reason"] == "already_member"
+
+
+def test_add_member_in_a_concurrently_deleted_community_gets_the_gate_404() -> None:
+    # The community's deletion committed after the gate admitted the caller
+    # (#2967): the answer is the one the gate now gives, a non-member's 404.
+    url = f"/api/communities/{uuid.uuid4()}/members"
+    body = {"user_id": str(uuid.uuid4())}
+    gate = _client(_app(member=False, allow=True, add_uc=_FakeUseCase())).post(
+        url, json=body
+    )
+    app = _app(
+        member=True,
+        allow=True,
+        add_uc=_FakeUseCase(error=CommunityNotFoundError("x")),
+    )
+    resp = _client(app).post(url, json=body)
+    assert resp.status_code == 404
+    assert resp.json() == gate.json()
 
 
 def test_add_member_invalid_user_id_returns_422() -> None:
@@ -414,6 +433,22 @@ def test_assign_role_cross_community_returns_404() -> None:
         json={"role_id": str(uuid.uuid4())},
     )
     assert resp.status_code == 404
+
+
+def test_assign_role_in_a_concurrently_deleted_community_gets_the_gate_404() -> None:
+    url = f"/api/communities/{uuid.uuid4()}/members/{uuid.uuid4()}/roles"
+    body = {"role_id": str(uuid.uuid4())}
+    gate = _client(_app(member=False, allow=True, assign_uc=_FakeUseCase())).post(
+        url, json=body
+    )
+    app = _app(
+        member=True,
+        allow=True,
+        assign_uc=_FakeUseCase(error=CommunityNotFoundError("x")),
+    )
+    resp = _client(app).post(url, json=body)
+    assert resp.status_code == 404
+    assert resp.json() == gate.json()
 
 
 def test_assign_role_invalid_role_id_returns_422() -> None:

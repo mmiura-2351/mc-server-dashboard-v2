@@ -54,7 +54,12 @@ Against the deleters:
 A community deletion cascades through every one of these tables (never to a
 server: it is refused while the community holds one, issue #3218) and is not
 ordered with these; a deadlock there is detected by PostgreSQL and aborts one
-side.
+side. A ceiling read after the deletion committed, or while it was in flight
+(the membership lock waits for it), finds the actor's membership gone; the
+community is then checked, and a community that is gone raises
+:class:`CommunityNotFoundError` instead of an empty ceiling (issue #2967) -- the
+answer of a write that meets the deletion at its foreign key onto ``community``
+(``adapters/integrity.py``).
 """
 
 from __future__ import annotations
@@ -63,6 +68,7 @@ import uuid
 from collections.abc import Sequence
 
 from mc_server_dashboard_api.community.domain.errors import (
+    CommunityNotFoundError,
     PermissionCeilingExceededError,
 )
 from mc_server_dashboard_api.community.domain.unit_of_work import UnitOfWork
@@ -96,9 +102,15 @@ async def lock_actor_ceiling(
     if the actor holds them. A caller that also inserts under a recipient's
     membership holds both memberships first (lock order step 1); the actor's
     is then already held here.
+
+    Raises :class:`CommunityNotFoundError` when the actor has no membership
+    because the community itself is gone (issue #2967); an actor who is merely
+    not a member of a community that exists gets the empty ceiling.
     """
     memberships = await uow.memberships.hold_for_users(community_id, [actor_id])
     membership = memberships[0] if memberships else None
+    if membership is None and await uow.communities.get_by_id(community_id) is None:
+        raise CommunityNotFoundError(str(community_id.value))
     role_ids = (
         [] if membership is None else await uow.memberships.list_role_ids(membership.id)
     )

@@ -23,6 +23,7 @@ from mc_server_dashboard_api.community.application.manage_role import (
 from mc_server_dashboard_api.community.domain.clock import Clock
 from mc_server_dashboard_api.community.domain.entities import Role
 from mc_server_dashboard_api.community.domain.errors import (
+    CommunityNotFoundError,
     PermissionCeilingExceededError,
     PresetRoleNotEditableError,
     RoleAlreadyExistsError,
@@ -273,6 +274,24 @@ def test_create_role_ceiling_exceeded_returns_403() -> None:
     assert body["permissions"] == ["community:delete"]
 
 
+def test_create_role_in_a_concurrently_deleted_community_gets_the_gate_404() -> None:
+    # The community's deletion committed after the gate admitted the caller
+    # (#2967): the answer is the one the gate now gives, a non-member's 404.
+    url = f"/api/communities/{uuid.uuid4()}/roles"
+    body = {"name": "Editor", "permissions": ["server:read"]}
+    gate = _client(_app(member=False, allow=True, create_uc=_FakeUseCase())).post(
+        url, json=body
+    )
+    app = _app(
+        member=True,
+        allow=True,
+        create_uc=_FakeUseCase(error=CommunityNotFoundError("x")),
+    )
+    resp = _client(app).post(url, json=body)
+    assert resp.status_code == 404
+    assert resp.json() == gate.json()
+
+
 # --- update -----------------------------------------------------------------
 
 
@@ -360,6 +379,22 @@ def test_update_role_cross_community_gets_404() -> None:
         json={"name": "X"},
     )
     assert resp.status_code == 404
+
+
+def test_update_role_in_a_concurrently_deleted_community_gets_the_gate_404() -> None:
+    url = f"/api/communities/{uuid.uuid4()}/roles/{uuid.uuid4()}"
+    body = {"permissions": ["server:read"]}
+    gate = _client(_app(member=False, allow=True, update_uc=_FakeUseCase())).patch(
+        url, json=body
+    )
+    app = _app(
+        member=True,
+        allow=True,
+        update_uc=_FakeUseCase(error=CommunityNotFoundError("x")),
+    )
+    resp = _client(app).patch(url, json=body)
+    assert resp.status_code == 404
+    assert resp.json() == gate.json()
 
 
 def test_update_role_ceiling_exceeded_returns_403() -> None:

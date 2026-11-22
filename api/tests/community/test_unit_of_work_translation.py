@@ -35,6 +35,7 @@ from mc_server_dashboard_api.community.domain.entities import Community
 from mc_server_dashboard_api.community.domain.errors import (
     CommunityAlreadyExistsError,
     CommunityHasServersError,
+    CommunityNotFoundError,
     MembershipAlreadyExistsError,
     RoleAlreadyExistsError,
 )
@@ -59,13 +60,16 @@ def _integrity_error(constraint: str) -> IntegrityError:
 
 
 class _FakeSession:
-    """Async session double: ``flush`` raises, ``rollback`` is recorded."""
+    """Async session double: ``flush``/``commit`` raise; ``rollback`` is recorded."""
 
     def __init__(self, error: IntegrityError) -> None:
         self._error = error
         self.rolled_back = False
 
     async def flush(self) -> None:
+        raise self._error
+
+    async def commit(self) -> None:
         raise self._error
 
     async def rollback(self) -> None:
@@ -110,6 +114,26 @@ async def test_flush_reraises_unknown_violation_untranslated() -> None:
     uow, _ = _uow_with_flush_error("uq_some_other_constraint")
     with pytest.raises(IntegrityError):
         await uow.flush()
+
+
+# --- the community foreign keys, at the commit that flushes the INSERT (#2967) -
+
+
+@pytest.mark.parametrize(
+    "constraint",
+    [
+        "fk_membership_community_id_community",
+        "fk_role_community_id_community",
+        "fk_resource_grant_community_id_community",
+    ],
+)
+async def test_commit_translates_a_deleted_community_to_not_found(
+    constraint: str,
+) -> None:
+    uow, session = _uow_with_flush_error(constraint)
+    with pytest.raises(CommunityNotFoundError):
+        await uow.commit()
+    assert session.rolled_back is True
 
 
 # --- the rename UPDATE, which violates at its own execute (issue #2611) ------

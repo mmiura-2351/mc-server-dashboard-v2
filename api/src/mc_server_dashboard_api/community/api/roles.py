@@ -32,6 +32,7 @@ from mc_server_dashboard_api.community.application.manage_role import (
 )
 from mc_server_dashboard_api.community.domain.entities import Role
 from mc_server_dashboard_api.community.domain.errors import (
+    CommunityNotFoundError,
     InvalidPermissionError,
     InvalidRoleNameError,
     PermissionCeilingExceededError,
@@ -147,6 +148,8 @@ async def create_role(
         raise _invalid_permission() from exc
     except PermissionCeilingExceededError as exc:
         raise _permission_ceiling(exc) from exc
+    except CommunityNotFoundError as exc:
+        raise _not_found() from exc
     await recorder.record(
         AuditEvent(
             operation=ops.ROLE_CREATE,
@@ -184,6 +187,8 @@ async def update_role(
             ),
         )
     except RoleNotFoundError as exc:
+        raise _not_found() from exc
+    except CommunityNotFoundError as exc:
         raise _not_found() from exc
     except PresetRoleNotEditableError as exc:
         raise problem(status.HTTP_409_CONFLICT, "preset_role") from exc
