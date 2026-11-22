@@ -506,8 +506,7 @@ arrived. The hold ends when the message is applied, or when the session ends:
 - When a newer session replaces this one, the held message and everything still
   queued behind it are dropped unapplied. Nothing from the old session lands
   after the new session's reports, except a message already being applied when
-  the newer session registers: at most one per superseded session, tracked in
-  #4015.
+  the newer session registers: at most one per superseded session (#4015).
 - When the heartbeats lapse or the transport drops, the held message and the
   queue behind it are lost.
 
