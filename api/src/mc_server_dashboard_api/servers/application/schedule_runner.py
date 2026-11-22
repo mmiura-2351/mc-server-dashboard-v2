@@ -1248,9 +1248,9 @@ class RunScheduleTick:
         Returns whether the run was recorded: ``False`` when the schedule was
         deleted before the record could lock its row (module docstring). The
         audit and notification still go out — the action did run. They go out
-        only once the record has returned, so a record that raised and is
-        retried emits them once, even when its COMMIT had applied: its row is
-        then kept, under ``run_id`` (issue #4141).
+        only after the record returns, so a record retried after it raised
+        emits them once, even when its COMMIT had applied and the retry inserts
+        no row (issue #4141).
         """
 
         run = ScheduleRun(
