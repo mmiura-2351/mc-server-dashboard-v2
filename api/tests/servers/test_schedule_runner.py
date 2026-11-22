@@ -1935,6 +1935,69 @@ async def test_a_failed_retry_whose_record_fails_arms_no_further_retry() -> None
     ]
 
 
+async def test_a_retry_record_whose_commit_applied_is_written_and_audited_once() -> (
+    None
+):
+    store = FakeBackupArchiveStore(missing=True)  # the occurrence fails
+    env = _env(backup_store=store)
+    spy = _SpyPrune(uow=env.uow, backup_store=store, audit=env.audit, clock=env.clock)
+    env.runner.prune_backups = spy
+    schedule = _backup_schedule(env)
+    await _tick_at(env, _NOW)  # arms the retry 30 minutes on
+    store._missing = False
+    retry_at = _NOW + dt.timedelta(minutes=30)
+    lost = _RecordAnswerLost(env)  # from the retry's record on
+
+    await _tick_at(env, retry_at)
+    await _tick_at(env, retry_at + _TICK)  # the owed record is retried
+    await _tick_at(env, retry_at + 2 * _TICK)
+
+    assert lost.cuts == 1
+    assert _archive_attempts(store) == 2
+    assert _run_rows(env, schedule) == [
+        (ScheduleRunOutcome.FAILURE, "action failed", _NOW, _NOW),
+        (ScheduleRunOutcome.SUCCESS, None, retry_at, retry_at),
+    ]
+    assert [event.outcome for event in env.audit.events] == [
+        Outcome.ERROR,
+        Outcome.SUCCESS,
+    ]
+    assert _titles(env) == ["Scheduled backup failed", "Scheduled backup recovered"]
+    assert len(spy.calls) == 1
+    assert env.runner._owed == {}
+
+
+async def test_a_held_retry_skip_whose_commit_applied_is_written_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    bound = dt.timedelta(seconds=60)
+    store = FakeBackupArchiveStore(missing=True)  # the occurrence fails
+    env = _env(backup_store=store, deferral_bound=bound)
+    schedule = _backup_schedule(env)
+    await _tick_at(env, _NOW)  # arms the retry 30 minutes on
+    env.uow.schedules.by_id[schedule.id] = _replace_next_run(
+        env.uow.schedules.by_id[schedule.id], _NOW + dt.timedelta(days=1)
+    )
+    env.uow.servers.by_id[schedule.server_id].assigned_worker_id = _WORKER
+    retry_at = _NOW + dt.timedelta(minutes=30)
+    await _tick_at(env, retry_at)  # deferred
+    lost = _RecordAnswerLost(env)  # from the skip's record on
+
+    # Past the bound the skip is not owed: the retry stays armed, and the next
+    # tick, still held, decides the same skip again.
+    past = retry_at + bound + _TICK
+    await _tick_at(env, past)
+    await _tick_at(env, past + _TICK)
+    await _tick_at(env, past + 2 * _TICK)
+
+    assert lost.cuts == 1
+    assert _rows(env, schedule)[1:] == [(ScheduleRunOutcome.SKIPPED, "server_assigned")]
+    assert len(_gave_up_lines(caplog, schedule)) == 1
+    assert env.runner._backup_retry == {}
+    assert env.runner._deferred == {}
+
+
 async def test_backup_storage_timeout_records_distinguishable_detail() -> None:
     env = _env(backup_store=_StorageTimeoutBackupStore())
     server = _stopped_server()
