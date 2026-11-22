@@ -342,6 +342,26 @@ class CommandDispatchError(ServerError):
         self.status = status
 
 
+class FinalSnapshotRefusedError(ServerError):
+    """The Worker refused a stop's final snapshot ``BUSY`` or ``UNAVAILABLE``.
+
+    The server keeps its Worker and records the refusal in
+    ``final_snapshot_refusal``, so nothing places it elsewhere or writes its
+    files while the snapshot is still owed (#3697, the owner decision on #3701).
+    The reconciler retries the snapshot. A convergence of a stopped intent (the
+    reconciler's, or an operator's stop of a held server) raises this; the stop
+    that set the intent answers with the server stopped and held instead.
+
+    ``status`` is the refusal's code: the reconciler backs its retries off on
+    ``UNAVAILABLE`` and not on ``BUSY``. The edge maps this to 409
+    ``final_snapshot_refused``.
+    """
+
+    def __init__(self, message: str = "", *, status: CommandStatus) -> None:
+        super().__init__(message)
+        self.status = status
+
+
 class ServerFileNotFoundError(ServerError):
     """A file/version operation targeted a path or version that does not exist.
 

@@ -173,6 +173,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
     EulaNotAcceptedError,
+    FinalSnapshotRefusedError,
     InvalidLifecycleTransitionError,
     LifecycleTransitionConflictError,
     NoEligibleWorkerError,
@@ -204,6 +205,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     JAR_SOURCE_CONFIG_FIELD,
     CommunityId,
     DesiredState,
+    FinalSnapshotRefusal,
     ObservedState,
     ServerId,
     WorkerId,
@@ -272,6 +274,27 @@ _HYDRATE_REFUSALS_KEEPING_THE_WORKER = frozenset(
 # ``False`` there says the swap never began.
 _HYDRATE_REFUSALS_BEFORE_THE_SWAP = _HYDRATE_REFUSALS_KEEPING_THE_WORKER | {
     CommandStatus.INVALID_STATE
+}
+
+# The final-snapshot refusals that keep the Worker assigned (issue #3697, the
+# owner decision on #3701), each with the refusal the row records. The Worker
+# answers both before it packs anything, so nothing of that snapshot is in
+# flight, and neither says the working set is gone:
+#
+# * ``BUSY``: another command holds the id's reservation, or a failed-stop orphan
+#   the Worker is still converging does. The id frees once that settles.
+# * ``UNAVAILABLE``: a container of the server the Worker does not track may be
+#   writing the working set (a leftover the final snapshot could not end), or the
+#   daemon could not say.
+#
+# Releasing on either would let the next start place the server on another
+# Worker, or an at-rest write advance the store, and the progression the
+# snapshot still owes would be lost. Every other answer releases as before: the
+# decision keeps the hold to these two, since holding on a failure such as a
+# storage outage would refuse a same-Worker start that loses nothing today.
+_FINAL_SNAPSHOT_REFUSALS_KEEPING_THE_WORKER = {
+    CommandStatus.BUSY: FinalSnapshotRefusal.BUSY,
+    CommandStatus.UNAVAILABLE: FinalSnapshotRefusal.UNAVAILABLE,
 }
 
 
@@ -349,6 +372,18 @@ async def _mark_stopped(uow: UnitOfWork, server: Server, *, at: dt.datetime) -> 
         expected_from=DesiredState.RUNNING,
         expected_assigned_worker_id=server.assigned_worker_id,
     )
+
+
+def _reflect_release(server: Server) -> None:
+    """Reflect a release that landed onto the entity a stop returns (#4066 review).
+
+    A release clears the hydrate mark and the recorded refusal with the
+    assignment, so the response does not show either on a server no Worker holds.
+    """
+
+    server.assigned_worker_id = None
+    server.awaiting_hydrate = False
+    server.final_snapshot_refusal = None
 
 
 async def _load(
@@ -2147,8 +2182,9 @@ class StopServer:
             # this is the RELEASE half of the stop path — identical to the one the
             # reconciler's crashed arm runs (issue #2448); see
             # ``_release_after_final_snapshot``. A release kept for a session end
-            # still answers the stop, as on a snapshot timeout (issue #3981).
-            with suppress(WorkerUnavailableError):
+            # still answers the stop, as on a snapshot timeout (issue #3981), and
+            # so does one kept for a refused final snapshot (issue #3697).
+            with suppress(WorkerUnavailableError, FinalSnapshotRefusedError):
                 await self._release_after_final_snapshot(
                     server=server,
                     worker_id=worker_id,
@@ -2179,8 +2215,9 @@ class StopServer:
         # from non-owning worker"). Either is acceptable, since this write already
         # converged the cache. The stop is done, so a release kept because the final
         # snapshot met a session end still answers with the server stopped and
-        # assigned, as on a snapshot timeout (issue #3981).
-        with suppress(WorkerUnavailableError):
+        # assigned, as on a snapshot timeout (issue #3981), and so does one kept
+        # because the Worker refused the snapshot (issue #3697).
+        with suppress(WorkerUnavailableError, FinalSnapshotRefusedError):
             await self._record_stopped_then_final_snapshot(
                 server=server,
                 worker_id=worker_id,
@@ -2236,6 +2273,13 @@ class StopServer:
           margin lands while the row is STILL HELD (base == current, assignment
           intact) → the late publish succeeds, then the stale-stop arm clears and the
           next start hydrates the captured generation; the race never opens.
+        * REFUSED ``BUSY`` or ``UNAVAILABLE`` (issue #3697): the clear is SKIPPED,
+          and ``_final_snapshot`` raises :class:`FinalSnapshotRefusedError`. The
+          Worker packed nothing and still holds the working set the snapshot owes,
+          so releasing would lose it to a start elsewhere or an at-rest write. The
+          row records the refusal and the reconciler's stale-stop arm retries the
+          snapshot. As on a session end, ``__call__`` still answers and
+          ``redispatch_stop`` raises.
 
         On CANCELLATION of the task at the snapshot await (by whatever cancels it: a
         client disconnect does not, on the shipped server stack, issue #3950) the
@@ -2288,7 +2332,8 @@ class StopServer:
         # is still uploading; holding the row lets the stale-stop arm recover it
         # (issue #847), the same as the cancellation path, which propagates OUT of
         # ``_final_snapshot`` and skips the clear too. So does a session end, which
-        # ``_final_snapshot`` re-raises (issue #3981). The clear is
+        # ``_final_snapshot`` re-raises (issue #3981), and a refusal that keeps the
+        # Worker, which it raises (issue #3697). The clear is
         # independently CAS-guarded (``clear_assignment_after_final_snapshot`` matches
         # only a still desired=stopped row still assigned to this worker), so it is run
         # regardless of ``applied``: even if the #216 guard dropped the observed write,
@@ -2296,7 +2341,7 @@ class StopServer:
         # clear cannot clobber a fresher write and removes the wedge the old
         # ``applied`` gate left for the full grace window.
         upload_may_be_live = await self._final_snapshot(
-            worker_id=worker_id, community_id=community_id, server_id=server_id
+            server=server, worker_id=worker_id
         )
         # Unlike ``_release_after_final_snapshot``, this clear is NOT gated on the
         # convergence having landed (``at_rest_under_us``); it is the only unconditional
@@ -2381,7 +2426,10 @@ class StopServer:
         stale-stop arm once grace lapses. So does a snapshot that fails because the
         Worker's session ended, which ``_final_snapshot`` re-raises (issue #3981):
         the Worker may be back with the working set, and the stale-stop arm takes
-        the snapshot then, or releases the row a grace after the drop. Any other
+        the snapshot then, or releases the row a grace after the drop. So does a
+        snapshot the Worker refuses ``BUSY`` or ``UNAVAILABLE``, which it raises
+        too (issue #3697): the row records the refusal and the stale-stop arm
+        retries the snapshot. Any other
         snapshot FAILURE still releases: the server is down and the operator's stop
         succeeded; ``_final_snapshot`` logs publication as unconfirmed and names the
         cross-worker exposure.
@@ -2455,7 +2503,7 @@ class StopServer:
                 running=False,
             )
         upload_may_be_live = await self._final_snapshot(
-            worker_id=worker_id, community_id=community_id, server_id=server_id
+            server=server, worker_id=worker_id
         )
         if at_rest_under_us and not upload_may_be_live:
             # Shielded through the guard (issue #3491), so a cancelled caller's
@@ -2484,15 +2532,9 @@ class StopServer:
                 )
                 await self.uow.commit()
         if cleared:
-            server.assigned_worker_id = None
+            _reflect_release(server)
 
-    async def _final_snapshot(
-        self,
-        *,
-        worker_id: WorkerId,
-        community_id: CommunityId,
-        server_id: ServerId,
-    ) -> bool:
+    async def _final_snapshot(self, *, server: Server, worker_id: WorkerId) -> bool:
         """Capture the working set of a server whose process is gone.
 
         Shared by ``__call__`` and ``redispatch_stop`` (issue #846) so reconciler-
@@ -2506,8 +2548,8 @@ class StopServer:
         rest on all of them, whether the process exited on command or died.
 
         A snapshot failure is logged, not raised: the stop itself already succeeded
-        and the server is down. A session end is the exception, below. The failure
-        is logged at ERROR, not warning
+        and the server is down. A session end and a refusal that keeps the Worker
+        are the exceptions, below. The failure is logged at ERROR, not warning
         (issue #841): this is the ONLY final-snapshot path for a graceful stop, and
         the server is now stopped (and about to be unassigned), so there is no
         periodic-snapshot or reconciler retry. A failed result carries no publication
@@ -2539,6 +2581,24 @@ class StopServer:
         here would orphan the set in the Worker's scratch while a start placed the
         server from the older store.
 
+        A snapshot the Worker refuses ``BUSY`` or ``UNAVAILABLE``
+        (``_FINAL_SNAPSHOT_REFUSALS_KEEPING_THE_WORKER``) raises
+        :class:`FinalSnapshotRefusedError` instead, after one WARNING and no ERROR
+        (issue #3697, the owner decision on #3701). The Worker still holds the
+        working set this snapshot owes, so every caller keeps the assignment, and
+        the row records the refusal (``final_snapshot_refusal``). The refusal is
+        also recorded for the reconciler (``unrecorded_stops``), once it is
+        answered: nothing of the snapshot is in flight, so the stale-stop arm
+        retries it on the short grace, with no bound. Only a snapshot that
+        settles otherwise, or an operator's release without it
+        (``ReleaseHeldServer``), releases the row.
+
+        A later attempt that is not refused clears the recorded refusal: a release
+        clears it with the assignment, and a timeout or a session end, which keep
+        the row, clear it here. It is written only from here and from the late
+        result of a final snapshot, both under the stop-convergence claim, so the
+        value this reads before the dispatch is still the row's when it answers.
+
         A row whose Worker is not known to hold the store's working set
         (``awaiting_hydrate``: it has not hydrated the server under this assignment,
         issue #3890, or a re-sent start marked it for a new hydrate that has not
@@ -2550,6 +2610,7 @@ class StopServer:
         three callers pass this one check.
         """
 
+        server_id = server.id
         # A dispatched snapshot may outlive its caller, so a finished stop recorded
         # before it no longer means nothing is in flight (issue #3441). A recorded
         # stop refusal goes for the same reason: it no longer describes the latest
@@ -2558,6 +2619,7 @@ class StopServer:
         self.stop_refusals.forget(server_id)
         async with self.uow:
             current = await self.uow.servers.get_by_id(server_id)
+        recorded = None if current is None else current.final_snapshot_refusal
         if (
             current is not None
             and current.assigned_worker_id == worker_id
@@ -2575,10 +2637,29 @@ class StopServer:
         try:
             snapshot = await self.control_plane.snapshot(
                 worker_id=worker_id,
-                community_id=community_id,
+                community_id=server.community_id,
                 server_id=server_id,
                 final=True,
             )
+            refusal = _FINAL_SNAPSHOT_REFUSALS_KEEPING_THE_WORKER.get(snapshot.status)
+            if refusal is not None:
+                detail = snapshot.message or snapshot.status.value
+                _LOG.warning(
+                    "final snapshot for server %s was refused %s by worker %s: %s. "
+                    "The worker still holds the working set this snapshot owes, so "
+                    "the server stays assigned to it, and the snapshot is retried "
+                    "(issue #3697)",
+                    server_id.value,
+                    snapshot.status.value,
+                    worker_id.value,
+                    detail,
+                )
+                # Answered, so nothing of this snapshot is in flight.
+                self.unrecorded_stops.record(server_id, at=self.clock.now())
+                await self._record_final_snapshot_answer(
+                    server, worker_id, refusal, recorded=recorded
+                )
+                raise FinalSnapshotRefusedError(detail, status=snapshot.status)
             if not snapshot.success:
                 if is_working_set_absent_refusal(snapshot):
                     # The Worker's working_set_absent refusal (issue #1713): it holds
@@ -2624,6 +2705,9 @@ class StopServer:
                     "assignment for the stale-stop arm to clear once grace lapses",
                     server_id.value,
                 )
+                await self._record_final_snapshot_answer(
+                    server, worker_id, None, recorded=recorded
+                )
                 return True
             if exc.worker_state is UnavailableWorkerState.NOT_CONNECTED:
                 _LOG.warning(
@@ -2633,6 +2717,9 @@ class StopServer:
                     "takes the snapshot (issues #3963, #3981)",
                     server_id.value,
                 )
+                await self._record_final_snapshot_answer(
+                    server, worker_id, None, recorded=recorded
+                )
                 raise
             _LOG.error(
                 "final snapshot could not reach the Worker for server %s; the "
@@ -2641,6 +2728,34 @@ class StopServer:
                 server_id.value,
             )
         return False
+
+    async def _record_final_snapshot_answer(
+        self,
+        server: Server,
+        worker_id: WorkerId,
+        refusal: FinalSnapshotRefusal | None,
+        *,
+        recorded: FinalSnapshotRefusal | None,
+    ) -> None:
+        """Record on the row whether the final snapshot was refused (issue #3697).
+
+        ``refusal`` is the refusal that keeps the Worker, or ``None`` for an
+        answer that keeps the row without being one (a timeout, a session end).
+        ``recorded`` is the value the row held before the dispatch; an unchanged
+        value is not written again, so a refusal repeated every reconciler tick
+        costs no write. The write's guard (still stopped, still this Worker's)
+        matches under the stop-convergence claim: every release holds the claim,
+        and no start places a row that is still assigned. So the entity takes the
+        value either way.
+        """
+
+        if refusal is not recorded:
+            async with self.uow:
+                await self.uow.servers.set_final_snapshot_refusal(
+                    server.id, worker_id, refusal
+                )
+                await self.uow.commit()
+        server.final_snapshot_refusal = refusal
 
     async def redispatch_stop(
         self, *, community_id: CommunityId, server_id: ServerId, force: bool = False
@@ -2821,6 +2936,9 @@ class StopServer:
         caller chose this convergence and still at Step A skips the snapshot (the
         worker is gone; same exposure as today, logged loud). A snapshot TIMEOUT
         raises ``WorkerUnavailableError`` so the reconciler backs off. A snapshot
+        the Worker refuses ``BUSY`` or ``UNAVAILABLE`` raises
+        :class:`FinalSnapshotRefusedError` before Step C too, keeping the row and
+        its recorded refusal for the next retry (issue #3697). Any other snapshot
         failure (TRANSFER_FAILED, etc.) or a benign duplicate
         (working_set_absent) proceeds to clear — ``_final_snapshot`` logs an ordinary
         failure as unconfirmed publication with the cross-worker exposure, or records
@@ -2949,9 +3067,7 @@ class StopServer:
             and connected
         ):
             upload_may_be_live = await self._final_snapshot(
-                worker_id=worker_id,
-                community_id=community_id,
-                server_id=server_id,
+                server=server, worker_id=worker_id
             )
             if upload_may_be_live:
                 # The connected Worker has not answered the snapshot yet.
@@ -3017,7 +3133,7 @@ class StopServer:
                     )
                     await self.uow.commit()
         if cleared:
-            server.assigned_worker_id = None
+            _reflect_release(server)
             if wedged_at is ObservedState.UNKNOWN:
                 _LOG.warning(
                     "recovered a stop wedged at (stopped, unknown, assigned) for "

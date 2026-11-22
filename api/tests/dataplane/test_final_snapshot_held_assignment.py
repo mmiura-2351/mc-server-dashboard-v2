@@ -44,11 +44,16 @@ from mc_server_dashboard_api.servers.adapters.backup_store import (
 from mc_server_dashboard_api.servers.adapters.file_store import StorageFileStoreAdapter
 from mc_server_dashboard_api.servers.application.backups import RestoreBackup
 from mc_server_dashboard_api.servers.application.files import WriteFile
+from mc_server_dashboard_api.servers.application.lifecycle import StopServer
 from mc_server_dashboard_api.servers.domain.backup import (
     Backup,
     BackupHealth,
     BackupId,
     BackupSource,
+)
+from mc_server_dashboard_api.servers.domain.control_plane import (
+    CommandOutcome,
+    CommandStatus,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import ServerAssignedError
@@ -57,6 +62,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     DesiredState,
+    FinalSnapshotRefusal,
     ObservedState,
     ServerName,
     ServerType,
@@ -320,6 +326,78 @@ def test_an_edit_during_the_final_snapshot_is_refused_and_the_snapshot_lands(
         files={"k": b"final-snapshot"},
     )
     assert status == 204
+    assert asyncio.run(storage.current_generation(c, s)) == base + 1
+    assert asyncio.run(storage.current_publisher(c, s)) == worker
+    assert asyncio.run(_live(storage, c, s)) == {"k": b"final-snapshot"}
+
+
+@_BACKENDS
+def test_a_server_held_by_a_refused_final_snapshot_keeps_its_world_for_the_retry(
+    tmp_path: Path,
+    make_storage: Callable[[Path], Storage],
+    data_plane: Callable[[Storage, str], TestClient],
+) -> None:
+    # Issue #3697: the Worker refuses the stop's final snapshot UNAVAILABLE (a
+    # leftover container it could not end may still write the working set). The
+    # server stays assigned with the refusal recorded, so an edit cannot advance
+    # the store under the snapshot still owed. The retry then publishes, and the
+    # stop that drives it releases the server.
+    worker = str(uuid.uuid4())
+    storage = make_storage(tmp_path)
+    c, s = CommunityId(uuid.uuid4()), ServerId(uuid.uuid4())
+    sc, ss = ServersCommunityId(c.value), ServersServerId(s.value)
+
+    asyncio.run(_publish(storage, c, s, {"k": b"snap"}, worker))
+    base = asyncio.run(storage.current_generation(c, s))
+
+    uow = FakeUnitOfWork()
+    running = _held_server(c, s, worker)
+    running.desired_state = DesiredState.RUNNING
+    running.observed_state = ObservedState.RUNNING
+    running.observed_at = _NOW - dt.timedelta(minutes=5)
+    uow.servers.seed(running)
+    refused = FakeControlPlane(
+        outcomes={"snapshot": CommandOutcome(status=CommandStatus.UNAVAILABLE)}
+    )
+    held = asyncio.run(
+        StopServer(uow=uow, control_plane=refused, clock=FakeClock(_NOW))(
+            community_id=sc, server_id=ss
+        )
+    )
+    assert held.assigned_worker_id == WorkerId(uuid.UUID(worker))
+    assert held.final_snapshot_refusal is FinalSnapshotRefusal.UNAVAILABLE
+
+    write = WriteFile(
+        uow=uow,
+        control_plane=FakeControlPlane(),
+        file_store=StorageFileStoreAdapter(storage=storage),
+    )
+    with pytest.raises(ServerAssignedError):
+        asyncio.run(
+            write(community_id=sc, server_id=ss, rel_path="k", content=b"edited")
+        )
+    assert asyncio.run(storage.current_generation(c, s)) == base
+    assert asyncio.run(_live(storage, c, s)) == {"k": b"snap"}
+
+    # The retry: the Worker's final snapshot publishes through the data plane,
+    # and the snapshot command it answers releases the server.
+    status = _post_snapshot(
+        data_plane(storage, worker),
+        c,
+        s,
+        base=base,
+        worker=worker,
+        files={"k": b"final-snapshot"},
+    )
+    assert status == 204
+    released = asyncio.run(
+        StopServer(uow=uow, control_plane=FakeControlPlane(), clock=FakeClock(_NOW))(
+            community_id=sc, server_id=ss
+        )
+    )
+    assert released.assigned_worker_id is None
+    assert released.final_snapshot_refusal is None
+    assert uow.servers.by_id[ss].assigned_worker_id is None
     assert asyncio.run(storage.current_generation(c, s)) == base + 1
     assert asyncio.run(storage.current_publisher(c, s)) == worker
     assert asyncio.run(_live(storage, c, s)) == {"k": b"final-snapshot"}
