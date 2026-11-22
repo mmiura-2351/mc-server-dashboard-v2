@@ -18,6 +18,16 @@ keeps as many rows as it would ignoring health, every bucket stays filled, and
 an all-quarantined set keeps exactly the health-blind selection. ``UNKNOWN`` and
 ``UNREADABLE`` rank like ``HEALTHY``.
 
+A row whose ``size_bytes`` is NULL ranks with the quarantined rows, whatever its
+health (issue #4105). A row is recorded with its size once its archive exists
+(issue #4086), so a NULL size marks a legacy row: one a create committed ahead
+of an archive it never wrote, or one from before sizes were recorded that no
+listing has sized since. Such a row never takes a slot or bucket from a sized
+non-quarantined row, buckets still fill, and an all-NULL-size set keeps exactly
+the health-blind selection. Among the rows behind, the newest claims first,
+quarantined or not. A row whose archive went missing after its size was
+recorded still ranks by its health alone.
+
 :func:`backups_to_prune` is the pure selection: given a policy, a server's
 backup rows, and ``now``, it returns the rows the policy prunes. Only
 ``source=scheduled`` rows are ever candidates — manual / uploaded / event rows
@@ -153,13 +163,16 @@ def _newest_first(backups: list[Backup]) -> list[Backup]:
     return sorted(backups, key=lambda b: (b.created_at, str(b.id.value)), reverse=True)
 
 
-def _quarantined_last(backup: Backup) -> bool:
-    # Only QUARANTINED ranks behind the other rows (issue #1864): a check found
-    # the world inside it corrupt. UNKNOWN is a legacy row no check has read
-    # yet. UNREADABLE has documented false positives: a half-up backend or a
-    # read limit marks an intact archive unreadable (STORAGE.md), so retention
-    # stays health-blind for it.
-    return backup.health is BackupHealth.QUARANTINED
+def _ranks_behind(backup: Backup) -> bool:
+    # QUARANTINED ranks behind the other rows (issue #1864): a check found the
+    # world inside it corrupt. UNKNOWN is a legacy row no check has read yet.
+    # UNREADABLE has documented false positives: a half-up backend or a read
+    # limit marks an intact archive unreadable (STORAGE.md), so retention stays
+    # health-blind for it. A NULL size ranks behind too, whatever the health
+    # (issue #4105): a row is recorded with its size once its archive exists
+    # (issue #4086), so a NULL size is a legacy row, either left with no archive
+    # or never sized since.
+    return backup.health is BackupHealth.QUARANTINED or backup.size_bytes is None
 
 
 def _window_days(now_date: dt.date, days: int) -> set[dt.date]:
@@ -191,17 +204,17 @@ def backups_to_prune(
     boundaries). Manual / uploaded / event rows are never candidates. Keep-N
     keeps the newest N scheduled rows and tiered the newest scheduled row per
     day/week/month bucket inside the configured windows, in both cases choosing
-    a quarantined row only where no other row is left; every scheduled row no
-    slot or bucket kept is pruned.
+    a quarantined or NULL-size row only where no sized non-quarantined row is
+    left; every scheduled row no slot or bucket kept is pruned.
     """
 
     scheduled = _newest_first(
         [b for b in backups if b.source is BackupSource.SCHEDULED]
     )
-    # A stable sort: the quarantined rows move behind the rest, each group still
-    # newest-first, so the first claimant of a slot or bucket is its newest
-    # non-quarantined row, else its newest quarantined one.
-    ranked = sorted(scheduled, key=_quarantined_last)
+    # A stable sort: the quarantined and NULL-size rows move behind the rest,
+    # each group still newest-first, so the first claimant of a slot or bucket
+    # is its newest sized non-quarantined row, else its newest row behind.
+    ranked = sorted(scheduled, key=_ranks_behind)
     if policy.keep_last is not None:
         kept = {b.id for b in ranked[: policy.keep_last]}
         return [b for b in scheduled if b.id not in kept]
