@@ -1129,10 +1129,12 @@ or terminate TLS in front of it and point
 `MCD_API_SERVER__DATA_PLANE_BASE_URL` at the `https://` address, keeping in mind
 that whatever terminates it must not impose a body-size cap. It must also stream
 request bodies to the API as they arrive, not buffer a whole upload before
-forwarding it, and drop the request to the API when the worker's ends. Before a
-start hydrates a worker, the API waits for the snapshot uploads it has in flight
-from that worker, and an upload a proxy still holds back is one it cannot see
-(CONTROL_PLANE.md Section 5). Note also that the
+forwarding it, and drop the request to the API when the worker's ends. nginx
+buffers request bodies by default, so its `location` for the data plane needs
+`proxy_request_buffering off;`. Before a start hydrates a worker, the API waits
+for the snapshot uploads it has in flight from that worker, and an upload a
+proxy still holds back is one it cannot see (CONTROL_PLANE.md Section 5). Note
+also that the
 `API_HTTP_BIND_IP` set above is not route-scoped: it publishes the **entire**
 HTTP surface on that interface, not only the data-plane routes (one bind serves
 the whole REST API, `compose.yaml`), so the non-loopback-bind caveats elsewhere

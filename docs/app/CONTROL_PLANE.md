@@ -874,18 +874,30 @@ Notes:
     long as a commit: an upload whose Worker went away mid-body aborts at the
     API's next read of it, or after 120 s without a byte if the connection
     stays open, while one whose whole body arrived commits whatever became of
-    the request.
+    the request. An upload stays counted for as long as its handler runs, and
+    nothing bounds a commit as a whole, so a commit that never returns (a
+    storage hang) holds back every start that hydrates that Worker until the
+    API restarts. Each start attempt is still bounded by the deadline below.
   - The wait and the hydrate share one deadline:
-    `control.hydrate_timeout_seconds` from the moment the wait begins. The
-    hydrate is dispatched with what the wait left of it, and one that then
-    runs out of time fails as any hydrate timeout does. A start's hydrate
-    phase therefore takes no longer than it did, and the reconciler grace
-    floor (CONFIGURATION.md Section 5.1, note 3) holds unchanged.
-  - A wait that uses the whole budget sends the Worker nothing. The server
-    stays `desired=running` on that Worker with `observed=unknown`, as after a
-    refused hydrate (the note before last), and the reconciler re-sends the
-    start there without placing the server again. A user start answers
-    `409 upload_in_flight`; the reconciler counts it toward the backoff.
+    `control.hydrate_timeout_seconds` from the moment the wait begins,
+    measured on the monotonic clock. The hydrate is dispatched with what the
+    wait left of it, and one that then runs out of time fails as any hydrate
+    timeout does. A start's hydrate phase therefore takes no longer than it
+    did, and the reconciler grace floor (CONFIGURATION.md Section 5.1, note 3)
+    holds unchanged.
+  - When the wait ends or runs out, the start re-reads the row and compares
+    the stop-intent count, as it does just before it sends `StartServer` (see
+    "A stop intent committed during a start wins", above). If a stop committed
+    during the wait, or the row now names another Worker, the start answers
+    `409 transition_conflict` and sends nothing, so no hydrate goes to a
+    Worker that may no longer hold the server.
+  - A wait that leaves the hydrate no more than the command expiry margin
+    (Expiry, below) sends the Worker nothing, since a command handed that
+    little is dropped unsent. The server stays `desired=running` on that
+    Worker with `observed=unknown`, as after a refused hydrate (the note
+    before last), and the reconciler re-sends the start there without placing
+    the server again. A user start answers `409 upload_in_flight`; the
+    reconciler counts it toward the backoff.
   - Not covered: a publish that names no Worker, which cannot be told apart
     from any Worker's; and a proxy in front of the data plane that buffers a
     whole request before forwarding it, or keeps forwarding it after the
@@ -893,6 +905,31 @@ Notes:
     ended and after a start's wait passed, so request bodies must stream to
     the API ([`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md), "The data-plane
     URL for a cross-host worker").
+  - Not covered either: an upload from the Worker that reaches the data plane
+    only after a `redispatch_start`'s wait has passed, and before its hydrate
+    is served. A start that places the server marks the row
+    `awaiting_hydrate`, which refuses such an upload, but a
+    `redispatch_start` does not mark it, so the upload would commit after the
+    hydrate read the older generation. Marking the row there too is issue
+    #4024. Until then, three things keep the case out, and a change to any of
+    them must be read against it:
+    - A request whose Worker has gone cannot register late and still stage a
+      body: on the shipped uvicorn (h11), the handler's first read of a
+      request whose connection has closed answers a disconnect, even with
+      body bytes buffered.
+    - A snapshot of a stopped server holds the Worker's reservation of the
+      server until its upload ends, even after the command has answered, so
+      the Worker refuses the hydrate `BUSY` meanwhile.
+    - A snapshot of a running server holds no reservation. While the instance
+      runs, the Worker refuses the hydrate `INVALID_STATE`. Once it has
+      exited, only the Worker's per-server lane and the reconciler grace keep
+      the upload ahead of the hydrate: a `redispatch_start` that hydrates
+      waits the full `reconciler.grace_seconds` (660 s by default), and the
+      Worker's transfer deadline, the larger of the hydrate and snapshot
+      budgets plus 60 s (Section 5.2), is also 660 s by default. That is no
+      slack, and the grace floor (CONFIGURATION.md Section 5.1, note 3) does
+      not require the grace to exceed the transfer deadline: its stock value
+      is 630 s.
 - **Expiry.** `ApiCommand.expires_after` is how long the Worker may hold a
   command before it starts executing it. It is measured from when the Worker
   received the command, so the two hosts' clocks never meet. The API stamps it

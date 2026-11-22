@@ -2163,6 +2163,26 @@ hydrates that Worker waits for it first, so the hydrate serves what it publishes
 (CONTROL_PLANE.md Section 5). The count is per process and keeps nothing once the
 uploads it counts have left, so a deleted server leaves no entry behind.
 
+This is what keeps the guard's same-Worker allowance safe. A publish whose base
+is older than `current` is let through when `current` names the same Worker, and
+that is safe while the Worker's scratch descends from the tree it published
+`current` from: it holds unless a hydrate of an older generation replaced the
+scratch since. The lags that reach the allowance:
+
+- A lost publish response. The Worker's marker reads the generation before,
+  but its scratch is the tree it published, or newer.
+- The Worker's own upload committed after its command ended, at its transfer
+  deadline or across a Worker restart. A start that hydrates that Worker waits
+  for the commit, so the hydrate serves it, and a start that skips the hydrate
+  runs on the tree the upload packed, or a newer one.
+- Never a restore or an at-rest edit: both stamp an API publisher, so a stale
+  publish after one is refused as a different publisher's, and the next start
+  hydrates.
+
+An unknown publisher on either side (a publish or a `current` that names no
+Worker) leaves the guard nothing to compare, so it lets the publish through.
+CONTROL_PLANE.md Section 5 lists what the start's wait does not cover.
+
 **JAR posture.** The resolved server JAR reaches the Worker as part of hydrate
 (ARCHITECTURE.md Section 7.3): `StartServer` ensures the resolved JAR is in the
 content-addressed pool before placement and records its content key on the
