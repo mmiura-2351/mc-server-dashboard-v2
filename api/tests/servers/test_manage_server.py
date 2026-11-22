@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from mc_server_dashboard_api.servers.adapters.file_store import StorageFileStoreAdapter
+from mc_server_dashboard_api.servers.application.lifecycle import StartServer
 from mc_server_dashboard_api.servers.application.manage_server import (
     BedrockJoinability,
     CreateServer,
@@ -51,6 +52,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PortRangeExhaustedError,
     RetiredConfigKeyError,
     ServerAssignedError,
+    ServerCreationIncompleteError,
     ServerFileNotFoundError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
@@ -101,7 +103,11 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 from tests.servers.fakes import (
     FakeBackupArchiveStore,
     FakeClock,
+    FakeControlPlane,
     FakeFileStore,
+    FakeJarProvisioner,
+    FakeServerRepository,
+    FakeStoreGenerationReader,
     FakeUnitOfWork,
     FakeVersionValidator,
 )
@@ -163,7 +169,9 @@ async def test_create_defaults_to_stopped_and_commits() -> None:
     assert server.observed_at is None
     assert server.assigned_worker_id is None
     assert server.server_type is ServerType.PAPER
-    assert uow.commits == 1
+    # The row's, then the one that ends its creation once the seed is written
+    # (issue #4065).
+    assert uow.commits == 2
     # Equality, not identity: the repository persists the entity's VALUES, so the
     # stored row is a detached copy (issue #2505) exactly as the adapter's INSERT
     # leaves it.
@@ -188,7 +196,7 @@ async def test_create_accepts_java_edition() -> None:
         config={},
     )
     assert server.mc_edition == "java"
-    assert uow.commits == 1
+    assert uow.commits == 2
 
 
 async def test_create_accepts_valid_memory_limit() -> None:
@@ -209,7 +217,7 @@ async def test_create_accepts_valid_memory_limit() -> None:
         config={MEMORY_LIMIT_CONFIG_KEY: 2048},
     )
     assert server.config[MEMORY_LIMIT_CONFIG_KEY] == 2048
-    assert uow.commits == 1
+    assert uow.commits == 2
 
 
 async def test_create_rejects_invalid_memory_limit() -> None:
@@ -379,7 +387,7 @@ async def test_create_accepts_valid_cpu_allocation() -> None:
         config={CPU_ALLOCATION_CONFIG_KEY: 2000},
     )
     assert server.config[CPU_ALLOCATION_CONFIG_KEY] == 2000
-    assert uow.commits == 1
+    assert uow.commits == 2
 
 
 async def test_create_rejects_invalid_cpu_allocation() -> None:
@@ -567,7 +575,7 @@ async def test_create_with_accept_eula_seeds_eula_and_properties() -> None:
     ]
     assert file_store.files["eula.txt"] == b"eula=true\n"
     assert file_store.files["server.properties"] == _SEEDED_PROPERTIES
-    assert uow.commits == 1
+    assert uow.commits == 2
     assert uow.servers.by_id[server.id] == server
 
 
@@ -1000,9 +1008,156 @@ async def test_create_seed_failure_surfaces_after_commit() -> None:
             server_type="vanilla",
             config={},
         )
-    # The row committed before seeding; it is left in place (repairable).
+    # The row committed before seeding; it is left in place.
     assert uow.commits == 1
     assert len(uow.servers.by_id) == 1
+
+
+class _FailingWriteStore(FakeFileStore):
+    """Fails the write of ``fail_at``, as a storage outage mid-creation would.
+
+    Setting ``fail_at`` to ``None`` is the storage recovering.
+    """
+
+    def __init__(self, fail_at: str) -> None:
+        super().__init__()
+        self.fail_at: str | None = fail_at
+
+    async def write_file(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: str,
+        content: bytes,
+    ) -> None:
+        if rel_path == self.fail_at:
+            raise OSError("forced storage write failure")
+        await super().write_file(
+            community_id=community_id,
+            server_id=server_id,
+            rel_path=rel_path,
+            content=content,
+        )
+
+
+_COMMUNITY = CommunityId(uuid.uuid4())
+
+
+def _create(uow: FakeUnitOfWork, store: FakeFileStore) -> Awaitable[Server]:
+    return CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=store,
+        port_range=_PORTS,
+    )(
+        community_id=_COMMUNITY,
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        config={},
+        accept_eula=True,
+    )
+
+
+def _start(
+    uow: FakeUnitOfWork, store: FakeFileStore
+) -> tuple[StartServer, FakeControlPlane]:
+    control_plane = FakeControlPlane(place_to=WorkerId(uuid.uuid4()))
+    start = StartServer(
+        uow=uow,
+        control_plane=control_plane,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=store,
+    )
+    return start, control_plane
+
+
+@pytest.mark.parametrize(
+    "fail_at",
+    [
+        pytest.param("server.properties", id="the-first-seed"),
+        pytest.param("eula.txt", id="the-last-seed"),
+    ],
+)
+async def test_a_create_whose_seed_failed_cannot_start(fail_at: str) -> None:
+    # Issue #4065: the row stands after a failed seed, with the seed as far as
+    # it got. A start that accepts the EULA would write eula.txt and hydrate
+    # that: a server with no server.properties boots on the default port with
+    # RCON off. The row says its creation did not finish, so the start is
+    # refused before it writes or dispatches anything.
+    uow = FakeUnitOfWork()
+    store = _FailingWriteStore(fail_at)
+
+    with pytest.raises(WorkingSetSeedFailedError) as exc_info:
+        await _create(uow, store)
+
+    server_id = ServerId(uuid.UUID(exc_info.value.server_id))
+    store.fail_at = None
+    tree = dict(store.files)
+    start, control_plane = _start(uow, store)
+    with pytest.raises(ServerCreationIncompleteError):
+        await start(community_id=_COMMUNITY, server_id=server_id, accept_eula=True)
+    assert control_plane.dispatched == []
+    assert store.files == tree
+    assert uow.servers.by_id[server_id].creation_incomplete is True
+
+
+async def test_a_finished_create_can_start() -> None:
+    # The creation ends with its last seed write: the row and the entity the
+    # create answers with both say so.
+    uow, store = FakeUnitOfWork(), FakeFileStore()
+
+    server = await _create(uow, store)
+
+    assert server.creation_incomplete is False
+    assert uow.servers.by_id[server.id].creation_incomplete is False
+    start, _ = _start(uow, store)
+    started = await start(community_id=_COMMUNITY, server_id=server.id)
+    assert started.desired_state is DesiredState.RUNNING
+
+
+class _ClearFailsRepository(FakeServerRepository):
+    async def clear_creation_incomplete(self, server_id: ServerId) -> None:
+        raise OSError("connection reset")
+
+
+async def test_a_creation_whose_end_failed_is_seed_failed_and_stays_unfinished() -> (
+    None
+):
+    # Issue #4065: the working set is whole, but the write that ends the
+    # creation failed, so the row still says it did not finish and a start is
+    # refused. The create answers what it answers for its other failures after
+    # the row commits.
+    uow = FakeUnitOfWork(servers=_ClearFailsRepository())
+
+    with pytest.raises(WorkingSetSeedFailedError) as exc_info:
+        await _create(uow, FakeFileStore())
+
+    assert isinstance(exc_info.value.__cause__, OSError)
+    [server] = uow.servers.by_id.values()
+    assert server.creation_incomplete is True
+
+
+class _ClearCommitFailsUnitOfWork(FakeUnitOfWork):
+    async def commit(self) -> None:
+        await super().commit()
+        if self.commits == 2:
+            raise OSError("connection reset")
+
+
+async def test_a_creation_whose_end_did_not_commit_is_seed_failed() -> None:
+    # The same answer when the end's commit fails. That the row then still
+    # says the creation did not finish needs a real transaction, so it is
+    # pinned on PostgreSQL (tests/integration/test_create_start_race.py).
+    with pytest.raises(WorkingSetSeedFailedError) as exc_info:
+        await _create(_ClearCommitFailsUnitOfWork(), FakeFileStore())
+
+    assert isinstance(exc_info.value.__cause__, OSError)
 
 
 async def test_create_strips_system_jar_keys_from_config() -> None:
@@ -1030,7 +1185,7 @@ async def test_create_strips_system_jar_keys_from_config() -> None:
     assert JAR_KEY_CONFIG_FIELD not in server.config
     assert JAR_SOURCE_CONFIG_FIELD not in server.config
     assert server.config["motd"] == "hi"
-    assert uow.commits == 1
+    assert uow.commits == 2
 
 
 # --- read / list -----------------------------------------------------------

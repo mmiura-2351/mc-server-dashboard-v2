@@ -146,6 +146,18 @@ class ServerRepository(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def clear_creation_incomplete(self, server_id: ServerId) -> None:
+        """End the server's creation: clear ``creation_incomplete`` (#4065).
+
+        A create adds the row with it set and calls this once the last write
+        of the working set has returned. A narrow single-column write, like
+        :meth:`update_backup_retention`, and the only one that clears the
+        flag: no entity-wide write touches it, so a write built from an entity
+        read before the end cannot set it again. A missing id or a row already
+        clear matches nothing (a no-op). Not announced.
+        """
+
+    @abc.abstractmethod
     async def update_lifecycle(
         self,
         server: Server,

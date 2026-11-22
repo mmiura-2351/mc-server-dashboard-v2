@@ -969,6 +969,13 @@ class FakeServerRepository(ServerRepository):
         if server is not None:
             server.backup_retention = deepcopy(retention)
 
+    async def clear_creation_incomplete(self, server_id: ServerId) -> None:
+        # Mirror the real adapter's narrow single-column write (issue #4065): a
+        # missing id matches no row.
+        server = self.by_id.get(server_id)
+        if server is not None:
+            server.creation_incomplete = False
+
     def lifecycle_matches(
         self,
         server_id: ServerId,

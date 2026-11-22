@@ -1031,6 +1031,23 @@ def _real_import(uow: ServersFakeUnitOfWork, file_store: FakeFileStore) -> Impor
     )
 
 
+def test_import_answers_a_finished_creation() -> None:
+    # Issue #4065: the import's row is created unfinished and ends its creation
+    # once the archive is published; the 201 is the server as it then stands.
+    app = _app(
+        member=True,
+        allow=True,
+        import_=_real_import(ServersFakeUnitOfWork(), FakeFileStore()),
+    )
+    resp = _client(app).post(
+        f"/api/communities/{uuid.uuid4()}/servers/import",
+        files={"file": ("server.zip", _export_zip(), "application/zip")},
+        data={"name": "imported"},
+    )
+    assert resp.status_code == 201
+    assert resp.json()["creation_incomplete"] is False
+
+
 def test_import_refuses_the_name_before_taking_a_slot_or_reading_the_body(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

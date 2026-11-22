@@ -1668,6 +1668,28 @@ async def test_a_start_whose_start_command_timed_out_is_unknown() -> None:
     assert _runs(env, schedule) == [ScheduleRunOutcome.UNKNOWN]
 
 
+async def test_a_scheduled_start_of_a_server_whose_creation_did_not_finish_failed() -> (
+    None
+):
+    # Issue #4065: the refusal is the server's own state, not a state change
+    # that raced the runner, so the occurrence is a failure, not a skip.
+    env = _env(control_plane=FakeControlPlane(place_to=_WORKER))
+    server = _stopped_server()
+    server.creation_incomplete = True
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.START,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert env.control_plane.dispatched == []
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+
+
 async def test_a_start_whose_hydrate_timed_out_failed() -> None:
     # The hydrate runs before the start command, so the start was never sent and
     # StartServer reverted its intent: the start definitely did not happen.

@@ -63,6 +63,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidLifecycleTransitionError,
     LifecycleTransitionConflictError,
     NoEligibleWorkerError,
+    ServerCreationIncompleteError,
     ServerNotFoundError,
     ServerNotRunningError,
 )
@@ -276,6 +277,44 @@ async def test_start_with_accept_eula_writes_eula_and_starts() -> None:
 
     assert result.desired_state is DesiredState.RUNNING
     assert file_store.files["eula.txt"] == b"eula=true\n"
+
+
+async def test_start_refuses_a_server_whose_creation_did_not_finish() -> None:
+    # Issue #4065: the working set of a server whose create seed or import
+    # stopped part-way is only what got written. The start is refused before
+    # it writes the EULA it was asked to accept, places the server, or
+    # dispatches anything.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    server = _server(community_id=community, server_id=server_id)
+    server.creation_incomplete = True
+    uow.servers.seed(server)
+    file_store = FakeFileStore()
+    cp = FakeControlPlane(place_to=WorkerId(worker))
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=file_store,
+    )
+
+    with pytest.raises(ServerCreationIncompleteError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            accept_eula=True,
+        )
+
+    assert file_store.files == {}
+    assert cp.dispatched == []
+    assert cp.incremented == []
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert (stored.desired_state, stored.assigned_worker_id) == (
+        DesiredState.STOPPED,
+        None,
+    )
 
 
 async def test_start_forwards_request_memory_and_committed_accounting() -> None:

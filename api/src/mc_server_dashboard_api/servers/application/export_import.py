@@ -29,9 +29,11 @@ Only a genuine storage failure during the post-commit write pass, or a Bedrock
 port-allocation failure (window exhaustion or the concurrent-racer backstop)
 while re-creating the plugin set (issue #1551), can leave a committed row
 behind; all reuse the #243/#252 seed-failure posture
--- :class:`WorkingSetSeedFailedError` (503 ``seed_failed``) -- leaving a
-committed but degraded row that is repairable via the files API, rather than an
-unmapped 500. It is now the ONLY post-commit failure class.
+-- :class:`WorkingSetSeedFailedError` (503 ``seed_failed``) -- rather than an
+unmapped 500. It is now the ONLY post-commit failure class. A failed write pass
+leaves a row that cannot start, as its working set is only what was written
+(issue #4065): delete it and create or import it again. A failed plugin set
+leaves a startable row, as its working set is whole.
 
 Legacy incompatibility: legacy exports carry a different metadata shape. This
 slice does NOT implement compatibility; the format is documented (DEPLOYMENT.md)
@@ -351,7 +353,10 @@ class ImportServer:
     a start racing the import waits for the whole working set, or is refused
     ``server_busy``, instead of hydrating it half-written. The archive's entries
     are read before that hold, so the lock is not held while the read waits for
-    the archive-validation pool.
+    the archive-validation pool. The creation ends once the publish has
+    returned, before the plugin rows (issue #4065): a publish that fails, or an
+    import cancelled before its last member, leaves a server that cannot start,
+    while a failure of the plugin rows leaves its whole working set startable.
 
     The caps are fields (not bare constants) so a test can inject tiny caps and
     trip the size / entry-count guards with a small archive; production wiring uses
@@ -416,7 +421,7 @@ class ImportServer:
             )
         )
 
-        async def populate(server: Server, lock: HeldLifecycleLock) -> Server:
+        async def populate(server: Server, lock: HeldLifecycleLock) -> None:
             await self._publish_working_set(
                 community_id=community_id,
                 server_id=server.id,
@@ -424,6 +429,8 @@ class ImportServer:
                 entries=entries,
                 lock=lock,
             )
+
+        async def after_creation(server: Server, lock: HeldLifecycleLock) -> Server:
             return await self._import_plugins(
                 server=server,
                 plugin_dicts=plugin_dicts,
@@ -434,7 +441,8 @@ class ImportServer:
         # Create the row through the shared use case: it runs the version validator
         # (unknown-version -> 422), assigns the game port (#243), and
         # enforces name uniqueness (409). accept_eula stays false on purpose. The
-        # publish runs inside its lifecycle-lock hold (issue #4045).
+        # publish runs inside its lifecycle-lock hold (issue #4045), and the
+        # creation ends after it, before the plugin rows (issue #4065).
         return await self.create_server(
             community_id=community_id,
             name=name,
@@ -445,6 +453,7 @@ class ImportServer:
             accept_eula=False,
             new_server_defaults=False,
             populate=populate,
+            after_creation=after_creation,
         )
 
     def _checked_plugin(self, raw: object) -> dict[str, object]:
@@ -497,8 +506,8 @@ class ImportServer:
         is kept defensively. The ONLY genuine post-commit failure is a storage
         write error mid-publish, or the lifecycle ``lock`` lost before it (issue
         #3927): it reuses the #243/#252 seed-failure posture -- the committed row
-        stays (degraded but repairable via the files API) and the failure surfaces
-        as a mapped 503, never an unmapped 500.
+        stays, unstartable (issue #4065), and the failure surfaces as a mapped
+        503, never an unmapped 500.
         """
 
         try:
@@ -542,7 +551,8 @@ class ImportServer:
         except Exception as exc:
             _logger.warning(
                 "import working-set publish failed; server row committed but "
-                "working set is unpublished (repairable via files API)",
+                "working set is unpublished (delete it and create or import it "
+                "again)",
                 extra={"server_id": str(server_id.value)},
             )
             raise WorkingSetSeedFailedError(str(server_id.value)) from exc

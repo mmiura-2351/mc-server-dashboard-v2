@@ -1578,6 +1578,40 @@ def test_read_server_carries_the_final_snapshot_refusal(
     assert resp.json()["final_snapshot_refusal"] == carried
 
 
+@pytest.mark.parametrize("incomplete", [True, False], ids=["unfinished", "finished"])
+def test_read_server_carries_whether_its_creation_finished(incomplete: bool) -> None:
+    # Issue #4065: a server whose create seed or import stopped part-way cannot
+    # start, and the read says so.
+    community = uuid.uuid4()
+    server = _server_entity(community_id=community)
+    server.creation_incomplete = incomplete
+    app = _app(member=True, allow=True, read=_FakeUseCase(result=server))
+    resp = _client(app).get(f"/api/communities/{community}/servers/{uuid.uuid4()}")
+    assert resp.status_code == 200
+    assert resp.json()["creation_incomplete"] is incomplete
+
+
+def test_create_answers_a_finished_creation() -> None:
+    # The row is created unfinished and ends its creation with the last seed
+    # write; the 201 is the server as it then stands.
+    app = _app(
+        member=True,
+        allow=True,
+        create=CreateServer(
+            uow=FakeUnitOfWork(),
+            clock=FakeClock(_NOW),
+            version_validator=FakeVersionValidator(),
+            file_store=FakeFileStore(),
+            port_range=PortRange(start=25565, end=25664),
+        ),
+    )
+    resp = _client(app).post(
+        f"/api/communities/{uuid.uuid4()}/servers", json=_create_body()
+    )
+    assert resp.status_code == 201
+    assert resp.json()["creation_incomplete"] is False
+
+
 # --- config payload bounds (issue #94) -------------------------------------
 
 
