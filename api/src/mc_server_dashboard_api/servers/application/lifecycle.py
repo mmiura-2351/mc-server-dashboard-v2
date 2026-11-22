@@ -3325,6 +3325,8 @@ class StopServer:
         newer hold: while another final snapshot of the server is outstanding the
         result is dropped above, and a newer one's answer arrives on the same
         Worker stream behind this result, or not at all once that stream ends.
+        A retry of a late refusal takes no unassigned row: it has no release to
+        announce, and the row it held was released since.
         """
 
         refusal = _FINAL_SNAPSHOT_REFUSALS_KEEPING_THE_WORKER.get(outcome.status)
@@ -3343,8 +3345,13 @@ class StopServer:
                     or (
                         server.assigned_worker_id != worker_id
                         # A retry's earlier attempt may have released the row, its
-                        # commit landing unanswered (issue #4062).
-                        and not (retry and server.assigned_worker_id is None)
+                        # commit landing unanswered (issue #4062). A refusal makes
+                        # no release, so a row released since holds nothing for it.
+                        and not (
+                            retry
+                            and refusal is None
+                            and server.assigned_worker_id is None
+                        )
                     )
                 ):
                     # The row moved since the snapshot was dispatched (a racing start

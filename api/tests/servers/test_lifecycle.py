@@ -8474,6 +8474,41 @@ async def test_a_late_refusal_left_unapplied_records_nothing() -> None:
     assert stored.final_snapshot_refusal is None
 
 
+@pytest.mark.parametrize("code", list(_REFUSALS), ids=lambda c: c.value)
+async def test_a_held_retry_of_a_late_refusal_leaves_a_released_row_alone(
+    code: CommandStatus, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A held retry takes a row it finds unassigned as released, since its
+    # earlier attempt may have made that release (issue #4062). A refusal makes
+    # no release, so a retry of one that finds the row released since (by an
+    # operator's release without the snapshot, between the attempts) has no hold
+    # to keep: it records nothing for the reconciler and logs no hold.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_held(community, server_id, worker, refusal=None))
+    uow.servers.by_id[ServerId(server_id)].assigned_worker_id = None
+    unrecorded = UnrecordedStops()
+
+    with caplog.at_level(logging.INFO):
+        await StopServer(
+            uow=uow,
+            control_plane=FakeControlPlane(),
+            clock=FakeClock(_NOW),
+            unrecorded_stops=unrecorded,
+        ).clear_assignment_after_late_snapshot(
+            server_id=ServerId(server_id),
+            worker_id=WorkerId(worker),
+            outcome=_refused(code),
+            retry=True,
+        )
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.assigned_worker_id is None
+    assert stored.final_snapshot_refusal is None
+    assert unrecorded.recorded_at(ServerId(server_id)) is None
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
 async def test_an_operator_stop_of_a_held_row_whose_worker_is_gone_releases_it() -> (
     None
 ):
