@@ -2612,6 +2612,9 @@ _HOLD_REFUSED = (
     "dropping a held worker message: the database answers, yet the message "
     "still fails as if it were down"
 )
+_SESSION_REPLACED = (
+    "a newer session replaced this one; dropping its queued worker messages"
+)
 
 
 # An error is_transient_database_error classifies as an outage, and one it does not.
@@ -2965,6 +2968,38 @@ async def test_a_superseded_session_handles_no_further_queued_message() -> None:
         await h.stop()
 
 
+async def test_a_superseded_session_drops_a_message_it_reads_after_the_new_one(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The old session is idle when the Worker re-registers, so its processor is
+    # waiting for a message. A report the old stream still delivers after the new
+    # session applied its own is dropped, not applied over it.
+    caplog.set_level(logging.INFO, logger=_GRPC_SERVER_LOGGER)
+    sink = _OutageSink()
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        stub = await h.start()
+        old = await _registered(stub)
+        new = await _registered(stub)
+        await new.write(_status_message(_SERVER_B, pb.SERVER_STATE_STOPPED))
+        await _wait_until(lambda: sink.observed, "the new session's report not applied")
+
+        await old.write(_status_message(_SERVER_B, pb.SERVER_STATE_RUNNING))
+        await _wait_until(
+            lambda: _logged(caplog, _SESSION_REPLACED), "the old session did not stop"
+        )
+
+        assert sink.observed == [(_SERVER_B, _WORKER_ID, "stopped")]
+        assert sink.attempts == {_SERVER_B: 1}
+        await new.done_writing()
+    finally:
+        await h.stop()
+
+
 @pytest.mark.usefixtures("fast_hold")
 async def test_a_held_report_whose_retry_fails_otherwise_is_dropped_and_counted() -> (
     None
@@ -3052,6 +3087,37 @@ async def test_a_held_report_stays_held_when_the_ping_after_its_retry_fails(
         call = await _registered(await h.start())
         await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
         await _wait_until(lambda: sink.observed, "the held report was not applied")
+
+        assert sink.observed == [(_SERVER_A, _WORKER_ID, "running")]
+        assert sink.attempts == {_SERVER_A: 3}
+        assert _logged(caplog, _HOLD_REFUSED) == []
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_held_report_stays_held_when_the_ping_before_its_retry_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The ping before a retry fails and so does the retry, but the database is
+    # back by the next ping: the recovery edge every outage has. Only a database
+    # that answered both before and after the failed retry drops the report, so
+    # it stays held and lands.
+    sink = _OutageSink(errors={_SERVER_A: [_OUTAGE] * 2})
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        database_ping=FakeDatabasePing(answers=[False], reachable=True),
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await _wait_until(
+            lambda: sink.observed or _logged(caplog, _HOLD_REFUSED),
+            "the held report was neither applied nor dropped",
+        )
 
         assert sink.observed == [(_SERVER_A, _WORKER_ID, "running")]
         assert sink.attempts == {_SERVER_A: 3}
