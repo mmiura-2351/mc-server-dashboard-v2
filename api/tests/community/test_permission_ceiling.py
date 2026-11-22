@@ -13,12 +13,16 @@ Against the in-memory fakes (TESTING.md Section 4). Verifies:
   (including self-assign of Owner by a role:manage-only actor).
 - UpdateRole delta semantics: removing permissions succeeds even when the actor
   lacks the removed codes.
+- An actor with no membership: every conferral raises ``CommunityNotFoundError``
+  when the community is gone too (issue #2967), and still exceeds the ceiling
+  when it is not.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import uuid
+from collections.abc import Awaitable, Callable
 
 import pytest
 
@@ -29,8 +33,9 @@ from mc_server_dashboard_api.community.application.manage_role import (
     UpdateRole,
 )
 from mc_server_dashboard_api.community.domain.clock import Clock
-from mc_server_dashboard_api.community.domain.entities import Role
+from mc_server_dashboard_api.community.domain.entities import Community, Role
 from mc_server_dashboard_api.community.domain.errors import (
+    CommunityNotFoundError,
     PermissionCeilingExceededError,
 )
 from mc_server_dashboard_api.community.domain.permissions import (
@@ -39,6 +44,7 @@ from mc_server_dashboard_api.community.domain.permissions import (
 )
 from mc_server_dashboard_api.community.domain.value_objects import (
     CommunityId,
+    CommunityName,
     Permission,
     RoleId,
     RoleName,
@@ -365,3 +371,113 @@ async def test_assign_role_within_ceiling_succeeds() -> None:
     )
     assert target_membership is not None
     assert role.id in await uow.memberships.list_role_ids(target_membership.id)
+
+
+# --- an actor whose membership is gone (issue #2967) ------------------------
+#
+# The ceiling is empty either way. When the community is gone too -- its
+# deletion took the actor's membership with it -- the conferral answers
+# not-found, as the community's foreign key would have; otherwise the actor
+# simply holds nothing here.
+
+_START = Permission("server:start")
+
+
+def _custom_role(community: CommunityId, permissions: set[Permission]) -> Role:
+    return Role(
+        id=RoleId.new(),
+        community_id=community,
+        name=RoleName(f"role-{uuid.uuid4()}"),
+        permissions=permissions,
+        created_at=_NOW,
+        updated_at=_NOW,
+        is_preset=False,
+    )
+
+
+async def _create_role_by(
+    uow: FakeAuthzUnitOfWork, community: CommunityId, actor: UserId
+) -> None:
+    await CreateRole(uow=uow, clock=_FakeClock())(
+        community_id=community, actor_id=actor, name="Starters", permissions={_START}
+    )
+
+
+async def _update_role_by(
+    uow: FakeAuthzUnitOfWork, community: CommunityId, actor: UserId
+) -> None:
+    role = _custom_role(community, {Permission("server:read")})
+    uow.roles.seed(role)
+    await UpdateRole(uow=uow, clock=_FakeClock())(
+        community_id=community,
+        role_id=role.id,
+        actor_id=actor,
+        permissions={Permission("server:read"), _START},
+    )
+
+
+async def _assign_role_by(
+    uow: FakeAuthzUnitOfWork, community: CommunityId, actor: UserId
+) -> None:
+    recipient = UserId(uuid.uuid4())
+    uow._membership_for(recipient, community)
+    role = _custom_role(community, {_START})
+    uow.roles.seed(role)
+    await AssignRole(uow=uow)(
+        community_id=community, user_id=recipient, role_id=role.id, actor_id=actor
+    )
+
+
+async def _create_grant_by(
+    uow: FakeAuthzUnitOfWork, community: CommunityId, actor: UserId
+) -> None:
+    recipient = UserId(uuid.uuid4())
+    uow._membership_for(recipient, community)
+    resource_id = uuid.uuid4()
+    uow.add_resource(community, "server", resource_id)
+    await CreateGrant(uow=uow, clock=_FakeClock())(
+        community_id=community,
+        actor_id=actor,
+        user_id=recipient,
+        resource_type="server",
+        resource_id=resource_id,
+        permissions={_START},
+    )
+
+
+_Conferral = Callable[[FakeAuthzUnitOfWork, CommunityId, UserId], Awaitable[None]]
+
+_CONFERRALS = [
+    pytest.param(_create_role_by, id="create-role"),
+    pytest.param(_update_role_by, id="update-role"),
+    pytest.param(_assign_role_by, id="assign-role"),
+    pytest.param(_create_grant_by, id="create-grant"),
+]
+
+
+@pytest.mark.parametrize("conferral", _CONFERRALS)
+async def test_conferral_by_a_non_member_of_a_deleted_community_is_not_found(
+    conferral: _Conferral,
+) -> None:
+    uow = FakeAuthzUnitOfWork()
+
+    with pytest.raises(CommunityNotFoundError):
+        await conferral(uow, CommunityId.new(), UserId(uuid.uuid4()))
+    assert uow.commits == 0
+
+
+@pytest.mark.parametrize("conferral", _CONFERRALS)
+async def test_conferral_by_a_non_member_of_a_live_community_exceeds_the_ceiling(
+    conferral: _Conferral,
+) -> None:
+    uow = FakeAuthzUnitOfWork()
+    community = CommunityId.new()
+    uow.communities.seed(
+        Community(
+            id=community, name=CommunityName("guild"), created_at=_NOW, updated_at=_NOW
+        )
+    )
+
+    with pytest.raises(PermissionCeilingExceededError):
+        await conferral(uow, community, UserId(uuid.uuid4()))
+    assert uow.commits == 0

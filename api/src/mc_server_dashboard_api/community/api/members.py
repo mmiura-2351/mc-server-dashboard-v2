@@ -152,6 +152,8 @@ async def add_member(
         raise problem(status.HTTP_422_UNPROCESSABLE_CONTENT, "user_not_found") from exc
     except MembershipAlreadyExistsError as exc:
         raise problem(status.HTTP_409_CONFLICT, "already_member") from exc
+    except CommunityNotFoundError as exc:
+        raise _not_found() from exc
     await recorder.record(
         AuditEvent(
             operation=ops.MEMBER_ADD,
@@ -236,6 +238,8 @@ async def assign_role(
     except MembershipNotFoundError as exc:
         raise _not_found() from exc
     except RoleNotFoundError as exc:
+        raise _not_found() from exc
+    except CommunityNotFoundError as exc:
         raise _not_found() from exc
     except PermissionCeilingExceededError as exc:
         raise _permission_ceiling(exc) from exc

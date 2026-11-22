@@ -31,6 +31,7 @@ from mc_server_dashboard_api.community.application.manage_grant import (
 )
 from mc_server_dashboard_api.community.domain.entities import ResourceGrant
 from mc_server_dashboard_api.community.domain.errors import (
+    CommunityNotFoundError,
     GrantResourceNotFoundError,
     GrantTargetNotMemberError,
     InvalidGrantResourceTypeError,
@@ -132,6 +133,10 @@ async def create_grant(
     except GrantResourceNotFoundError as exc:
         # A grant on a resource that does not exist in the community is rejected as
         # not-found (issue #361), the same no-existence-signal posture.
+        raise _not_found() from exc
+    except CommunityNotFoundError as exc:
+        # The community was deleted after the gate admitted the caller (#2967):
+        # the gate's own non-member answer.
         raise _not_found() from exc
     except InvalidGrantResourceTypeError as exc:
         raise problem(
