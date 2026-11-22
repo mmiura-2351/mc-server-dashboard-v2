@@ -239,7 +239,7 @@ class ServerRepository(abc.ABC):
         assigned to that worker (an unassigned row never matches). The
         control-plane sink asserts the reporting worker here so a stop-unassign
         + re-place committing between its snapshot read and this write cannot
-        let the stale worker's (freshest-stamped) report overwrite the new
+        let the stale worker's report overwrite the new
         owner's state. API-driven convergence writers do not assert a worker:
         they converge their own dispatch outcome, not a worker's report.
 

@@ -103,7 +103,6 @@ from tests.integration.test_lifecycle_scenarios import (
     _seed_community,
 )
 from tests.servers.fakes import (
-    FakeClock,
     FakeControlPlane,
     FakeFileStore,
     FakeJarProvisioner,
@@ -399,15 +398,10 @@ async def test_worker_report_dropped_by_the_monotonic_guard_publishes_nothing(
 ) -> None:
     worker = uuid.uuid4()
     server = await world.server("survival", worker=worker, reported="running")
-    # A frozen clock stamps the next report no later than the row's observed_at.
-    stale = ServersServerStateSink(
-        create_session_factory(world.engine),
-        clock=FakeClock(_NOW),
-        real_time_events=world.bus,
-    )
     watching = world.watch(server)
 
-    applied = await stale.record_observed_state(
+    # Read at the world's first instant: no later than the row's observed_at.
+    applied = await world.sink().record_observed_state(
         server_id=str(server.id.value),
         worker_id=str(worker),
         state="stopped",

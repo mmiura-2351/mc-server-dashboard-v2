@@ -186,10 +186,9 @@ class ServersServerStateSink(ServerStateSink):
                 # Assert the reporting worker inside the UPDATE's WHERE (issue
                 # #1708): a stop-unassign + re-place to another worker committing
                 # between the snapshot read above and this write must drop this
-                # (freshest-stamped) report instead of overwriting the new
-                # owner's state. Zero rows matched -> applied=False, which also
-                # skips the Bedrock tunnel sync below (a dropped write must not
-                # flip the tunnel).
+                # report instead of overwriting the new owner's state. Zero rows
+                # matched -> applied=False, which also skips the Bedrock tunnel
+                # sync below (a dropped write must not flip the tunnel).
                 expected_worker=WorkerId(parsed_worker),
                 detail=detail,
                 # The servicer maps the wire enum onto these names, "" for an

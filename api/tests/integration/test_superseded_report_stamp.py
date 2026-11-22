@@ -46,7 +46,6 @@ from mcsd.controlplane.v1 import control_plane_pb2 as pb
 from tests.fleet.fakes import FakeServerStateSink
 from tests.fleet.test_grpc_session import (
     _CREDENTIAL,
-    _TIMEOUT,
     _auth,
     _Harness,
     _register_message,
@@ -73,6 +72,9 @@ pytestmark = pytest.mark.skipif(
 
 _WORKER = uuid.UUID("22222222-2222-2222-2222-222222222222")
 _ANSWER_GUARD_SECONDS = 10.0
+# Long enough that the old session's watchdog never polls during a test: it
+# would end that session, and cancel its attempt, once it saw the newer one.
+_SESSION_TIMEOUT = dt.timedelta(hours=1)
 _BACKSTOP_MARKED = "marked them unknown"
 
 
@@ -169,8 +171,8 @@ async def _supersede_a_report_in_flight(
     read_gate, mark_gate = _gate_reads_and_marks(monkeypatch)
     sink = _Sink(world.sink())
     clock = world.fleet_clock()
-    registry = InMemoryWorkerRegistry(clock=clock, heartbeat_timeout=_TIMEOUT)
-    h = _Harness(registry, clock, state_sink=sink)
+    registry = InMemoryWorkerRegistry(clock=clock, heartbeat_timeout=_SESSION_TIMEOUT)
+    h = _Harness(registry, clock, heartbeat_timeout=_SESSION_TIMEOUT, state_sink=sink)
     try:
         stub = await h.start()
         old = await _registered(stub)
