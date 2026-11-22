@@ -499,8 +499,9 @@ async def set_backup_retention(
     to `source=scheduled` backups — manual/uploaded rows are never auto-deleted.
     Backups whose `health` is `healthy`, `unknown` or `unreadable` are chosen as
     keepers first: a `quarantined` one keeps a keep-N slot only when too few
-    others are left to fill the N, and a tier bucket only when the bucket holds
-    no other backup. Every scheduled backup no slot or bucket keeps is deleted.
+    backups that are not `quarantined` are left to fill the N, and a tier bucket
+    only when the bucket holds no backup that is not `quarantined`. Every
+    scheduled backup no slot or bucket keeps is deleted.
     Setting it prunes immediately (best-effort), and every successful scheduled
     backup run prunes thereafter; each pruned backup is audited as
     `backup:delete` with no actor. The write itself is audited as

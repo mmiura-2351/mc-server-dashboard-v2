@@ -11,8 +11,9 @@ retains. It is a union type — exactly one of two forms (owner-confirmed):
   at least one ``> 0``; a backup kept by *any* tier bucket survives.
 
 Healthy rows are chosen as keepers first (issue #1864): a ``QUARANTINED`` row
-keeps a keep-N slot only when too few other scheduled rows are left to fill the
-N, and a tier bucket only when the bucket holds no other row. Keep-N therefore
+keeps a keep-N slot only when too few non-quarantined scheduled rows are left
+to fill the N, and a tier bucket only when the bucket holds no non-quarantined
+row. Keep-N therefore
 keeps as many rows as it would ignoring health, every bucket stays filled, and
 an all-quarantined set keeps exactly the health-blind selection. ``UNKNOWN`` and
 ``UNREADABLE`` rank like ``HEALTHY``.
@@ -155,9 +156,9 @@ def _newest_first(backups: list[Backup]) -> list[Backup]:
 def _quarantined_last(backup: Backup) -> bool:
     # Only QUARANTINED ranks behind the other rows (issue #1864): a check found
     # the world inside it corrupt. UNKNOWN is a legacy row no check has read
-    # yet. UNREADABLE is not final either: the sweep re-reads every row, and a
-    # half-up backend or a read limit can mark an intact archive unreadable, so
-    # retention stays health-blind for it.
+    # yet. UNREADABLE has documented false positives: a half-up backend or a
+    # read limit marks an intact archive unreadable (STORAGE.md), so retention
+    # stays health-blind for it.
     return backup.health is BackupHealth.QUARANTINED
 
 

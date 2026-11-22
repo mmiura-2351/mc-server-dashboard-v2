@@ -460,7 +460,7 @@ assigned Worker.
 | `game_port` | integer nullable | the Minecraft game port, assigned at create from the configured range (CONFIGURATION.md Section 5.8) and **unique deployment-wide**. Nullable at the schema level only: every API path (create, import) assigns a port, so a row without a tracked port can arise only outside the API (direct SQL); such a row is excluded from the taken-port set, and Postgres treats `NULL`s as distinct so they never collide |
 | `bedrock_port` | integer nullable | the server's public Bedrock **UDP** port, allocated from the dedicated UDP window (CONFIGURATION.md Section 5.8) when Geyser is detected among the server's plugins and released (`NULL`) on Geyser uninstall; a server delete drops the row and with it the port. **Unique deployment-wide.** Non-`NULL` *is* the Bedrock-enabled state — there is no separate boolean |
 | `slug` | text | the relay hostname prefix (RELAY.md Section 3), e.g. `k7m2p9`. Auto-generated at create as a 6-character random lowercase-alphanumeric string (`[a-z0-9]{6}`) unless supplied, and **unique deployment-wide** (the hostname namespace is global). Renameable via the server update PATCH; released slugs are immediately reusable (RELAY.md Section 16). Validated as a lowercase DNS label (`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`) with a reserved-word list (`www`, `api`, `relay`, …). NOT NULL: every row carries one |
-| `backup_retention` | jsonb nullable | the scheduled-backup retention policy: `{"keep_last": N}` (keep the newest N, N ≥ 1) **or** `{"daily": D, "weekly": W, "monthly": M}` (keep the newest scheduled backup per UTC calendar day / ISO week / calendar month over those windows; each ≥ 0, at least one > 0). Rows whose `health` is `healthy`, `unknown` or `unreadable` are chosen as keepers first; a `quarantined` row keeps only a slot or bucket no other row is left to fill (Section 8). `NULL` means no retention — scheduled backups accumulate unbounded. Applies **only** to `source = scheduled` backup rows (Section 8); manual / uploaded / event rows are never auto-pruned. Validated in the domain (`RetentionPolicy`), not by a CHECK — the free-form `config` posture |
+| `backup_retention` | jsonb nullable | the scheduled-backup retention policy: `{"keep_last": N}` (keep the newest N, N ≥ 1) **or** `{"daily": D, "weekly": W, "monthly": M}` (keep the newest scheduled backup per UTC calendar day / ISO week / calendar month over those windows; each ≥ 0, at least one > 0). Rows whose `health` is `healthy`, `unknown` or `unreadable` are chosen as keepers first; a `quarantined` row keeps only a slot or bucket no non-quarantined row is left to fill (Section 8). `NULL` means no retention — scheduled backups accumulate unbounded. Applies **only** to `source = scheduled` backup rows (Section 8); manual / uploaded / event rows are never auto-pruned. Validated in the domain (`RetentionPolicy`), not by a CHECK — the free-form `config` posture |
 | `desired_state` | text | what the operator wants: `running` / `stopped` (CHECK enum) |
 | `observed_state` | text | last state reported by the Worker: `starting` / `running` / `stopping` / `stopped` / `restarting` / `crashed` / `unknown` (CHECK enum) |
 | `observed_at` | timestamptz nullable | when `observed_state` was last updated |
@@ -900,12 +900,13 @@ a manual delete, each deletion audited as `backup:delete` with no actor.
 Rows whose `health` is `healthy`, `unknown` or `unreadable` are chosen as
 keepers first (issue #1864). A `quarantined` row keeps a keep-N slot only when
 too few of those rows are left to fill the N, and a tier bucket only when the
-bucket holds no other row; every other scheduled row is pruned. Keep-N
+bucket holds no non-quarantined row; every other scheduled row is pruned. Keep-N
 therefore keeps as many rows as it would ignoring health, every bucket stays
 filled, and an all-quarantined set keeps exactly the health-blind selection.
 `unknown` ranks with `healthy` because no check has read the row yet, and
-`unreadable` because the verdict is revisable (the sweep re-reads every row,
-and a half-up backend or a read limit can mark an intact archive unreadable).
+`unreadable` because the verdict has documented false positives: a half-up
+backend or a read limit marks an intact archive `unreadable` (STORAGE.md).
+Retention stays health-blind for it.
 Manual / uploaded / event rows are never auto-pruned.
 
 ### `file_edit_history` — Storage-layer only (no DB table)
