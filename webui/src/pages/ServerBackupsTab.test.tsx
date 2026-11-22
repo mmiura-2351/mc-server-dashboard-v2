@@ -1269,8 +1269,7 @@ describe("ServerBackupsTab retention editor (#1843)", () => {
 });
 
 describe("ServerBackupsTab keep-all retention warning (#4084)", () => {
-  // Only the fields the warning reads; the Schedules tab test owns the full
-  // schedule shape.
+  // The fields the warning reads, plus those the Schedules tab's row renders.
   function schedule(overrides: Record<string, unknown> = {}) {
     return {
       id: "sch1",
@@ -1278,6 +1277,11 @@ describe("ServerBackupsTab keep-all retention warning (#4084)", () => {
       name: "nightly backup",
       action: "backup",
       enabled: true,
+      cron: null,
+      interval_seconds: 3600,
+      timezone: "UTC",
+      next_run_at: null,
+      last_run_at: null,
       ...overrides,
     };
   }
@@ -1355,5 +1359,26 @@ describe("ServerBackupsTab keep-all retention warning (#4084)", () => {
     expect(
       screen.queryByLabelText(t("backups.retention.modeLabel")),
     ).not.toBeInTheDocument();
+  });
+
+  it("is the tab the Schedules tab's warning links to", async () => {
+    routeGet({ srv: KEEP_ALL, schedules: [schedule()] });
+    renderPage();
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("tab", { name: t("serverDetail.tab.schedules") }),
+    );
+    fireEvent.click(
+      await screen.findByRole("link", {
+        name: t("schedules.retentionWarning.link"),
+      }),
+    );
+
+    expect(
+      screen.getByRole("tab", { name: t("serverDetail.tab.backups") }),
+    ).toHaveAttribute("aria-selected", "true");
+    expect(
+      await screen.findByLabelText(t("backups.retention.modeLabel")),
+    ).toBeInTheDocument();
   });
 });
