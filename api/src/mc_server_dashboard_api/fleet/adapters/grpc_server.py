@@ -155,7 +155,9 @@ _FIRST_ATTEMPT_TIMEOUT_SECONDS = 3.0
 # UNAVAILABLE, which the Worker retries with backoff, and a lookup sends the ack
 # with no ids, as on any of its failures. Both are reads, so the cancel abandons no
 # write. A read cancelled on a stalled connection returns once SQLAlchemy has given
-# that connection 2 s to close, so the answer leaves within 12 s.
+# that connection 2 s to close, so the answer leaves within 12 s. The teardown of a
+# refused registration bounds its mark-unknown write by the same value (issue
+# #4091); that cancel can abandon the write, which is skipped (see ``_teardown``).
 _REGISTRATION_DATABASE_TIMEOUT_SECONDS = 10.0
 
 # Backpressure limit on the queue between the inbound reader task and the
@@ -502,6 +504,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         outbound: asyncio.Queue[pb.ApiMessage] | None = None
         reader: asyncio.Future[None] | None = None
         watchdog: asyncio.Future[None] | None = None
+        refused = False
         # The teardown owns everything from the registry write on (issue #3555):
         # a cancel or abort before the stream is serving (during the rebuild or
         # the held-server lookup below) must still offline the Worker and mark
@@ -525,6 +528,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
                     extra={"worker_id": worker_id.value},
                 )
                 self._registry.mark_disconnected(worker_id, session)
+                refused = True
                 await context.abort(
                     grpc.StatusCode.UNAVAILABLE,
                     "the database did not answer the registration in time",
@@ -536,6 +540,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
                     exc_info=True,
                 )
                 self._registry.mark_disconnected(worker_id, session)
+                refused = True
                 await context.abort(
                     grpc.StatusCode.UNAVAILABLE,
                     "assignment rebuild failed during registration",
@@ -631,7 +636,9 @@ class WorkerSessionServicer(WorkerServiceServicer):
             # EOF has already started this teardown; awaited here, it would cut
             # the mark-unknown write and the log line, with only a DEBUG trace.
             teardown = asyncio.ensure_future(
-                self._teardown(worker_id, session, outbound, reader, watchdog)
+                self._teardown(
+                    worker_id, session, outbound, reader, watchdog, refused=refused
+                )
             )
             self._teardowns[teardown] = worker_id
             teardown.add_done_callback(self._forget_teardown)
@@ -648,11 +655,15 @@ class WorkerSessionServicer(WorkerServiceServicer):
         outbound: asyncio.Queue[pb.ApiMessage] | None,
         reader: asyncio.Future[None] | None,
         watchdog: asyncio.Future[None] | None,
+        *,
+        refused: bool,
     ) -> None:
         """Finish a Session whose stream ended (FR-WRK-4, CONTROL_PLANE.md 4.4).
 
         ``outbound``, ``reader`` and ``watchdog`` are ``None`` when the Session
-        ended after registering but before it opened them.
+        ended after registering but before it opened them. ``refused`` is set
+        when the Session ended because its registration was refused with
+        ``UNAVAILABLE``.
         """
 
         # Retrieve the reader's outcome so a transport error it raised is not
@@ -707,11 +718,31 @@ class WorkerSessionServicer(WorkerServiceServicer):
         # later than its stamp. The reader has finished above, so this
         # session's own reports are all stamped earlier and still marked.
         if self._registry.is_current_session(worker_id, session):
+            # After a refused registration the write is bounded as the
+            # registration's database work is (issue #4091). That Worker is
+            # alive and retries, and each refusal's write would otherwise hold a
+            # pool connection for the driver's bounds while the database stalls.
+            # Its session carried no reports, and its next accepted registration
+            # re-establishes its state, so a write past the bound is skipped.
+            # Any other ending keeps its write unbounded: that Worker may never
+            # come back, and its servers would keep reading as last reported.
+            # Entering the bound does not suspend, so the write is still entered
+            # with no await after the check.
             # Logged here rather than raised: once the RPC's cancel has broken
             # the shield, nothing awaits this task's outcome.
             try:
-                await self._state_sink.mark_worker_servers_unknown(
-                    worker_id=worker_id.value
+                async with asyncio.timeout(
+                    _REGISTRATION_DATABASE_TIMEOUT_SECONDS if refused else None
+                ):
+                    await self._state_sink.mark_worker_servers_unknown(
+                        worker_id=worker_id.value
+                    )
+            except TimeoutError:
+                _LOG.warning(
+                    "the database did not answer the refused registration's "
+                    "mark-unknown within %.1fs; skipping it",
+                    _REGISTRATION_DATABASE_TIMEOUT_SECONDS,
+                    extra={"worker_id": worker_id.value},
                 )
             except Exception:
                 _LOG.error(
