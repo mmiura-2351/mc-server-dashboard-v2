@@ -67,7 +67,7 @@ type fakeTransfer struct {
 	duringUpload func(workingDir string)
 }
 
-func (f *fakeTransfer) Hydrate(ctx context.Context, _, _, workingDir string) (uint64, error) {
+func (f *fakeTransfer) Hydrate(ctx context.Context, _, _, workingDir string, _ func(uint64) []byte) (uint64, error) {
 	f.mu.Lock()
 	f.hydrated = append(f.hydrated, workingDir)
 	block := f.blockUntilCtxDone
@@ -602,6 +602,7 @@ func newManagerWithControls(t *testing.T, d execution.ExecutionDriver, ctrls ...
 		})
 	m.settlePollInterval = 0
 	m.fsckRetryDelay = 0
+	m.WithGenerationKey(testGenerationKey)
 	closeWithTest(t, m)
 	return m
 }

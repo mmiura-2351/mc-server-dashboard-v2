@@ -1426,8 +1426,10 @@ WARN  displaced recovery tree for unknown/unassigned server found at boot; manua
 1. **Identify the displaced tree.** The boot WARN gives the full path. Or scan the
    Worker's `worker.scratch_dir` for directories matching `.displaced-*`.
 2. **Assess the world.** The displaced tree is a plain working-set directory (the
-   same layout the Worker normally holds in `<scratch>/<id>`). A tree displaced because
-   the boot region fsck judged it **torn** carries a `.mcsd_generation` marker of `0`:
+   same layout the Worker normally holds in `<scratch>/<id>`). Its `.mcsd_generation`
+   marker reads `v2 <generation> <mac>` (Section 8), so the generation the tree was
+   published as is the second field. A tree displaced because
+   the boot region fsck judged it **torn** carries a marker recording generation `0`:
    the Worker rewrote it so the verdict reached the API, and the generation the tree was
    actually at survives only as `recorded_generation` in that boot's `held set has a
    corrupt region` `WARN` for the server id. Grep the Worker log for it before judging
@@ -1451,13 +1453,21 @@ WARN  displaced recovery tree for unknown/unassigned server found at boot; manua
      once the tar is in hand.
 
    - **Copy directly into an existing server's scratch.** Stop the target server,
-     copy the displaced tree content into `<scratch>/<target-id>` (or swap the
-     whole directory), then start the server. A hydrate will follow from the API
-     unless the Worker holds a fresh enough generation — if in doubt, bump the
-     authoritative store generation by any at-rest edit (`write_file` etc.) so the
-     next start is forced to re-hydrate from the current store, not the patched
-     scratch. **Use with care:** writing directly into the scratch bypasses all
-     integrity gates.
+     copy the displaced tree content into `<scratch>/<target-id>`, then start the
+     server. What decides whether that start hydrates over the copy is the target's
+     own marker, `<scratch>/<target-id>/.mcsd_generation`, which only the Worker can
+     write: it is believed only with a MAC under the Worker's key for that server id
+     (Section 8). A marker written or edited by hand, or one from another server's
+     tree, reads as generation 0. The displaced tree's own marker, brought along with
+     its content or by swapping the whole directory in, names the generation that
+     tree was at, which the store has since passed, unless the target is another
+     server, in which case it reads as 0. In all of those cases the start hydrates
+     over the copy. Keeping the target's own marker boots the copy only while that
+     marker still names the store's current generation. To make the next start
+     re-hydrate from the current store instead of the patched scratch, delete the
+     marker (`rm <scratch>/<target-id>/.mcsd_generation`): with no marker, the next
+     start always hydrates. **Use with care:** writing directly into the scratch
+     bypasses all integrity gates.
 
 4. **Remove the displaced tree.** Once recovery is confirmed and the world is
    safely in the store (or the world is genuinely not needed), delete the
@@ -2373,6 +2383,98 @@ recommended ([`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md) Section 3). Each
 successful sync logs `snapshot made the working set durable` at `INFO` with its
 duration as `sync_ms`, and with the quiesce's RCON round trips as `save_off_ms`,
 `save_all_ms` and `save_on_ms`.
+
+**The Worker believes only a marker it signed.** The working-set root is
+writable by the server's own code, so the marker's value is authenticated
+(issue #3349). The Worker writes it as `v2 <generation> <mac>`, where `<mac>`
+is HMAC-SHA256, in hex, over the server id followed by the generation as eight
+big-endian bytes. Both writers sign: the hydrate, which writes the marker into
+the unpacked tree before swapping it in, and the running-id snapshot's stamp.
+So does the boot scan's torn-verdict rewrite. Every reader verifies: the boot
+held-set scan, the scan before each registration, and the snapshot's base
+generation. A marker that does not verify reads as generation 0, which makes
+the next start hydrate. That covers a bare number (every marker written before
+this format, or one written by hand), a marker copied from another server's
+working set, and one whose generation was edited. The Worker logs
+`generation marker failed verification` at `WARN`, once per server until the
+Worker next signs a marker for that server, so a forgery after a genuine
+stamp is warned about again. A genuine older marker of the same server can
+only name a generation the Worker really stamped, which is never above the
+store's, so replaying one also leads to a hydrate. The marker is read
+strictly: single spaces, the generation in decimal without leading zeros, the
+MAC in lowercase hex, and nothing before or after.
+
+A marker that does not verify is also the base generation the server's next
+snapshot declares: 0, so the Worker sends no
+`X-Working-Set-Base-Generation` and the publish-time stale-base refusal
+(`409 stale_generation`, issue #847) cannot fire for that publish. That is the
+same as with an absent marker. The assignment fences
+(`publisher_awaiting_hydrate`, `publisher_not_assigned`) still apply.
+
+The key is 32 random bytes at `<worker.scratch_dir>/.generation-key`, mode
+`0600`. It lies outside every `<id>` directory, so no container can read it, and
+it shares the scratch volume's lifetime, as the markers do. The Worker creates
+it on its first boot and reads it back at every later one. It writes the key in
+full under a temporary name, fsyncs it, and links it into place, so the key's
+name never holds a partial key. Each scratch root belongs to exactly one Worker
+process, which also keeps its `worker-id` there. Two Workers sharing one are
+unsupported, and nothing enforces it: they can each publish the other's key,
+which leaves markers that read as 0 or an unusable key.
+
+- **Losing the key** (a wiped or replaced file, a restored scratch volume
+  without it) invalidates every marker on that Worker. The next boot creates a
+  new key, and each held server hydrates once. A retained working set holding
+  unpublished progression is replaced by the store's copy; the hydrate parks the
+  replaced tree aside as it does any other (Section 4.6).
+- **An unusable key** is one the Worker cannot use: something at its name that
+  is not a regular file of exactly 32 bytes, a key it cannot read, or no key and
+  none it could create. The Worker logs an `ERROR` naming the path and the
+  remedy, and keeps running. It believes no marker, so every registration
+  advertises each held server at generation 0, which makes its next start
+  hydrate. It never replaces the key, so the file stays as it was for
+  inspection. It still writes markers, which keeps the launch guard satisfied,
+  but declares no held generation to the API. Within one session the API may
+  still skip a later start's hydrate on the store generation it read for the
+  hydrate before. Every snapshot from that Worker declares base 0, so the
+  stale-base refusal above cannot fire for any of its publishes. The remedy
+  depends on the cause:
+  - *Something that is not a key* (a link, a directory, a file of the wrong
+    size): remove it and restart the Worker. The new key it creates costs the
+    cost above.
+  - *A key the Worker cannot read* (permissions, an I/O error): restore access
+    and restart the Worker. Every marker signed under that key verifies again,
+    and nothing hydrates.
+  - *The key could not be created* (the scratch root is not writable, or the
+    disk is full): fix the cause and restart the Worker. Usually there is no
+    file to remove. If the attempt got as far as publishing the key, for
+    example when only the directory fsync after the link failed, the restart
+    reads that key back.
+- **Upgrading** a Worker from a version that wrote bare-number markers
+  invalidates every marker in the same way, and costs more than one hydrate per
+  server for the servers that are running at the time:
+  - A Worker restart stops every server it runs. Before this change, a server
+    whose marker matched the store's generation was started again on its own
+    working set. On the upgrade boot every marker reads as 0, so each server is
+    hydrated from its last published snapshot instead. It loses what it wrote
+    since then: up to one snapshot interval of play
+    (`snapshot.default_interval_seconds`, 3600 s by default). It is also down
+    for longer: its re-dispatch waits out `reconciler.grace_seconds` (660 s by
+    default) rather than `reconciler.held_start_grace_seconds` (90 s), which
+    only a server held at the store's generation gets
+    ([`CONFIGURATION.md`](CONFIGURATION.md)).
+  - The replaced working set is parked at `.displaced-<id>` only while that slot
+    is free (oldest-wins, Section 4.6), and the server's next successful
+    snapshot reclaims it. It is a short-lived recovery copy, not a backup.
+  - To avoid the loss, stop every server before upgrading the Worker. A stop
+    publishes the server's final snapshot and removes its scratch, so nothing
+    is held when the new Worker boots. That holds only when the final snapshot
+    publishes: a refused one keeps the working set (Section 4.6), and the
+    upgrade then hydrates over it. So check that no `<id>` directory is left in
+    the scratch root before upgrading. Alternatively, take an on-demand backup
+    of each running server just before the upgrade: for a running server it
+    publishes a quiesced snapshot first (Section 3.3).
+  - Rolling the Worker back to a version from before this change costs the
+    same again: that version reads a `v2` marker as no generation at all.
 
 **One region rule set, applied everywhere.** The structural fsck and
 the API integrity gate run **one rule set** at every gate — no source-keyed mode

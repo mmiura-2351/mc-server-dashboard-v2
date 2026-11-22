@@ -862,9 +862,9 @@ writing, but a kill after the idle window or at the cap leaves a partial save
 (issue #3436).
 The worker's generation marker (`.mcsd_generation`, in the working-set root —
 its record of which store generation the set is at) is touched the same way
-(issue #3336). It is read through that same reader with a 32-byte cap (a
-generation is at most 20 digits): a marker replaced by a link, a FIFO, a
-directory, an oversized file or anything that is not one number is refused
+(issue #3336). It is read through that same reader with a 128-byte cap (a
+signed marker is at most 88 bytes): a marker replaced by a link, a FIFO, a
+directory or an oversized file is refused
 with a `WARN` and read as generation 0, the same as an absent marker, which
 makes the API hydrate that server whenever the store holds a published
 generation (against a store still at generation 0 there is nothing to hydrate
@@ -883,8 +883,30 @@ generation this costs it one hydrate: the set reads as generation 0, and that
 hydrate replaces the working set whole, directory included (issue #3350). With
 nothing published (store generation 0) the hydrate transfers nothing and
 leaves the working set, directory included, in place, so the directory goes on
-failing the launch guard and the server does not start until it is removed. What this does not make trustworthy is the marker's *value* — see "The
-generation marker's value" below.
+failing the launch guard and the server does not start until it is removed.
+None of this settles the marker's *value*, which the server's code can also
+rewrite; that is what the worker's signature on it is for (issue #3349).
+
+The worker believes a marker's value only when the marker carries an
+HMAC-SHA256 over the server id and the generation, under a 32-byte key of its
+own at `<worker.scratch_dir>/.generation-key` (mode `0600`). Both of the
+worker's marker writes sign it, the hydrate's and the snapshot's, and every read
+verifies it: the boot scan, the scan
+before each registration, and the snapshot's base generation
+([`STORAGE.md`](STORAGE.md) Section 8). The key lies at the scratch root,
+outside every working set, and a container is given its own working set only,
+so no server's code can read it. A marker that does not verify reads as
+generation 0, and the worker logs `generation marker failed verification` at
+`WARN`, once per server until it next signs a marker for that server, so a
+forgery after a genuine stamp is warned about again. That covers a number the
+server wrote, a
+marker it copied from another server's working set, and one whose generation
+it edited. Generation 0 makes the API hydrate that server once the store has
+published, which is the direction that cannot keep a stale working set. The
+server can still replay a genuine marker of its own from an earlier
+generation. That names a generation the worker really stamped, which is never
+above the store's, and any store write since puts the store ahead of it, so
+the next start hydrates all the same.
 A file the worker writes into a running server's working set (a file edit
 through the API, and any parent directory it has to create) is given its
 directory's owner on the open descriptor, so the server keeps access to it.
@@ -1034,11 +1056,17 @@ security model, and the following remain true:
   readable and writable by the code running there. That is inherent to running
   the server at all; the boundary protects *other* tenants' data, not the
   contents of the container that hosts the hostile plugin.
-- **The generation marker's value.** The marker lives in that same directory,
-  which the server's user owns, so the code running there can replace it with a
-  regular file holding any number, and the worker cannot tell that file from
-  one it wrote (issue #3336). The worker reports the number in two places, and
-  the API only ever *compares* it:
+- **The generation marker, short of its value.** The marker lives in that same
+  directory, which the server's user owns, so the code running there can
+  delete it, corrupt it, or put back a genuine marker of its own from an earlier
+  generation. Since issue #3349 the worker believes only a marker it signed
+  (see the generation-marker paragraphs under "Container hardening" above), so
+  each of these reads as generation 0, or as a generation the store has
+  passed. That costs the server one hydrate and whatever unpublished progress
+  its working set held, and reaches nothing else. A server could make the worker
+  report a number at or above the store's only before that change, which is
+  what the rest of this item records. The worker reports the number in two
+  places, and the API only ever *compares* it:
   - as the held generation, on registration. The API skips the hydrate before a
     start when `held >= store`
     ([`CONTROL_PLANE.md`](CONTROL_PLANE.md) Section 5.1). A number forged **at or
@@ -1067,15 +1095,15 @@ security model, and the following remain true:
   window a stopped server's final snapshot uses. What a server gains is over **its own lineage**: it can keep
   running the working set it holds where the store has moved on without it, and
   then publish that set as the newest generation. The store moves on without
-  the worker when a backup is restored, a file is edited while the server is
-  stopped, or the JAR changes — each relies on the next start hydrating — and
+  the worker when a backup is restored or a file is edited while the server is
+  stopped — each relies on the next start hydrating — and
   only if the working set outlived the stop, which it does when the final
   snapshot was refused (a server can cause that: the region check refuses a
-  torn world). So a hostile plugin can make a backup restore or an at-rest edit
-  of its own server silently not take effect. Closing that needs the marker's
-  value to come from somewhere the container cannot write; that is an open
-  decision (issue #3349), not an accepted residual, and nothing of it is
-  implemented.
+  torn world). So, before issue #3349, a hostile plugin could make a backup
+  restore or an at-rest edit of its own server silently not take effect. The
+  signature closes that: the value now comes from a key the container cannot
+  read. The API side is unchanged and still trusts the number a worker reports,
+  so a compromised worker, which holds the key, is outside what it covers.
 
 ---
 

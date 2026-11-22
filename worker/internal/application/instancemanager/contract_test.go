@@ -275,7 +275,7 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, generationFile), []byte("0"), 0o640); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, generationFile), testGenerationKey.seal(markerServerID(dir), 0), 0o640); err != nil {
 			t.Fatal(err)
 		}
 		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))

@@ -190,9 +190,9 @@ func TestStoppedSnapshotAnswersWhileListingTheWorkingDirIsStuck(t *testing.T) {
 func TestStoppedSnapshotAnswersWhileReadingTheGenerationMarkerIsStuck(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(&fakeTransfer{})
 	st := newStall(t)
-	m.readGeneration = func(dir, id string, log *slog.Logger) uint64 {
+	m.readGeneration = func(key *GenerationKey, dir, id string, log *slog.Logger) uint64 {
 		st.wait()
-		return recordedGeneration(dir, id, log)
+		return recordedGeneration(key, dir, id, log)
 	}
 	abandonStoppedSnapshot(t, m, st)
 }
@@ -301,7 +301,7 @@ func abandonRunningSnapshot(t *testing.T, m *Manager, ctrl *redialControl, st *s
 	if _, err := os.Stat(displaced); err != nil {
 		t.Fatalf("the abandoned snapshot swept the displaced tree: %v", err)
 	}
-	if got := recordedGeneration(dir, s1, m.logger); got != 0 {
+	if got := recordedGeneration(m.genKey, dir, s1, m.logger); got != 0 {
 		t.Fatalf("marker = %d after the abandoned snapshot, want it unstamped (0)", got)
 	}
 }
@@ -394,7 +394,7 @@ func TestRunningSnapshotCommittedBeforeTheDeadlineAnswersSuccess(t *testing.T) {
 	case <-time.After(120 * time.Second):
 		t.Fatal("the committed body did not release its claim after the working-set lock was released")
 	}
-	if got := recordedGeneration(filepath.Join(m.scratchDir, s1), s1, m.logger); got != 7 {
+	if got := recordedGeneration(m.genKey, filepath.Join(m.scratchDir, s1), s1, m.logger); got != 7 {
 		t.Fatalf("marker = %d, want the committed body's stamp (7)", got)
 	}
 }

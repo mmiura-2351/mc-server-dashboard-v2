@@ -122,8 +122,10 @@ type Transfer interface {
 	// Hydrate downloads the working set from url into workingDir (an empty/204
 	// response leaves it empty). It returns the authoritative store GENERATION the
 	// API served (the value of its response header, issue #763); 0 when the header
-	// is absent (a server with no published snapshot, or an older API).
-	Hydrate(ctx context.Context, url, token, workingDir string) (uint64, error)
+	// is absent (a server with no published snapshot, or an older API). On a 200 it
+	// writes marker(generation) as the generation marker into the unpacked tree before
+	// swapping it in (issue #917); marker renders the signed form (issue #3349).
+	Hydrate(ctx context.Context, url, token, workingDir string, marker func(gen uint64) []byte) (uint64, error)
 	// PackSnapshot packs workingDir into a tar spool file and returns its path.
 	// The returned cleanup function removes the spool; the caller must invoke it
 	// when the spool is no longer needed. Only the pack reads the working
@@ -229,6 +231,11 @@ type Manager struct {
 	// called (older wiring / tests): the guard then treats the publisher as unknown.
 	workerID string
 
+	// genKey signs every generation marker this manager writes and verifies every one
+	// it reads (issue #3349). It is unusable until WithGenerationKey is called: no
+	// marker is believed then, so every held set is advertised at generation 0.
+	genKey *GenerationKey
+
 	clock           session.Clock
 	metricsInterval time.Duration
 
@@ -273,7 +280,7 @@ type Manager struct {
 	// recordedGeneration) so a test can stall them where storage would (issue
 	// #3511), mirroring scanRegion above.
 	readWorkingDir func(dir string) ([]os.DirEntry, error)
-	readGeneration func(workingDir, serverID string, log *slog.Logger) uint64
+	readGeneration func(key *GenerationKey, workingDir, serverID string, log *slog.Logger) uint64
 
 	// snapshotContextHook, when non-nil, replaces snapshotContext so a test can end a
 	// snapshot command's deadline at a chosen moment instead of by the clock.
@@ -620,6 +627,7 @@ func New(drivers map[string]execution.ExecutionDriver, scratchDir string, region
 		scanRegion:         scanRegionState,
 		readWorkingDir:     os.ReadDir,
 		readGeneration:     recordedGeneration,
+		genKey:             &GenerationKey{},
 		runningSnapshots:   map[string]bool{},
 		instances:          map[string]execution.Instance{},
 		startCmds:          map[string]session.Command{},
@@ -1078,8 +1086,8 @@ type redialer interface {
 
 // snapshotContext derives the one deadline a snapshot command runs under (issue
 // #3511): the transfer deadline the API advertised in RegisterAck, measured from the
-// command's start, so the quiesce, the pre-pack fsck, the pack and the upload share
-// it. Before, it bounded only the pack and upload, and the pack ignored it, so a
+// command's start, so a stopped server's leftover guard (issue #4053), the quiesce,
+// the pre-pack fsck, the pack and the upload share it. Before, it bounded only the pack and upload, and the pack ignored it, so a
 // stuck pack or fsck held the command past it while heartbeats kept the session up.
 //
 // A running server's snapshot also owes the save-on restore, which runs detached
@@ -1112,6 +1120,15 @@ func (m *Manager) WithSweptServers(serverIDs []string) *Manager {
 // from a different-Worker stale publish (issue #847 bug 3).
 func (m *Manager) WithWorkerID(id string) *Manager {
 	m.workerID = id
+	return m
+}
+
+// WithGenerationKey sets the key the generation markers under the scratch root are
+// signed and verified with (issue #3349): LoadGenerationKey's, the same one the boot
+// scan (ScanHeldServers) is given, so both agree on it and on which servers' failed
+// verifications were already logged.
+func (m *Manager) WithGenerationKey(key *GenerationKey) *Manager {
+	m.genKey = key
 	return m
 }
 
@@ -1214,7 +1231,8 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 	if err := m.endLeftovers(transferCtx, cmd.ServerID, workingDir); err != nil {
 		return fail(cmd.CommandID, session.CommandErrorUnavailable, fmt.Sprintf(untrackedRefusalMsg, "hydrate", err))
 	}
-	gen, err := m.transfer.Hydrate(transferCtx, cmd.TransferURL, cmd.TransferToken, workingDir)
+	marker := func(gen uint64) []byte { return m.genKey.seal(cmd.ServerID, gen) }
+	gen, err := m.transfer.Hydrate(transferCtx, cmd.TransferURL, cmd.TransferToken, workingDir, marker)
 	if err != nil {
 		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 			fmt.Sprintf("instancemanager: hydrate: %v", err))
@@ -1261,7 +1279,9 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 // The API mirrors that declaration into the inventory its skip-hydrate gate reads, so the
 // declaration has to be the write's own outcome rather than the transfer merely having
 // succeeded: a marker this call could not write is older than the tree, so declaring the
-// served generation anyway would let a later start skip the corrective hydrate.
+// served generation anyway would let a later start skip the corrective hydrate. A marker
+// written under an unusable key is reported as not published for the same reason: it
+// reads as generation 0, so it backs no declaration (issue #3349).
 func (m *Manager) recordGeneration(ctx context.Context, workingDir, serverID string, gen uint64) bool {
 	// The marker is published by renaming a temporary name (workingSetLocks). A
 	// stamp that cannot get the lock is not written, which is the safe direction.
@@ -1272,12 +1292,12 @@ func (m *Manager) recordGeneration(ctx context.Context, workingDir, serverID str
 		return false
 	}
 	defer unlock()
-	if err := writeGeneration(workingDir, gen); err != nil {
+	if err := writeGeneration(m.genKey, workingDir, serverID, gen); err != nil {
 		m.logger.Warn("could not record working-set generation",
 			"server_id", serverID, "generation", gen, "error", err)
 		return false
 	}
-	return true
+	return m.genKey.usable()
 }
 
 // recordGenerationIfUnchanged records the generation only while workingDir is still the
@@ -1310,7 +1330,8 @@ func (m *Manager) recordGeneration(ctx context.Context, workingDir, serverID str
 // The API mirrors that declaration into the inventory its skip-hydrate gate reads, so the
 // declaration has to be the marker write's own outcome rather than a second opinion about
 // it: every skip above returns false through the same statement that suppresses the write,
-// so no code path can report a generation this function did not stamp.
+// so no code path can report a generation this function did not stamp. As in
+// recordGeneration, a marker written under an unusable key backs no declaration.
 func (m *Manager) recordGenerationIfUnchanged(ctx context.Context, ref *workingDirRef, workingDir, serverID string, gen uint64) bool {
 	// The marker is published by renaming a temporary name (workingSetLocks). A
 	// stamp that cannot get the lock is not written, which is the safe direction.
@@ -1337,7 +1358,7 @@ func (m *Manager) recordGenerationIfUnchanged(ctx context.Context, ref *workingD
 		warnSkipped()
 		return false
 	}
-	if err := writeGenerationGuarded(workingDir, gen, guard); err != nil {
+	if err := writeGenerationGuarded(m.genKey, workingDir, serverID, gen, guard); err != nil {
 		if errors.Is(err, errWorkingDirReplaced) {
 			warnSkipped()
 			return false
@@ -1346,7 +1367,7 @@ func (m *Manager) recordGenerationIfUnchanged(ctx context.Context, ref *workingD
 			"server_id", serverID, "generation", gen, "error", err)
 		return false
 	}
-	return true
+	return m.genKey.usable()
 }
 
 // restoreSaveTimeout bounds the re-enable-auto-save RCON call on the snapshot
@@ -1569,19 +1590,6 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		if ok, code, msg := m.reserve(cmd.ServerID, legNone); !ok {
 			return fail(cmd.CommandID, code, msg)
 		}
-		// The reservation rules out only the processes the Worker tracks; a start the
-		// daemon did not answer may have left its container running against the set
-		// (issue #3672). Packing a set it is writing is a mixed capture, so the
-		// snapshot is refused as UNAVAILABLE, as the hydrate is (issue #3678), while
-		// the driver cannot rule one out. It does not end the container: the
-		// snapshot is no precondition of the start that does, and what it packed
-		// would be that container's shutdown save. A guard error the command's own
-		// cancellation caused is UNAVAILABLE too, as in handleHydrate: nothing was
-		// ruled out, and the answer reaches no caller.
-		if err := m.untrackedBusy(ctx, cmd.ServerID); err != nil {
-			m.release(cmd.ServerID)
-			return fail(cmd.CommandID, session.CommandErrorUnavailable, fmt.Sprintf(untrackedRefusalMsg, "snapshot", err))
-		}
 		release = func() { m.release(cmd.ServerID) }
 	}
 	// One deadline bounds the whole command (issue #3511, snapshotContext). The body
@@ -1591,13 +1599,50 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	// attempt keeps the id's claim — the reservation of a stopped id, the
 	// runningSnapshots mark of a running one — until both the body has exited and
 	// the handler's save-on recovery has finished, and an abandoned body skips its
-	// destructive tail (snapshotAttempt). Close does not wait for either.
+	// destructive tail (snapshotAttempt). Close does not wait for either. The
+	// deadline is taken once the id is claimed, so it also bounds the leftover guard
+	// below, and with it the ending of a stopped server's leftovers.
 	newContext := m.snapshotContext
 	if hook := m.snapshotContextHook; hook != nil {
 		newContext = hook
 	}
 	cmdCtx, cancel := newContext(ctx, running)
 	defer cancel()
+	if !running {
+		// The reservation rules out only the processes the Worker tracks; a start the
+		// daemon did not answer may have left its container running against the set
+		// (issue #3672). Packing a set it is writing is a mixed capture, so the
+		// snapshot is refused as UNAVAILABLE, as the hydrate is (issue #3678), while
+		// the driver cannot rule one out.
+		//
+		// A stop's final snapshot (cmd.Final, issue #4053) first ends those
+		// containers, as the hydrate does, before the working-set check, the fsck and
+		// the pack. What it then packs is their shutdown save over the set: the
+		// progression the stop's snapshot exists to keep. Nothing else ends them while
+		// the server stays stopped, and the snapshot would otherwise be refused every
+		// time. A periodic or on-demand snapshot ends nothing: a stopped id does
+		// not tell the Worker that the server is meant to stay stopped, and under a
+		// running intent the re-sent start's hydrate ends the leftover. Either way a
+		// container that is not ended, or that the driver cannot rule out, refuses
+		// before anything is read.
+		//
+		// The guard runs under the command's deadline. The driver bounds ending each
+		// recorded container at about 90 s, summed from its constants and not
+		// measured: an inspect and a removal of 10 s each, and a graceful stop of
+		// 30 + 10 + 30 s (unremovedStopTimeout). A guard error the deadline or the
+		// command's own cancellation caused is UNAVAILABLE too, as in handleHydrate:
+		// nothing was ruled out, and a cancelled command's answer reaches no caller.
+		var err error
+		if cmd.Final {
+			err = m.endLeftovers(cmdCtx, cmd.ServerID, filepath.Join(m.scratchDir, cmd.ServerID))
+		} else {
+			err = m.untrackedBusy(cmdCtx, cmd.ServerID)
+		}
+		if err != nil {
+			release()
+			return fail(cmd.CommandID, session.CommandErrorUnavailable, fmt.Sprintf(untrackedRefusalMsg, "snapshot", err))
+		}
+	}
 	att := newSnapshotAttempt(func() {
 		release()
 		if hook := m.snapshotReleased; hook != nil {
@@ -1920,7 +1965,7 @@ func (m *Manager) snapshotBody(ctx, cmdCtx context.Context, cmd session.Command,
 	// can refuse the publish if the store advanced past it. 0 (an unknown/never-
 	// hydrated set, or one whose marker the read refuses, issue #3336) leaves the guard
 	// to compare against the store's current value.
-	baseGeneration := m.readGeneration(workingDir, cmd.ServerID, m.logger)
+	baseGeneration := m.readGeneration(m.genKey, workingDir, cmd.ServerID, m.logger)
 
 	if running {
 		// Running-server snapshot (issue #1710): split pack from upload so save-on is
@@ -4836,7 +4881,8 @@ func (m *Manager) untrackedBusy(ctx context.Context, serverID string) error {
 // workingDir, then a removal (issue #3672). It then answers as untrackedBusy. A
 // command that is a precondition of that start, the hydrate, uses it rather than
 // untrackedBusy alone: a refusal there would hold back the start that ends the
-// leftover.
+// leftover. So does a stop's final snapshot (issue #4053): no start follows it, so
+// a refusal there would leave the leftover running and the snapshot refused.
 func (m *Manager) endLeftovers(ctx context.Context, serverID, workingDir string) error {
 	for _, d := range m.drivers {
 		if g, ok := d.(execution.LeftoverGuard); ok {

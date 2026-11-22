@@ -1196,6 +1196,37 @@ for any new code is in place before the worker starts emitting it.
 ./scripts/deploy_preflight.sh && git pull --ff-only origin main && docker compose up -d --build
 ```
 
+> **Upgrading a Worker past issue #3349: stop its servers first.** From that
+> version on, the Worker believes a working set's generation marker only when
+> it signed it, and every marker written before is a bare number. The first boot
+> creates the signing key (`<worker.scratch_dir>/.generation-key`), reads every
+> existing marker as generation 0 with one `WARN` per server, and each server's
+> next start hydrates from the store.
+>
+> - **Running servers lose play.** The Worker restart stops every server it
+>   runs, and none of them comes back on its own working set. Each is hydrated
+>   from its last published snapshot and loses what it wrote since: up to one
+>   snapshot interval (`snapshot.default_interval_seconds`, 3600 s by default).
+>   The replaced working set is parked at `.displaced-<id>` only while that slot
+>   is free, and the server's next successful snapshot reclaims it.
+> - **Running servers are down for about 11 minutes.** None of them is held at
+>   the store's generation any more, so each is re-dispatched only after
+>   `reconciler.grace_seconds` (660 s by default), not after the 90 s
+>   `reconciler.held_start_grace_seconds` a held server gets.
+> - **To avoid both**, stop every server on the Worker before upgrading it: a
+>   stop publishes the server's final snapshot, so nothing unpublished is held.
+>   That holds only when the final snapshot publishes; a refused one keeps the
+>   working set, and the upgrade then hydrates over it, so check that no `<id>`
+>   directory is left in `worker.scratch_dir` first. Or take an on-demand backup
+>   of each running server just before; for a running server it publishes a
+>   quiesced snapshot first.
+> - **A rollback costs the same again.** A Worker from before #3349 reads a
+>   signed marker as no generation, so stop the servers before rolling back
+>   too.
+>
+> See [`../app/STORAGE.md`](../app/STORAGE.md) Section 8 ("Upgrading") and
+> Section 4.6.
+
 **Automated path:** `make update` (`scripts/update.sh`) runs the preflight, pulls,
 detects which components changed since the last deploy (via `.last-deploy-sha`),
 rebuilds only what changed (api before worker — worker restart bounces running MC

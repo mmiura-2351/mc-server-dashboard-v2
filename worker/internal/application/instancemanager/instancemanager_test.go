@@ -303,6 +303,7 @@ func newManager(t *testing.T, d execution.ExecutionDriver, ctrl execution.Server
 	// snapshot test does not pay the real 2s poll (#907); tests that exercise the
 	// settle-wait itself override it explicitly.
 	m.settlePollInterval = 0
+	m.WithGenerationKey(testGenerationKey)
 	closeWithTest(t, m)
 	return m
 }
@@ -427,7 +428,7 @@ func TestStartAcceptsMarkerOnlyWorkingDir(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, generationFile), []byte("0"), 0o640); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, generationFile), testGenerationKey.seal(markerServerID(dir), 0), 0o640); err != nil {
 		t.Fatal(err)
 	}
 

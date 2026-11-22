@@ -1076,10 +1076,11 @@ class PruneScheduledBackups:
                 )
                 _LOG.info(
                     "retention prune: deleted scheduled backup %s of server %s "
-                    "(created %s, policy %s)",
+                    "(created %s, health %s, policy %s)",
                     backup.id.value,
                     server_id.value,
                     backup.created_at.isoformat(),
+                    backup.health.value,
                     policy.to_json(),
                 )
                 await self.audit.record(

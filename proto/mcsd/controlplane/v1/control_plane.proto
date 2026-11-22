@@ -366,6 +366,13 @@ message HydrateTrigger {
 message SnapshotTrigger {
   string transfer_url = 1;
   string transfer_token = 2;
+  // final is set only on a stop's final snapshot (issue #4053). With it, a
+  // stopped-id snapshot first ends the containers this Worker's own failed starts
+  // left running for the server, as a hydrate does, and then packs what their
+  // shutdown saves left. Without it nothing is ended: a periodic or on-demand
+  // snapshot of a stopped id is refused while such a container may be running.
+  // A running-id snapshot ignores it.
+  bool final = 3;
 }
 
 // ReadFile reads a path from a running server's live working set (Section 7.2).

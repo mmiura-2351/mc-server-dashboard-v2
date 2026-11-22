@@ -37,7 +37,7 @@ func TestHydrateRejectsHardLinkMember(t *testing.T) {
 
 			dest := filepath.Join(t.TempDir(), "working")
 			c := New(srv.Client())
-			if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err == nil {
+			if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest, plainMarker); err == nil {
 				t.Fatal("expected an error for the hard-link member")
 			}
 			if _, err := os.Lstat(dest); !os.IsNotExist(err) {

@@ -87,6 +87,11 @@ func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 	// between writing it and publishing it (issue #3359). No edit is in flight yet:
 	// the session that dispatches them starts below.
 	instancemanager.ReclaimEditStaging(cfg.Worker.ScratchDir)
+	// The key every generation marker is signed and verified with (issue #3349),
+	// created on the first boot. One key serves the boot scan and the manager, so they
+	// agree on it and on which servers' failed verifications were already logged. An
+	// unusable key does not stop the boot: it is logged, and no marker is believed.
+	genKey := instancemanager.LoadGenerationKey(cfg.Worker.ScratchDir, logger)
 	// Cancel on SIGINT/SIGTERM for a clean stream shutdown. Created before
 	// buildInstanceManager so the tunnel Dialer's splice-teardown (closeAll) is
 	// bound to a context that actually cancels on shutdown, not the never-cancelled
@@ -102,7 +107,7 @@ func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 	// establish that, which is what quiesced reports (issue #3171). ScanHeldServers is
 	// called below, after the manager is fully initialised. caps is not needed until
 	// NewRunner.
-	manager, quiesced, err := buildInstanceManager(sigCtx, cfg, logger)
+	manager, quiesced, err := buildInstanceManager(sigCtx, cfg, genKey, logger)
 	if err != nil {
 		return err
 	}
@@ -194,7 +199,7 @@ func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 	// which is how it reaches the API on the first Register and on every reconnect
 	// after it, until a hydrate rewrites the marker. The returned list still feeds the
 	// displaced-tree check below and the boot Capabilities.
-	heldServers := instancemanager.ScanHeldServers(cfg.Worker.ScratchDir, regionfsck.Checker{}, quiesced, logger)
+	heldServers := instancemanager.ScanHeldServers(cfg.Worker.ScratchDir, genKey, regionfsck.Checker{}, quiesced, logger)
 	// Log a WARN for each .displaced-<id> tree whose server id is not in the held
 	// set (issue #911): those trees are orphaned recovery copies — the server was
 	// deleted or re-placed elsewhere — and will never be GC'd automatically. The
@@ -241,7 +246,7 @@ func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 // delete trees (PR #3170 review round 2), and the held-set scan's region fsck, which judges
 // them (issue #3171). Both gates are in run(). It is true when no container driver was
 // built, because then this Worker has started no containers at all.
-func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.Logger) (*instancemanager.Manager, bool, error) {
+func buildInstanceManager(ctx context.Context, cfg config.Config, genKey *instancemanager.GenerationKey, logger *slog.Logger) (*instancemanager.Manager, bool, error) {
 	wc := cfg.Worker
 	quiesced := true
 	// The servers whose containers the sweep removed, which the manager reports
@@ -330,6 +335,7 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 	return instancemanager.New(drivers, wc.ScratchDir, regionfsck.Checker{}, openControl).
 		WithLogger(logger).
 		WithWorkerID(wc.ID).
+		WithGenerationKey(genKey).
 		WithSweptServers(swept).
 		WithTunnelDialer(tunnelDialerAdapter{tunnelDialer}).
 		WithBedrockTunneler(bedrockTunnelerAdapter{bedrockTunnel}), quiesced, nil

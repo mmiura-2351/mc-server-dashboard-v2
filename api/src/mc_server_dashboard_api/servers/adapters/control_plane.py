@@ -436,9 +436,10 @@ class FleetControlPlaneAdapter(ControlPlane):
         outcome = await self._dispatch(
             worker_id,
             server_id,
-            SnapshotCommand(transfer_url=url, transfer_token=self._token()),
+            SnapshotCommand(
+                transfer_url=url, transfer_token=self._token(), final=final
+            ),
             timeout_override=self._snapshot_timeout_seconds,
-            snapshot_is_final=final,
         )
         # Mirror the Worker's retention declaration into the held inventory (issue
         # #2481). Every snapshot dispatch — the periodic cadence tick, the on-demand
@@ -459,8 +460,9 @@ class FleetControlPlaneAdapter(ControlPlane):
         # a hydrate or earn the short held-start grace: it was at most the store
         # generation when recorded, the publish before the deletion minted a greater
         # one, and the store's counter never goes back, so ``held >= store`` — the
-        # only test either reader applies — stays false for it. The one exception is
-        # a forged registration value (issue #3349); there the Worker's launch guard
+        # only test either reader applies — stays false for it. A registration value
+        # cannot exceed the store either, since the Worker advertises only a marker
+        # it signed (issue #3349); should one ever do so, the Worker's launch guard
         # refuses the hydrate-less start over the missing scratch and the API replays
         # it with a hydrate.
         if outcome.held_generation is not None:
@@ -539,7 +541,6 @@ class FleetControlPlaneAdapter(ControlPlane):
         | ListFilesCommand,
         *,
         timeout_override: float | None = None,
-        snapshot_is_final: bool = False,
     ) -> CommandOutcome:
         try:
             result = await self._control_plane.dispatch(
@@ -547,7 +548,6 @@ class FleetControlPlaneAdapter(ControlPlane):
                 server_id=str(server_id.value),
                 command=command,
                 timeout_override=timeout_override,
-                snapshot_is_final=snapshot_is_final,
             )
         except (WorkerNotConnectedError, CommandTimedOutError) as exc:
             # Thread the cause across the seam without leaking a fleet type into

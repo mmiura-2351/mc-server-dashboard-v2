@@ -486,9 +486,11 @@ class ControlPlane(abc.ABC):
 
         ``final`` marks the stop-flow final snapshot (issue #891): only it holds the
         stop at (stopped, stopped, assigned), so only its dispatch timeout may
-        promote a late-result record that clears the held assignment. Periodic and
-        on-demand snapshots leave ``final=False`` so a stale late result of theirs
-        can never clear a subsequent final-snapshot hold.
+        promote a late-result record that clears the held assignment. It also
+        reaches the Worker, which then first ends the containers its failed starts
+        left running for a stopped server (issue #4053). Periodic and on-demand
+        snapshots leave ``final=False``: they end nothing, and a stale late result of
+        theirs can never clear a subsequent final-snapshot hold.
         """
 
     @abc.abstractmethod

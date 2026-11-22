@@ -114,6 +114,10 @@ type Command struct {
 	TransferURL string
 	// TransferToken is the short-lived credential authorizing one transfer.
 	TransferToken string
+	// Final marks a SnapshotTrigger as a stop's final snapshot (issue #4053). A
+	// stopped-id snapshot that carries it first ends what the driver's failed
+	// starts left running for the server; one without it ends nothing.
+	Final bool
 	// Path is the working-set-relative path for ReadFile / EditFile (Section 7.2).
 	Path string
 	// Content is the bytes to write for EditFile.

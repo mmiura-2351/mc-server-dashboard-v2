@@ -830,7 +830,7 @@ section fixes only what the operator configures.
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
-| `worker.scratch_dir` | *required* | | Local scratch directory where the Worker hydrates a server's working set and runs it (REQUIREMENTS.md FR-DATA-4); the `WorkingDir` Port's root (ARCHITECTURE.md Section 5.2). |
+| `worker.scratch_dir` | *required* | | Local scratch directory where the Worker hydrates a server's working set and runs it (REQUIREMENTS.md FR-DATA-4); the `WorkingDir` Port's root (ARCHITECTURE.md Section 5.2). Each scratch directory belongs to exactly one Worker process: sharing one between Workers is unsupported, and nothing enforces it. It also holds `.generation-key` (mode `0600`), the key the Worker signs each working set's generation marker with, created on first boot. Losing it costs every held server one hydrate; a key that cannot be used, or cannot be created, is logged at `ERROR` with its remedy and never replaced, and no marker is believed (every held server is advertised at generation 0) until the cause is fixed and the Worker restarted ([`STORAGE.md`](STORAGE.md) Section 8). |
 | `driver.container.docker_host` | *(daemon default)* | | Docker daemon endpoint when the `container` driver is enabled. Only a `unix://` socket is supported; empty uses the daemon's default socket. |
 | `driver.container.images` | *(empty)* | | Map of Java **major version** to the base container image providing that JRE; the `container` driver picks the image matching a server's Minecraft version by the version→major bracket table below (REQUIREMENTS.md FR-EXE-5, ARCHITECTURE.md Section 7.3). **Required** when `worker.drivers` advertises `container`. See below. |
 | `driver.container.game_bind_ip` | `127.0.0.1` | | Host interface the `container` driver publishes each server's **game** port on. The default is loopback-only; set `0.0.0.0` to accept players from outside the host (the firewall then governs exposure). Must be a valid IP address. RCON always stays on loopback regardless of this value. |
@@ -907,8 +907,10 @@ keeps an id for it whose container the daemon still knows or cannot inspect
 within 10 s, lists a running container of it, or cannot list its containers
 within 10 s. A hydrate first deals with the kept ids the way the next
 start would, so a container's shutdown save lands before the pull replaces the
-working set, and it is refused if the server still is. A snapshot of a
-stopped server is refused too, and stops nothing. Both refusals, and a start the
+working set, and it is refused if the server still is. A stop's final
+snapshot of a stopped server deals with them the same way before it packs, and a
+periodic or on-demand one is refused while the server is busy and stops nothing
+(issue #4053). These refusals, and a start the
 driver refuses for a kept id or a running container, or whose create or start
 call the daemon did not answer in time, answer `UNAVAILABLE`
 ([`CONTROL_PLANE.md`](CONTROL_PLANE.md) Section 7). Unlike `BUSY`, the

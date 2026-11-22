@@ -124,7 +124,7 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | POST | `…/{sid}/backups/{bid}/download-grant` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `backup:read` gate as the download; `auth.token.download_grant_ttl_seconds`, 30 s by default (AUTH_API.md Section 3). |
 | POST | `…/{sid}/backups/{bid}/restore[?force=true]` | **Server must be stopped.** `?force=true` overrides the quarantine gate. |
 | DELETE | `…/{sid}/backups/{bid}` | Delete. |
-| PUT / DELETE | `…/{sid}/backups/retention` | Set / clear the scheduled-backup retention policy: `{keep_last}` (≥ 1) XOR `{daily, weekly, monthly}` (each ≥ 0, one > 0); an invalid shape is 422 `invalid_retention_policy`. Gated by `backup:schedule`. Applies only to `source=scheduled` backups — manual/uploaded rows are never auto-deleted. Setting prunes immediately; thereafter each successful scheduled backup run prunes (each deletion audited as `backup:delete`, no actor). Policy readable as `backup_retention` on the server read; null while unconfigured. |
+| PUT / DELETE | `…/{sid}/backups/retention` | Set / clear the scheduled-backup retention policy: `{keep_last}` (≥ 1) XOR `{daily, weekly, monthly}` (each ≥ 0, one > 0); an invalid shape is 422 `invalid_retention_policy`. Gated by `backup:schedule`. Applies only to `source=scheduled` backups — manual/uploaded rows are never auto-deleted. Scheduled backups whose `health` is `healthy`, `unknown` or `unreadable` are chosen as keepers first: a `quarantined` one keeps a keep-N slot only when too few non-quarantined ones are left to fill the N, and a tier bucket only when the bucket holds no non-quarantined backup. Setting prunes immediately; thereafter each successful scheduled backup run prunes (each deletion audited as `backup:delete`, no actor). Policy readable as `backup_retention` on the server read; null while unconfigured. |
 | GET | `…/{sid}/groups` | Groups attached to this server. |
 | GET / POST | `/communities/{cid}/groups` | Player groups (`kind`: `op` \| `whitelist`). |
 | GET / PATCH / DELETE | `…/groups/{gid}` | Read / rename / delete. |
@@ -899,7 +899,12 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   422 `invalid_retention_policy` maps to the same inline error. A hint states
   the policy prunes **only** scheduled backups (the table's source badge
   distinguishes the rows); manual / uploaded / event backups are never
-  auto-deleted.
+  auto-deleted. In keep-last-N and tiered modes the hint also states when a
+  scheduled backup marked Damaged (`quarantined`) is kept: keep-last-N, only
+  when there are not enough other scheduled backups to reach the number to
+  keep; tiered, only when its day, week or month has no backup not marked
+  Damaged. The keep-all hint does not mention Damaged backups, since nothing
+  is pruned.
 
 ### 6.8 Server detail — Players
 - Attached groups (`GET …/{sid}/groups`) with kind badges; attach/detach
