@@ -10,6 +10,7 @@ running), and the placement-load increment/decrement bookkeeping.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import datetime as dt
 import logging
 import uuid
@@ -8249,12 +8250,14 @@ async def test_a_refusal_is_recorded_for_the_reconciler_once_it_is_answered(
 
 
 @pytest.mark.parametrize("answer", ["timed-out", "session-ended"])
-async def test_a_retry_left_unanswered_keeps_the_row_and_clears_the_refusal(
+async def test_a_retry_left_unanswered_keeps_the_row_and_the_refusal(
     answer: str,
 ) -> None:
-    # The latest answer is no longer a refusal. The row stays held: a timed-out
-    # upload may still publish, and a Worker whose session ended may be back with
-    # the working set. Nothing records a refusal for the short grace either.
+    # The row stays held: a timed-out upload may still publish, and a Worker
+    # whose session ended may be back with the working set. The refusal stays
+    # recorded (issue #4111): the retry did not settle the snapshot it holds the
+    # row for, so only a release or a new refusal changes it. Nothing records a
+    # refusal for the short grace either.
     community, server_id, worker = _ids()
     unanswered = _timed_out(worker) if answer == "timed-out" else _session_ended(worker)
     cp = _ScriptedSnapshots([unanswered])
@@ -8278,80 +8281,8 @@ async def test_a_retry_left_unanswered_keeps_the_row_and_clears_the_refusal(
 
     stored = uow.servers.by_id[ServerId(server_id)]
     assert stored.assigned_worker_id == WorkerId(worker)
-    assert stored.final_snapshot_refusal is None
-    assert unrecorded.recorded_at(ServerId(server_id)) is None
-
-
-class _RepositoryFailingTheRefusalClear(FakeServerRepository):
-    """A repository whose clear of a recorded refusal raises, as in an outage."""
-
-    async def set_final_snapshot_refusal(
-        self,
-        server_id: ServerId,
-        worker_id: WorkerId,
-        refusal: FinalSnapshotRefusal | None,
-    ) -> bool:
-        if refusal is None:
-            raise RuntimeError("database unavailable")
-        return await super().set_final_snapshot_refusal(server_id, worker_id, refusal)
-
-
-@pytest.mark.parametrize(
-    ("entry", "answer"),
-    [
-        ("operator-re-stop", "timed-out"),
-        ("operator-re-stop", "session-ended"),
-        ("redispatch-not-found", "session-ended"),
-    ],
-)
-async def test_a_failed_clear_of_the_refusal_keeps_the_unanswered_retry_s_error(
-    entry: str, answer: str, caplog: pytest.LogCaptureFixture
-) -> None:
-    # The clear only records that the latest answer is no longer a refusal. It
-    # must not replace that answer, which decides what the caller does: the
-    # operator's re-stop answers 503 worker_unavailable rather than 500, and the
-    # reconciler backs off as for any unanswered snapshot. The row keeps the
-    # refusal it holds until a later answer is recorded or a release clears it.
-    community, server_id, worker = _ids()
-    unanswered = _timed_out(worker) if answer == "timed-out" else _session_ended(worker)
-    redispatch = entry == "redispatch-not-found"
-    cp = _ScriptedSnapshots(
-        [unanswered],
-        stop=(
-            CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND)
-            if redispatch
-            else None
-        ),
-    )
-    repo = _RepositoryFailingTheRefusalClear()
-    repo.seed(
-        _held(
-            community,
-            server_id,
-            worker,
-            refusal=FinalSnapshotRefusal.BUSY,
-            # A held row whose Worker dropped and came back reads unknown.
-            observed=ObservedState.UNKNOWN if redispatch else ObservedState.STOPPED,
-        )
-    )
-    uow = FakeUnitOfWork(servers=repo)
-
-    with (
-        caplog.at_level(logging.WARNING),
-        pytest.raises(WorkerUnavailableError) as excinfo,
-    ):
-        await _enter(
-            entry, _stale_clear(uow, cp, StopIntentCounter()), community, server_id
-        )
-
-    assert excinfo.value.upload_may_be_live is (answer == "timed-out")
-    stored = repo.by_id[ServerId(server_id)]
-    assert stored.assigned_worker_id == WorkerId(worker)
     assert stored.final_snapshot_refusal is FinalSnapshotRefusal.BUSY
-    assert any(
-        "could not clear the recorded final-snapshot refusal" in r.getMessage()
-        for r in caplog.records
-    )
+    assert unrecorded.recorded_at(ServerId(server_id)) is None
 
 
 async def test_a_refused_retry_records_the_refusal_again() -> None:
@@ -8509,30 +8440,67 @@ async def test_a_held_retry_of_a_late_refusal_leaves_a_released_row_alone(
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
-async def test_an_operator_stop_of_a_held_row_whose_worker_is_gone_releases_it() -> (
-    None
-):
-    # Unchanged #3491 behaviour, which PM ruling 2(a) on #3697 does not cover: a
-    # stop of a row whose Worker is already gone releases it at once without the
-    # snapshot or the grace, refusal or not. It is the documented way to free a
-    # server from a Worker that never returns, and a known gap for a held row
-    # (issue #4111), which this pins until that issue changes it.
+@pytest.mark.parametrize(
+    "observed",
+    # A drop rewrites the held row to unknown, but a crashed one stays crashed;
+    # after an API restart the Worker reads disconnected with the row as it was.
+    [ObservedState.UNKNOWN, ObservedState.STOPPED, ObservedState.CRASHED],
+    ids=lambda s: s.value,
+)
+@pytest.mark.parametrize(
+    "refusal", list(FinalSnapshotRefusal), ids=lambda refusal: refusal.value
+)
+async def test_an_operator_stop_of_a_held_row_whose_worker_is_gone_keeps_it(
+    observed: ObservedState, refusal: FinalSnapshotRefusal
+) -> None:
+    # Issue #4111: the snapshot the refusal holds the row for is still owed, so
+    # a stop while its Worker is gone releases nothing and changes nothing. The
+    # row is released by that Worker's return (a retry that settles the
+    # snapshot), by the disconnected-Worker leg a full grace after the drop (PM
+    # ruling 2(a) on #3697), or by the release without the snapshot (#4055).
     community, server_id, worker = _ids()
     cp = FakeControlPlane(connected={WorkerId(worker): False})
     uow = FakeUnitOfWork()
     uow.servers.seed(
+        _held(community, server_id, worker, refusal=refusal, observed=observed)
+    )
+    before = dataclasses.replace(uow.servers.by_id[ServerId(server_id)])
+
+    with pytest.raises(WorkerUnavailableError) as excinfo:
+        await _stale_clear(uow, cp, StopIntentCounter())(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert excinfo.value.worker_state is UnavailableWorkerState.NOT_CONNECTED
+    assert cp.dispatched == []
+    assert uow.servers.by_id[ServerId(server_id)] == before
+
+
+async def test_a_held_row_whose_retry_meets_a_drop_stays_held_against_a_stop() -> None:
+    # The #4102 review's case: an operator retries a held row's snapshot, and
+    # the Worker drops while the retry is in flight. The retry keeps the
+    # refusal, so the stop sent while the Worker is gone keeps the row too.
+    community, server_id, worker = _ids()
+    cp = _ScriptedSnapshots([_session_ended(worker)])
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
         _held(community, server_id, worker, refusal=FinalSnapshotRefusal.UNAVAILABLE)
     )
+    stop = _stale_clear(uow, cp, StopIntentCounter())
+    with pytest.raises(WorkerUnavailableError):
+        await stop(community_id=CommunityId(community), server_id=ServerId(server_id))
+    cp.end_session(WorkerId(worker), at=_NOW)
+    await uow.servers.mark_worker_servers_unknown(WorkerId(worker), _NOW)
 
-    result = await _stale_clear(uow, cp, StopIntentCounter())(
-        community_id=CommunityId(community), server_id=ServerId(server_id)
-    )
+    with pytest.raises(WorkerUnavailableError) as excinfo:
+        await stop(community_id=CommunityId(community), server_id=ServerId(server_id))
 
-    assert cp.dispatched == []
+    assert excinfo.value.worker_state is UnavailableWorkerState.NOT_CONNECTED
+    assert [kind for kind, _, _ in cp.dispatched] == ["snapshot"]
     stored = uow.servers.by_id[ServerId(server_id)]
-    assert stored.assigned_worker_id is None
-    assert stored.final_snapshot_refusal is None
-    assert result.final_snapshot_refusal is None
+    assert stored.observed_state is ObservedState.UNKNOWN
+    assert stored.assigned_worker_id == WorkerId(worker)
+    assert stored.final_snapshot_refusal is FinalSnapshotRefusal.UNAVAILABLE
 
 
 # --- bedrock tunnel sync (issue #1602) --------------------------------------

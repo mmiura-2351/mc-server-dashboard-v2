@@ -374,7 +374,8 @@ class ServerRepository(abc.ABC):
         """Record how ``worker_id`` last answered the stop's final snapshot (#4054).
 
         ``refusal`` is the refusal that keeps the Worker assigned, or ``None``
-        once a later attempt was not refused. The write lands only while the
+        to clear it. A stop clears it only by releasing the row: a retry left
+        unanswered keeps it (issue #4111). The write lands only while the
         row is ``desired_state=stopped`` and still assigned to ``worker_id``,
         so it never marks a row a release or a start has moved on. Every
         release clears the value with the assignment. Returns ``True`` when the

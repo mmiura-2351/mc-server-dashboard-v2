@@ -108,7 +108,9 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   reconnects nothing re-places the server: an operator stop releases it (the
   ``unknown`` arm above, after the grace or at once on a second stop), and a start
   then places it elsewhere (CONFIGURATION.md Section 5.6; an automatic recovery is
-  issue #3809). The orphan path has no assigned Worker, so it is unaffected by this
+  issue #3809). A second stop of a server held by a refused final snapshot
+  releases nothing (issue #4111); the grace or the release without the snapshot
+  does. The orphan path has no assigned Worker, so it is unaffected by this
   skip.
 
 Grace window — a divergence is acted on only once it has persisted past a grace
@@ -214,9 +216,13 @@ takes here: the short grace only re-drives the snapshot, and the row is released
 only once a snapshot settles. A refusal is superseded like any record, a later
 drop of the Worker included. That Worker may be back with the working set, so the
 row then waits a full grace from the drop, after which the disconnected-Worker leg
-releases it without the snapshot (PM ruling 2(a) on #3697, the one release of a
-refusal-held row no operator asked for). The hold itself is the row shape, which
-an API restart keeps; only the short grace is lost with the record.
+releases it without the snapshot (PM ruling 2(a) on #3697). Every other release of
+a refusal-held row follows a settled snapshot or an operator's release without it
+(``ReleaseHeldServer``): an operator's stop while that Worker is gone releases
+nothing (issue #4111), so this leg is the one release without the snapshot that
+no operator asked for. The hold itself is the row shape and its recorded refusal,
+which an API restart keeps, as does a retry left unanswered; only the short grace
+is lost with the record.
 
 Widening WHERE the predicate is true does not widen WHAT the short grace assumes.
 The two gates it rides on are unchanged, and they are what the long grace's floors

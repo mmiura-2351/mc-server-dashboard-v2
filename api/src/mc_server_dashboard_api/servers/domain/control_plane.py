@@ -112,6 +112,21 @@ class UnavailableWorkerState(enum.Enum):
     NO_ANSWER = "no_answer"
 
 
+class HeldServerWorkerNotConnectedError(WorkerUnavailableError):
+    """A stop of a server held by a refused final snapshot found its Worker gone.
+
+    The server is ``desired=stopped`` and still assigned, with the refusal
+    recorded (``final_snapshot_refusal``), so the snapshot it is held for is
+    still owed (issue #4111). Without its Worker the stop can neither retry it
+    nor release the server without it, so it changes nothing. The release
+    comes from the Worker's return, the disconnected-Worker grace, or the
+    explicit release without the snapshot, which the edge names in the 503.
+    """
+
+    def __init__(self, *args: object) -> None:
+        super().__init__(*args, worker_state=UnavailableWorkerState.NOT_CONNECTED)
+
+
 class CommandStatus(enum.Enum):
     """The outcome class of a dispatched command (mirrors the wire result code)."""
 

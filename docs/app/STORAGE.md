@@ -2501,7 +2501,8 @@ which leaves markers that read as 0 or an unusable key.
     upgrade's restart is a drop: back within `reconciler.grace_seconds`, the
     Worker gets the snapshot retried, which declares no base generation since
     its marker reads 0; past it, the server is released without the snapshot
-    ([`CONFIGURATION.md`](CONFIGURATION.md) Section 5.6). One that fails any
+    ([`CONFIGURATION.md`](CONFIGURATION.md) Section 5.6). A stop of it while
+    the Worker is down releases nothing (issue #4111). One that fails any
     other way, such as `TRANSFER_FAILED`, releases the server and keeps the
     working set (Section 4.6), and the upgrade then hydrates over it. So check
     that no stopped server is still assigned to the Worker, and that no `<id>`
@@ -2606,7 +2607,9 @@ release:
   would let a start place the server elsewhere, or an at-rest write advance the
   store, and lose it. The reconciler retries the snapshot until one settles
   otherwise, and a holder of `server:stop` can release the server without it
-  ([CONFIGURATION.md](CONFIGURATION.md) Section 5.6).
+  ([CONFIGURATION.md](CONFIGURATION.md) Section 5.6). A retry that times out or
+  meets a session end keeps the refusal recorded, and a stop while the Worker
+  is not connected releases nothing (issue #4111).
 - **The Worker's session ended**, before or while the snapshot ran, or a fast
   reconnect retired it — the assignment is HELD too (issue #3981). Nothing is
   uploading, but the Worker may be back with the working set, and releasing
