@@ -464,3 +464,20 @@ def test_each_app_engine_bounds_a_query_the_server_never_answers(
 
     assert elapsed < _WITHIN_SECONDS
     assert is_transient_database_error(error) is True
+
+
+@pytest.mark.parametrize("engine", ["engine", "assignment_fence_engine"])
+def test_each_app_engine_bounds_its_wait_for_a_free_connection(
+    monkeypatch: pytest.MonkeyPatch, engine: str
+) -> None:
+    # The configured wait, not SQLAlchemy's 30 s (issue #4051). A wait that runs
+    # out answers 503 (tests/integration/test_pool_timeout.py).
+    client = _bounded_client(
+        monkeypatch,
+        "postgresql+asyncpg://u:p@127.0.0.1:5/none",
+        setting="pool_timeout_seconds",
+    )
+    app = client.app
+    assert isinstance(app, FastAPI)
+
+    assert getattr(app.state, engine).pool.timeout() == float(_BOUND)

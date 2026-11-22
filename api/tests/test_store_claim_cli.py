@@ -32,7 +32,12 @@ from mc_server_dashboard_api.config import load_settings
 from mc_server_dashboard_api.core.adapters.database import is_transient_database_error
 from mc_server_dashboard_api.storage.adapters import ownership as ownership_module
 from mc_server_dashboard_api.storage.adapters.ownership import OWNER_MARKER
-from tests.core.fakes import black_hole_database, first_failure, silent_database
+from tests.core.fakes import (
+    RecordingEngines,
+    black_hole_database,
+    first_failure,
+    silent_database,
+)
 from tests.storage.fake_s3 import FakeS3Store, fake_s3_factory
 
 # ``main`` installs the app's log handler (issue #3942); take it off afterwards.
@@ -280,3 +285,22 @@ async def test_the_command_holds_a_database_that_stopped_answering_to_its_bounds
 
     assert elapsed < 2.0
     assert is_transient_database_error(error) is True
+
+
+async def test_the_command_bounds_its_wait_for_a_free_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The configured wait, not SQLAlchemy's 30 s (issue #4051).
+    monkeypatch.setenv("MCD_API_STORAGE__BACKEND", "fs")
+    monkeypatch.setenv("MCD_API_STORAGE__FS__ROOT", str(tmp_path))
+    monkeypatch.setenv(
+        "MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@127.0.0.1:5/none"
+    )
+    monkeypatch.setenv("MCD_API_DATABASE__POOL_TIMEOUT_SECONDS", "0.2")
+    engines = RecordingEngines()
+    monkeypatch.setattr(store_claim_cli, "create_engine", engines)
+
+    with pytest.raises(OSError):
+        await store_claim_cli.run(load_settings(config_file=None))
+
+    assert engines.pool_timeouts() == [0.2]
