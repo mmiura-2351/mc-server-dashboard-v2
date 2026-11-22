@@ -1944,8 +1944,10 @@ point has no row for anything the store gained since, backup archives included.
 Only the newest of those objects are spared, by the safety windows: 1 h for the
 JAR-pool, plugin-cache and resource-pack GCs, and
 `storage_sweep.rowless_archive_grace_seconds` (7 days by default) for backup
-archives. The first start after the restore deletes the rest (STORAGE.md
-Section 4.3, under "Cases the marker does not cover"). The commands above dump
+archives. The rest go soon after the first start: the backup archives at the
+start itself, the other objects at each GC's first pass, at most 10 minutes
+later (CONFIGURATION.md Section 5.7; STORAGE.md Section 4.3, under "Cases the
+marker does not cover"). The commands above dump
 the database before they archive the store, so a backup taken between the two
 is restored with its archive but no row, and the reclaim deletes that archive
 once it is older than the grace.
