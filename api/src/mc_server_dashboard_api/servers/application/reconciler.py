@@ -516,6 +516,9 @@ class RunReconcilerTick:
     held_start_grace_seconds: int
     refused_stop_grace_seconds: int
     restart_timeout_seconds: int
+    # How long a Worker must have read not connected before the tick marks its
+    # servers unknown itself (issue #4130, :meth:`_mark_gone_workers_unknown`).
+    heartbeat_timeout_seconds: int
     backoff_base_seconds: int
     backoff_max_seconds: int
     # When this process's control-plane listener started: the first instant a
@@ -524,6 +527,7 @@ class RunReconcilerTick:
     _attempts: dict[ServerId, _Backoff] = field(default_factory=dict)
 
     async def tick(self) -> None:
+        await self._mark_gone_workers_unknown()
         now = self.clock.now()
         async with self.uow:
             candidates = await self.uow.servers.list_reconcilable()
@@ -565,6 +569,60 @@ class RunReconcilerTick:
                     server.id.value,
                     exc_info=result,
                 )
+
+    async def _mark_gone_workers_unknown(self) -> None:
+        """Mark a gone Worker's servers unknown when its teardown did not (#4130).
+
+        A session's teardown marks its Worker's servers ``unknown``, but its
+        write can fail, and after a refused registration it is skipped past
+        a bound (issue #4091). Its servers then read their last report, such
+        as ``running``, for as long as the Worker stays away. This runs the
+        same write for a Worker whose session ended at least
+        ``heartbeat_timeout_seconds`` ago with no newer one, so the teardown's
+        own write comes first. A Worker whose heartbeats have lapsed still has
+        its session until the watchdog ends it.
+
+        The write is stamped with the instant the session ended, which comes
+        after every report of that session, so the servers end as the
+        teardown's write would have left them: a stopped intent's release
+        still waits a full grace from the drop. A report of the Worker's next
+        session is stamped later and survives the write (issue #4092), and a
+        repeat of it changes nothing.
+
+        Only a Worker whose servers the write still changes is selected. A
+        Worker that has not registered with this process has no session end
+        and is left to the startup reset, which ran before the first tick.
+        The registry is the process's own, so this assumes one API process,
+        as the teardown does.
+        """
+
+        async with self.uow:
+            worker_ids = await self.uow.servers.workers_with_trusted_observed_state()
+        grace = dt.timedelta(seconds=self.heartbeat_timeout_seconds)
+        for worker_id in worker_ids:
+            ended_at = self.control_plane.worker_session_ended_at(worker_id=worker_id)
+            if ended_at is None or self.clock.now() - ended_at < grace:
+                continue
+            try:
+                async with self.uow:
+                    await self.uow.servers.mark_worker_servers_unknown(
+                        worker_id, ended_at
+                    )
+                    await self.uow.commit()
+            except Exception:  # noqa: BLE001 - never abort the tick
+                _LOG.warning(
+                    "failed to mark the servers of worker %s unknown; retrying "
+                    "next tick",
+                    worker_id.value,
+                    exc_info=True,
+                )
+                continue
+            _LOG.warning(
+                "worker %s has had no session since %s and its servers still read "
+                "their last report; marked them unknown",
+                worker_id.value,
+                ended_at.isoformat(),
+            )
 
     def _forgive_settled(
         self, tracked: dict[ServerId, Server | None], now: dt.datetime

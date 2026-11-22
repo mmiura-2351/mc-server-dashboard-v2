@@ -403,6 +403,17 @@ class ServerRepository(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def workers_with_trusted_observed_state(self) -> set[WorkerId]:
+        """Return each Worker assigned a server observed neither unknown nor crashed.
+
+        The servers whose state :meth:`mark_worker_servers_unknown` changes. The
+        reconciler marks them for a Worker gone past its grace (issue #4130),
+        and only those: the write restamps every row it locks, and a stamp
+        that kept moving would hold back the release of the Worker's servers
+        under a stopped intent, which waits a grace from it.
+        """
+
+    @abc.abstractmethod
     async def reset_unverifiable_observed_states(self, observed_at: dt.datetime) -> int:
         """Invalidate the observed cache for assigned, in-flight servers (issue #224).
 

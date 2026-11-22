@@ -14,6 +14,7 @@ import asyncio
 import datetime as dt
 import logging
 import uuid
+from collections.abc import Callable
 
 import pytest
 
@@ -101,6 +102,9 @@ _REFUSED_GRACE = 5
 # The restart budget (issue #3209): ABOVE the full grace so a test can pin a
 # divergence age between them and prove the budget, not a grace, held the start back.
 _RESTART_BUDGET = 120
+# How long a Worker reads not connected before the tick marks its servers
+# unknown itself (issue #4130).
+_HEARTBEAT_TIMEOUT = 30
 _PAST_GRACE = _NOW - dt.timedelta(seconds=_GRACE + 1)
 # This process's control-plane listener started well before every other instant
 # here, unless a test says otherwise (issue #3916).
@@ -209,6 +213,7 @@ def _reconciler(
         held_start_grace_seconds=_HELD_GRACE,
         refused_stop_grace_seconds=_REFUSED_GRACE,
         restart_timeout_seconds=_RESTART_BUDGET,
+        heartbeat_timeout_seconds=_HEARTBEAT_TIMEOUT,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
         listener_started_at=listener_started_at,
@@ -3281,6 +3286,7 @@ def _concurrent_reconciler(
         held_start_grace_seconds=_HELD_GRACE,
         refused_stop_grace_seconds=_REFUSED_GRACE,
         restart_timeout_seconds=_RESTART_BUDGET,
+        heartbeat_timeout_seconds=_HEARTBEAT_TIMEOUT,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
         listener_started_at=_STARTED_LONG_AGO,
@@ -3401,6 +3407,7 @@ async def test_failure_in_one_action_does_not_poison_others() -> None:
         held_start_grace_seconds=_HELD_GRACE,
         refused_stop_grace_seconds=_REFUSED_GRACE,
         restart_timeout_seconds=_RESTART_BUDGET,
+        heartbeat_timeout_seconds=_HEARTBEAT_TIMEOUT,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
         listener_started_at=_STARTED_LONG_AGO,
@@ -3945,6 +3952,7 @@ async def test_a_worker_back_within_a_grace_of_its_drop_is_owed_its_row(
     # Back on a new session, past the failure's backoff.
     cp._connected[_WORKER] = True
     del cp.offline_since[_WORKER]
+    del cp.session_ended_at[_WORKER]
     clock.set(_NOW + dt.timedelta(seconds=_GRACE - 1))
     await reconciler.tick()
 
@@ -4310,3 +4318,226 @@ async def test_worker_reported_unknown_unassigned_is_at_rest_not_wedged() -> Non
     assert cp.dispatched == []
     assert await uow.servers.list_reconcilable() == []
     assert uow.servers.by_id[server.id].is_at_rest()
+
+
+# --- a gone Worker's servers its teardown did not mark (issue #4130) -------
+
+_GONE = WorkerId(uuid.uuid4())
+
+
+def _observed(uow: FakeUnitOfWork, server: Server) -> tuple[ObservedState, object]:
+    row = uow.servers.by_id[server.id]
+    return row.observed_state, row.observed_at
+
+
+def _running_on(worker: WorkerId) -> Server:
+    return _server(
+        desired=DesiredState.RUNNING, observed=ObservedState.RUNNING, worker=worker
+    )
+
+
+def _registry_reconciler(
+    uow: FakeUnitOfWork, registry: InMemoryWorkerRegistry, clock: FakeClock
+) -> RunReconcilerTick:
+    cp = FleetControlPlaneAdapter(registry=registry, control_plane=_CapturingFleet())
+    return _reconciler(uow, cp, clock)
+
+
+def _registry_at_now() -> InMemoryWorkerRegistry:
+    return InMemoryWorkerRegistry(
+        clock=FleetFakeClock(_NOW),
+        heartbeat_timeout=dt.timedelta(seconds=_HEARTBEAT_TIMEOUT),
+    )
+
+
+async def test_a_gone_workers_servers_are_marked_at_its_sessions_end() -> None:
+    # Through the real registry: the teardown marked the session's end, and
+    # the write is stamped with it, as the teardown's own would have been.
+    registry = _registry_at_now()
+    session = registry.register(make_worker(worker_id=str(_GONE.value), at=_NOW))
+    registry.mark_disconnected(FleetWorkerId(str(_GONE.value)), session)
+    uow = FakeUnitOfWork()
+    server = _running_on(_GONE)
+    uow.servers.seed(server)
+    clock = FakeClock(_NOW + dt.timedelta(seconds=_HEARTBEAT_TIMEOUT))
+
+    await _registry_reconciler(uow, registry, clock).tick()
+
+    assert _observed(uow, server) == (ObservedState.UNKNOWN, _NOW)
+
+
+def _live(registry: InMemoryWorkerRegistry) -> None:
+    registry.register(make_worker(worker_id=str(_GONE.value), at=_NOW))
+
+
+def _back_after_a_drop(registry: InMemoryWorkerRegistry) -> None:
+    old = registry.register(make_worker(worker_id=str(_GONE.value), at=_NOW))
+    registry.mark_disconnected(FleetWorkerId(str(_GONE.value)), old)
+    registry.register(make_worker(worker_id=str(_GONE.value), at=_NOW))
+
+
+def _lapsed(registry: InMemoryWorkerRegistry) -> None:
+    # Its heartbeats lapsed long ago, and the watchdog has not ended it yet.
+    registry.register(
+        make_worker(worker_id=str(_GONE.value), at=_NOW - dt.timedelta(hours=1))
+    )
+
+
+def _never_registered(registry: InMemoryWorkerRegistry) -> None:
+    # As at the first tick, before any Worker has registered with this
+    # process: the startup reset has already run over these rows.
+    pass
+
+
+@pytest.mark.parametrize(
+    "worker",
+    [_live, _back_after_a_drop, _lapsed, _never_registered],
+    ids=["live", "back-after-a-drop", "lapsed", "never-registered"],
+)
+async def test_a_worker_with_no_ended_session_keeps_its_servers(
+    worker: Callable[[InMemoryWorkerRegistry], None],
+) -> None:
+    registry = _registry_at_now()
+    worker(registry)
+    uow = FakeUnitOfWork()
+    server = _running_on(_GONE)
+    uow.servers.seed(server)
+
+    await _registry_reconciler(
+        uow, registry, FakeClock(_NOW + dt.timedelta(hours=1))
+    ).tick()
+
+    assert _observed(uow, server) == (ObservedState.RUNNING, _PAST_GRACE)
+
+
+async def test_a_gone_workers_servers_are_marked_once_the_grace_has_passed() -> None:
+    uow = FakeUnitOfWork()
+    server = _running_on(_GONE)
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    cp.end_session(_GONE, at=_NOW)
+    clock = FakeClock(_NOW + dt.timedelta(seconds=_HEARTBEAT_TIMEOUT - 1))
+    reconciler = _reconciler(uow, cp, clock)
+
+    await reconciler.tick()
+    assert _observed(uow, server) == (ObservedState.RUNNING, _PAST_GRACE)
+
+    clock.set(_NOW + dt.timedelta(seconds=_HEARTBEAT_TIMEOUT))
+    await reconciler.tick()
+    assert _observed(uow, server) == (ObservedState.UNKNOWN, _NOW)
+
+
+async def test_a_gone_workers_servers_already_unknown_are_left_alone(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The teardown's write landed, after the session's end: nothing is left
+    # to mark, so no tick writes or logs a mark again, and a stopped intent's
+    # release still comes a full grace after that write.
+    landed = _PAST_GRACE
+    uow = FakeUnitOfWork()
+    stopped = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.UNKNOWN,
+        worker=_GONE,
+        observed_at=landed,
+    )
+    running = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.UNKNOWN,
+        worker=_GONE,
+        observed_at=landed,
+    )
+    uow.servers.seed(stopped)
+    uow.servers.seed(running)
+    cp = FakeControlPlane()
+    cp.end_session(_GONE, at=landed - dt.timedelta(microseconds=1))
+
+    with caplog.at_level(logging.WARNING, logger="mc_server_dashboard_api"):
+        await _reconciler(uow, cp, FakeClock(_NOW)).tick()
+
+    assert uow.servers.by_id[stopped.id].assigned_worker_id is None
+    assert _observed(uow, running) == (ObservedState.UNKNOWN, landed)
+    assert [r for r in caplog.records if "marked them unknown" in r.getMessage()] == []
+
+
+class _SelectionMarksRepository(FakeServerRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.selected = False
+
+    async def workers_with_trusted_observed_state(self) -> set[WorkerId]:
+        self.selected = True
+        return await super().workers_with_trusted_observed_state()
+
+
+class _ReportsAfterSelection(FakeUnitOfWork):
+    """Runs ``report`` as the first unit of work after the selection opens."""
+
+    servers: _SelectionMarksRepository
+
+    def __init__(self, report: Callable[[], None]) -> None:
+        super().__init__(servers=_SelectionMarksRepository())
+        self._report: Callable[[], None] | None = report
+
+    async def __aenter__(self) -> _ReportsAfterSelection:
+        if self.servers.selected and self._report is not None:
+            report, self._report = self._report, None
+            report()
+        return self
+
+
+async def test_a_report_committed_while_the_mark_waits_is_kept() -> None:
+    # The Worker's next session reports while the write waits on the
+    # database. That report is newer than the session's end the write is
+    # stamped with, and survives it.
+    clock = FakeClock(_NOW)
+    reported_at = _NOW + dt.timedelta(seconds=1)
+
+    def report() -> None:
+        row = uow.servers.by_id[server.id]
+        row.observed_state = ObservedState.RUNNING
+        row.observed_at = reported_at
+        clock.set(_NOW + dt.timedelta(seconds=2))
+
+    uow = _ReportsAfterSelection(report)
+    server = _server(
+        desired=DesiredState.RUNNING, observed=ObservedState.STARTING, worker=_GONE
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    cp.end_session(_GONE, at=_NOW - dt.timedelta(seconds=_HEARTBEAT_TIMEOUT))
+
+    await _reconciler(uow, cp, clock).tick()
+
+    assert _observed(uow, server) == (ObservedState.RUNNING, reported_at)
+
+
+class _MarkFailsRepository(FakeServerRepository):
+    async def mark_worker_servers_unknown(
+        self, worker_id: WorkerId, observed_at: dt.datetime
+    ) -> None:
+        raise RuntimeError("the database is down")
+
+
+async def test_a_failed_mark_is_logged_and_the_tick_goes_on(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    uow = FakeUnitOfWork(servers=_MarkFailsRepository())
+    gone = _running_on(_GONE)
+    crashed = _server(
+        desired=DesiredState.RUNNING, observed=ObservedState.CRASHED, worker=_WORKER
+    )
+    uow.servers.seed(gone)
+    uow.servers.seed(crashed)
+    cp = FakeControlPlane()
+    cp.end_session(_GONE, at=_NOW - dt.timedelta(seconds=_HEARTBEAT_TIMEOUT))
+
+    with caplog.at_level(logging.WARNING, logger="mc_server_dashboard_api"):
+        await _reconciler(uow, cp, FakeClock(_NOW)).tick()
+
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+    assert [
+        record.levelno
+        for record in caplog.records
+        if str(_GONE.value) in record.getMessage()
+    ] == [logging.WARNING]
