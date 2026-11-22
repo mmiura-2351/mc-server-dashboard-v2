@@ -31,7 +31,7 @@ dependencies = [
     # well outside the 7-day cooldown (Section 3); cap the next major. The floor
     # is a security floor: every release below 4.14.2 carries published
     # advisories (#3325).
-    "anyio>=4.14.2,<5",                 # 2026-07-12
+    "anyio>=4.16.0,<5",                 # 2026-07-12
     # WebSocket protocol implementation for uvicorn (#507). Bare uvicorn ships no
     # WS library, so its auto-selector resolves AutoWebSocketsProtocol to None and
     # silently downgrades every WS upgrade to plain HTTP — the live /events
