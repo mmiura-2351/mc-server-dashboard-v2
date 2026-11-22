@@ -665,7 +665,11 @@ included, and the new Session's reports can then commit first. So the write
 is stamped as the check passes and leaves every server observed later than
 that stamp: the ending Session's own reports were all stamped earlier, and a
 newer Session's are stamped later, so the outcome no longer depends on which
-write commits first (issue #4092). The
+write commits first (issue #4092). After a refused registration
+(Section 4.1), whose Worker is alive and retries, the write is held to the
+registration's 10 s deadline and skipped past it with a warning, so a stalled
+database does not hold a connection for each retry; the Worker's next accepted
+registration re-establishes its state (issue #4091). The
 teardown runs in a task the API owns, not in the RPC task. When a Worker's
 transport dies, gRPC reports the end of the inbound stream and cancels the RPC
 separately, and the cancel can arrive while the teardown is already writing. The
