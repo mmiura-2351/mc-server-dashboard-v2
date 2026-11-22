@@ -1527,6 +1527,61 @@ async def test_a_restart_runs_an_occurrence_whose_record_failed_once_more() -> N
     ]
 
 
+async def test_a_schedule_owing_a_record_runs_no_backup_retry_either() -> None:
+    store = FakeBackupArchiveStore(missing=True)
+    env = _env(backup_store=store)
+    schedule = _backup_schedule(env)
+    await _tick_at(env, _NOW)  # fails -> arms the retry 30 minutes on
+    # The next occurrence comes due before the retry, and runs while the
+    # database is down; an edit then moves the schedule's next run out.
+    env.uow.schedules.by_id[schedule.id] = _replace_next_run(
+        env.uow.schedules.by_id[schedule.id], _NOW + dt.timedelta(minutes=10)
+    )
+    store._missing = False
+    outage = _RecordsFail(env)
+    await _tick_at(env, _NOW + dt.timedelta(minutes=10))
+    env.uow.schedules.by_id[schedule.id] = _replace_next_run(
+        env.uow.schedules.by_id[schedule.id], _NOW + dt.timedelta(days=1)
+    )
+
+    retry_at = _NOW + dt.timedelta(minutes=30)
+    await _tick_at(env, retry_at)
+    assert _archive_attempts(store) == 2
+
+    # The owed success is recorded, and spends the retry it made moot.
+    outage.down = False
+    await _tick_at(env, retry_at + _TICK)
+    assert _archive_attempts(store) == 2
+    assert _runs(env, schedule) == [
+        ScheduleRunOutcome.FAILURE,
+        ScheduleRunOutcome.SUCCESS,
+    ]
+
+
+async def test_an_owed_record_of_a_deleted_schedule_is_audited_once_and_dropped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    env = _env()
+    schedule = _backup_schedule(env)
+    outage = _RecordsFail(env)
+    await _tick_at(env, _NOW)
+    await env.uow.schedules.delete(schedule.id)
+
+    outage.down = False
+    await _tick_at(env, _NOW + _TICK)
+    await _tick_at(env, _NOW + 2 * _TICK)
+
+    assert _run_rows(env, schedule) == []
+    assert [event.target_id for event in env.audit.events] == [schedule.id.value]
+    infos = _lines_naming(caplog, logging.INFO, schedule)
+    assert (
+        f"schedule {schedule.id.value} was deleted during its run; run not recorded"
+        in infos
+    )
+    assert not [line for line in infos if "owed" in line]
+
+
 async def test_backup_storage_timeout_records_distinguishable_detail() -> None:
     env = _env(backup_store=_StorageTimeoutBackupStore())
     server = _stopped_server()

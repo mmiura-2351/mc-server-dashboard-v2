@@ -115,7 +115,8 @@ A replayed lifecycle/command occurrence is bounded by the same
 without executing). A backup's FAILURE run can also stand beside a complete
 backup: :class:`CreateBackup` keeps the archive of a row whose COMMIT was sent
 but not confirmed, and still raises (issue #4086). Running the occurrence once
-bounds that to one backup.
+bounds that to one backup per run, though the FAILURE arms the one-shot retry,
+which can add another.
 
 A schedule edited or deleted mid-run (issue #3314): the runner claims a due
 schedule just before dispatching it, re-reading its row under ``SELECT ... FOR
@@ -887,8 +888,9 @@ class RunScheduleTick:
                 exc_info=True,
             )
             return
-        # A schedule deleted since was forgotten, and _record said so.
-        self._owed.pop(schedule.id, None)
+        # Dropped on any return: a schedule deleted since has nothing left to
+        # record on, and _record said so.
+        del self._owed[schedule.id]
         if recorded:
             _LOG.info(
                 "schedule %s: the owed run of its %s is recorded",
@@ -1018,7 +1020,6 @@ class RunScheduleTick:
         self._notifying.pop(schedule_id, None)
         self._backup_retry.pop(schedule_id, None)
         self._deferred.pop(schedule_id, None)
-        self._owed.pop(schedule_id, None)
 
     async def _prune_after_backup(
         self, schedule: Schedule, result: ActionResult
