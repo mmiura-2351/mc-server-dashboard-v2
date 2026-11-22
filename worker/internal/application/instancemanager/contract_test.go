@@ -256,10 +256,26 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 		// (issues #2802, #2813). It is the shape both directory stats passed, and the
 		// one both replacements refuse — though by different predicates, a launch
 		// keying on the generation marker and a stopped-id snapshot on the working
-		// set's content. This fixture is where the two agree; see the precondition's
-		// description in the contract table for where they part company.
+		// set's content. This fixture is where the two agree; marker_only below is
+		// where they part company.
 		m := newContractManager(t, &fakeDriver{})
 		if err := os.MkdirAll(filepath.Join(m.scratchDir, serverID), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
+
+	case "marker_only":
+		// No tracked instance, orphan or reservation, and the id's dir holds ONLY the
+		// generation marker: what a 204 hydrate stamps, or what a destruction that
+		// spared the marker leaves (issue #2841). The one shape on which the two guards
+		// diverge: the launch passes it on the marker, the stopped-id snapshot refuses
+		// it for want of content.
+		m := newContractManager(t, &fakeDriver{})
+		dir := filepath.Join(m.scratchDir, serverID)
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, generationFile), []byte("0"), 0o640); err != nil {
 			t.Fatal(err)
 		}
 		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
