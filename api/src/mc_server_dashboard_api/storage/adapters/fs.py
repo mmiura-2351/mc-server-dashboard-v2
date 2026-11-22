@@ -3873,7 +3873,9 @@ def _measure_subtree(target: Path, not_found: str) -> SubtreeExtent:
             try:
                 child = os.open(name, _WALK_DIR_FLAGS, dir_fd=fd)
             except OSError as exc:
-                if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+                # Gone, or no longer a directory: a file, or a symlink, which
+                # ``O_DIRECTORY`` with ``O_NOFOLLOW`` refuses as ENOTDIR too.
+                if exc.errno in (errno.ENOENT, errno.ENOTDIR):
                     continue
                 raise
             enter(child, below + b"/" + name if below else name, level + 1)
