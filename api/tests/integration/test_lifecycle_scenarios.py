@@ -100,6 +100,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
+    FinalSnapshotRefusedError,
     InvalidLifecycleTransitionError,
     LifecycleTransitionConflictError,
 )
@@ -2538,36 +2539,13 @@ async def test_a_stop_during_a_re_sent_starts_wait_takes_its_final_snapshot(
 # --- The release of a held server without its final snapshot (issue #4055) --
 
 
-class _FinalSnapshotCancelled(FakeControlPlane):
-    """The caller is cancelled at the final snapshot's await: the row stays held."""
-
-    async def snapshot(
-        self,
-        *,
-        worker_id: WorkerId,
-        community_id: CommunityId,
-        server_id: ServerId,
-        final: bool = False,
-    ) -> CommandOutcome:
-        await super().snapshot(
-            worker_id=worker_id,
-            community_id=community_id,
-            server_id=server_id,
-            final=final,
-        )
-        raise asyncio.CancelledError
-
-
 async def test_a_refused_final_snapshot_hold_is_released_without_it_then_starts(
     engine: AsyncEngine,
 ) -> None:
-    """start -> stop held at its final snapshot -> the Worker's refusal recorded
-    -> a forced stop still sends the final snapshot -> the release without it
-    frees the row and publishes the release -> a start places the server on
-    another Worker.
-
-    Until #4056 a refusal releases the row by itself, so the hold is the one a
-    cancelled snapshot leaves and the refusal is written as #4056 will write it.
+    """start -> stop whose final snapshot the Worker refuses: the row is held with
+    the refusal recorded -> a forced stop still sends the final snapshot -> the
+    release without it frees the row and publishes the release -> a start places
+    the server on another Worker.
     """
 
     clock = _AdvancingClock(_NOW)
@@ -2577,21 +2555,22 @@ async def test_a_refused_final_snapshot_hold_is_released_without_it_then_starts(
     await _start_server_use_case(engine, FakeControlPlane(place_to=worker), clock)(
         community_id=community, server_id=server_id
     )
-    with pytest.raises(asyncio.CancelledError):
-        await _stop_server_use_case(
-            engine, _FinalSnapshotCancelled(place_to=worker), clock
-        )(community_id=community, server_id=server_id)
+    refusing = FakeControlPlane(
+        place_to=worker,
+        outcomes={"snapshot": CommandOutcome(status=CommandStatus.UNAVAILABLE)},
+    )
+    await _stop_server_use_case(engine, refusing, clock)(
+        community_id=community, server_id=server_id
+    )
     factory = create_session_factory(engine)
-    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
-        assert await uow.servers.set_final_snapshot_refusal(
-            server_id, worker, FinalSnapshotRefusal.UNAVAILABLE
-        )
-        await uow.commit()
 
     # Force means "kill now" only: on a held row it still sends the final
     # snapshot, and does not release without it.
-    forced = _FinalSnapshotCancelled(place_to=worker)
-    with pytest.raises(asyncio.CancelledError):
+    forced = FakeControlPlane(
+        place_to=worker,
+        outcomes={"snapshot": CommandOutcome(status=CommandStatus.UNAVAILABLE)},
+    )
+    with pytest.raises(FinalSnapshotRefusedError):
         await _stop_server_use_case(engine, forced, clock)(
             community_id=community, server_id=server_id, force=True
         )
@@ -2632,4 +2611,113 @@ async def test_a_refused_final_snapshot_hold_is_released_without_it_then_starts(
         engine, FakeControlPlane(place_to=next_worker), clock
     )(community_id=community, server_id=server_id)
     assert restarted.desired_state is DesiredState.RUNNING
+    assert restarted.assigned_worker_id == next_worker
+
+
+async def test_the_3701_sequence_ends_in_a_published_snapshot_and_a_release(
+    engine: AsyncEngine,
+) -> None:
+    """start -> the server crashes -> the reconciler's re-sent start is refused
+    UNAVAILABLE (a container it left could not be removed) -> the operator's stop
+    is answered SERVER_NOT_FOUND -> its final snapshot is refused UNAVAILABLE ->
+    the row stays held, and a start is refused -> the reconciler retries on the
+    short grace -> the API restarts -> the next retry, past the full grace,
+    publishes and releases -> a start places the server on another Worker.
+
+    The #3701 chain. A release on the refusal lost the progression the snapshot
+    owed; holding without a way for the snapshot to end the leftover deadlocked
+    (#4053 gave the final snapshot that way). Here it publishes and releases.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    store = _StoreGeneration(1)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id, community = server.id, server.community_id
+    worker = WorkerId(uuid.uuid4())
+    await _start_server_use_case(engine, FakeControlPlane(place_to=worker), clock)(
+        community_id=community, server_id=server_id
+    )
+    await _sink(engine, clock).record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker.value), state="crashed"
+    )
+    refused_start = FakeControlPlane(
+        outcomes={"start": CommandOutcome(status=CommandStatus.UNAVAILABLE)}
+    )
+    await _reconciler_tick(engine, refused_start, clock)
+    assert [kind for kind, _, _ in refused_start.dispatched] == ["hydrate", "start"]
+
+    unrecorded = UnrecordedStops()
+    stop = FakeControlPlane(
+        outcomes={
+            "stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND),
+            "snapshot": CommandOutcome(status=CommandStatus.UNAVAILABLE),
+        }
+    )
+    stopped = await _stop_server_use_case(
+        engine, stop, clock, unrecorded_stops=unrecorded
+    )(community_id=community, server_id=server_id)
+    assert stopped.final_snapshot_refusal is FinalSnapshotRefusal.UNAVAILABLE
+    held = await _load(engine, server_id)
+    assert held is not None
+    assert held.desired_state is DesiredState.STOPPED
+    assert held.observed_state is ObservedState.CRASHED
+    assert held.assigned_worker_id == worker
+    assert held.final_snapshot_refusal is FinalSnapshotRefusal.UNAVAILABLE
+    with pytest.raises(LifecycleTransitionConflictError):
+        await _start_server_use_case(
+            engine, FakeControlPlane(place_to=WorkerId(uuid.uuid4())), clock
+        )(community_id=community, server_id=server_id)
+    assert store.generation == 1
+
+    # The short grace runs from the refusal: the marker's write moved no stamp.
+    refused_at = unrecorded.recorded_at(server_id)
+    assert refused_at is not None
+    since = max(held.updated_at, held.observed_at or held.updated_at)
+    still_refused = FakeControlPlane(
+        outcomes={"snapshot": CommandOutcome(status=CommandStatus.UNAVAILABLE)}
+    )
+    clock.set(refused_at + dt.timedelta(seconds=_STOCK_SHORT_STOP_GRACE + 1))
+    await _reconciler_tick(
+        engine,
+        still_refused,
+        clock,
+        grace_seconds=_STOCK_GRACE,
+        refused_stop_grace_seconds=_STOCK_SHORT_STOP_GRACE,
+        unrecorded_stops=unrecorded,
+    )
+    assert [kind for kind, _, _ in still_refused.dispatched] == ["snapshot"]
+    assert (await _load(engine, server_id)) == held
+
+    # An API restart loses the record, not the hold: the row is held as it was,
+    # and the new process waits the full grace before it retries.
+    retry = _PublishingControlPlane(store, place_to=worker, held={})
+    clock.set(since + dt.timedelta(seconds=_STOCK_GRACE - 1))
+    await _reconciler_tick(
+        engine,
+        retry,
+        clock,
+        grace_seconds=_STOCK_GRACE,
+        refused_stop_grace_seconds=_STOCK_SHORT_STOP_GRACE,
+    )
+    assert retry.dispatched == []
+    clock.set(since + dt.timedelta(seconds=_STOCK_GRACE + 1))
+    await _reconciler_tick(
+        engine,
+        retry,
+        clock,
+        grace_seconds=_STOCK_GRACE,
+        refused_stop_grace_seconds=_STOCK_SHORT_STOP_GRACE,
+    )
+    assert [kind for kind, _, _ in retry.dispatched] == ["snapshot"]
+    assert store.generation == 2
+    released = await _load(engine, server_id)
+    assert released is not None
+    assert released.assigned_worker_id is None
+    assert released.final_snapshot_refusal is None
+    assert released.observed_state is ObservedState.CRASHED
+
+    next_worker = WorkerId(uuid.uuid4())
+    restarted = await _start_server_use_case(
+        engine, FakeControlPlane(place_to=next_worker), clock, store
+    )(community_id=community, server_id=server_id)
     assert restarted.assigned_worker_id == next_worker
