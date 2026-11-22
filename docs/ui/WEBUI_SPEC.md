@@ -143,9 +143,10 @@ rollback, a restore, a plugin or resource-pack change, a PATCH that is not
 safe-keys-only — and a manual backup, an export and its grant are
 `409 server_assigned`, with a `detail` that says to wait for the release and try
 again (#3998). Reads are served. A scheduled backup waits for the release by
-itself. The server read's `final_snapshot_refusal` says when the Worker has
-refused that final snapshot (`busy` / `unavailable`) rather than not answered
-yet (#4054).
+itself, for up to `reconciler.grace_seconds`, and then records a `skipped` run
+with the detail `server_assigned` (CONFIGURATION.md Section 5.14). The server
+read's `final_snapshot_refusal` says when the Worker has refused that final
+snapshot (`busy` / `unavailable`) rather than not answered yet (#4054).
 While a refusal is recorded, a holder of `server:stop` can release the
 server without the snapshot (`…/release-without-snapshot`, above; #4055).
 Its confirmation must say the three things the release gives up:

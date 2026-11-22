@@ -94,6 +94,9 @@ from tests.servers.fakes import (
 _NOW = dt.datetime(2026, 7, 11, 12, 0, 30, tzinfo=dt.timezone.utc)
 _HOUR = 3600
 _WORKER = WorkerId(uuid.uuid4())
+# The stock reconciler.grace_seconds, which bounds a held backup's deferral.
+_DEFERRAL_BOUND = dt.timedelta(seconds=660)
+_TICK = dt.timedelta(seconds=20)
 
 
 def _server(
@@ -179,6 +182,7 @@ def _env(
     history_cap: int = 50,
     backup_retry_delay: dt.timedelta = dt.timedelta(minutes=30),
     warning_grace: dt.timedelta = WARNING_GRACE_FLOOR,
+    deferral_bound: dt.timedelta = _DEFERRAL_BOUND,
 ) -> _Env:
     uow = FakeUnitOfWork()
     cp = control_plane or FakeControlPlane()
@@ -218,6 +222,7 @@ def _env(
         audit=audit,
         notifier=notifier,
         clock=the_clock,
+        deferral_bound=deferral_bound,
         history_cap=history_cap,
         backup_retry_delay=backup_retry_delay,
         warning_grace=warning_grace,
@@ -643,6 +648,184 @@ async def test_a_backup_retry_of_a_server_a_worker_still_holds_waits_too(
         ScheduleRunOutcome.FAILURE,
         ScheduleRunOutcome.SUCCESS,
     ]
+
+
+# A hold that outlasts reconciler.grace_seconds is no final snapshot in flight any
+# more, and the row can stay held for as long as the Worker refuses the snapshot.
+# So the deferral is bounded (issue #4047): logged once when it begins, and past
+# the bound the backup is recorded as skipped ``server_assigned``. Hourly cron
+# cadences keep the next occurrence clear of the ticks below.
+_HOURLY = Cadence.from_cron("0 * * * *")
+
+
+def _rows(env: _Env, schedule: Schedule) -> list[tuple[ScheduleRunOutcome, str | None]]:
+    return [
+        (run.outcome, run.detail)
+        for run in env.uow.schedule_runs.rows
+        if run.schedule_id == schedule.id
+    ]
+
+
+async def _tick_at(env: _Env, at: dt.datetime) -> None:
+    env.clock.set(at)
+    await env.runner.tick()
+
+
+def _held_server() -> Server:
+    return _server(
+        desired=DesiredState.STOPPED, observed=ObservedState.STOPPED, worker=_WORKER
+    )
+
+
+async def test_a_held_backup_is_deferred_up_to_the_bound_then_skipped_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    env = _env()
+    server = _held_server()
+    due = _NOW.replace(minute=0, second=0)
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        cadence=_HOURLY,
+        only_when_running=False,
+        next_run_at=due,
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    # Deferred at every tick up to the bound itself, and logged once.
+    elapsed = dt.timedelta(0)
+    while elapsed <= _DEFERRAL_BOUND:
+        await _tick_at(env, _NOW + elapsed)
+        elapsed += _TICK
+    assert _rows(env, schedule) == []
+    assert env.uow.schedules.by_id[schedule.id].next_run_at == due
+    assert len(_deferred_lines(caplog, schedule)) == 1
+
+    # Past it: one skipped run, and the schedule moves on to its next occurrence.
+    await _tick_at(env, _NOW + elapsed)
+    assert _rows(env, schedule) == [(ScheduleRunOutcome.SKIPPED, "server_assigned")]
+    next_run = due + dt.timedelta(hours=1)
+    assert env.uow.schedules.by_id[schedule.id].next_run_at == next_run
+    assert await env.uow.backups.list_for_server(server.id) == []
+    assert env.notifier.notifications == []
+
+    # That occurrence, still held, gets a whole bound of its own.
+    await _tick_at(env, next_run)
+    assert len(_rows(env, schedule)) == 1
+    assert len(_deferred_lines(caplog, schedule)) == 2
+
+    # Released: it is backed up.
+    env.uow.servers.by_id[server.id].assigned_worker_id = None
+    await _tick_at(env, next_run + _TICK)
+    assert _rows(env, schedule)[1:] == [(ScheduleRunOutcome.SUCCESS, None)]
+
+
+async def test_a_hold_after_a_released_one_gets_a_whole_bound() -> None:
+    env = _env()
+    server = _held_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        cadence=_HOURLY,
+        only_when_running=False,
+        next_run_at=_NOW.replace(minute=0, second=0),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+    await _tick_at(env, _NOW)  # deferred
+    env.uow.servers.by_id[server.id].assigned_worker_id = None
+    await _tick_at(env, _NOW + _TICK)
+    assert _runs(env, schedule) == [ScheduleRunOutcome.SUCCESS]
+
+    # The next occurrence is due more than a bound after the first deferral, and
+    # a stop holds the row again: the deferral is timed from now, not from then.
+    next_run = env.uow.schedules.by_id[schedule.id].next_run_at
+    assert next_run is not None and next_run - _NOW > _DEFERRAL_BOUND
+    env.uow.servers.by_id[server.id].assigned_worker_id = _WORKER
+    await _tick_at(env, next_run)
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.SUCCESS]
+    assert env.uow.schedules.by_id[schedule.id].next_run_at == next_run
+
+
+async def test_a_held_retry_is_bounded_too_and_leaves_next_run_at(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    bound = dt.timedelta(seconds=60)
+    store = FakeBackupArchiveStore(missing=True)  # the occurrence fails
+    env = _env(backup_store=store, deferral_bound=bound)
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        cadence=_HOURLY,
+        only_when_running=False,
+        next_run_at=_NOW.replace(minute=0, second=0),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+    await env.runner.tick()  # fails -> arms the retry 30 minutes on
+    next_run = env.uow.schedules.by_id[schedule.id].next_run_at
+
+    # At the retry a stop holds the row, for longer than the bound.
+    env.uow.servers.by_id[server.id].assigned_worker_id = _WORKER
+    store._missing = False
+    retry_at = _NOW + dt.timedelta(minutes=30)
+    await _tick_at(env, retry_at)
+    await _tick_at(env, retry_at + bound)
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+    await _tick_at(env, retry_at + bound + _TICK)
+
+    # The retry is spent as one skipped run, and never moves next_run_at.
+    assert _rows(env, schedule)[1:] == [(ScheduleRunOutcome.SKIPPED, "server_assigned")]
+    assert env.uow.schedules.by_id[schedule.id].next_run_at == next_run
+    assert env.runner._backup_retry == {}
+    assert len(_deferred_lines(caplog, schedule)) == 1
+
+
+async def test_a_held_occurrence_with_a_retry_pending_is_skipped_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    store = FakeBackupArchiveStore(missing=True)  # the occurrence fails
+    env = _env(backup_store=store)
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        cadence=_HOURLY,
+        only_when_running=False,
+        next_run_at=_NOW.replace(minute=0, second=0),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+    await env.runner.tick()  # fails -> arms the retry 30 minutes on
+
+    # An occurrence comes due with the retry, on a row a stop now holds, and the
+    # hold outlasts two bounds.
+    retry_at = _NOW + dt.timedelta(minutes=30)
+    env.uow.schedules.by_id[schedule.id] = _replace_next_run(
+        env.uow.schedules.by_id[schedule.id], retry_at
+    )
+    env.uow.servers.by_id[server.id].assigned_worker_id = _WORKER
+    store._missing = False
+    elapsed = dt.timedelta(0)
+    while elapsed <= 2 * _DEFERRAL_BOUND + _TICK:
+        await _tick_at(env, retry_at + elapsed)
+        elapsed += _TICK
+
+    # One skipped run stands for the backup the schedule owes. The retry would
+    # meet the same hold, so it goes with the occurrence rather than being
+    # deferred and skipped a second time.
+    assert _runs(env, schedule) == [
+        ScheduleRunOutcome.FAILURE,
+        ScheduleRunOutcome.SKIPPED,
+    ]
+    assert env.runner._backup_retry == {}
+    assert len(_deferred_lines(caplog, schedule)) == 1
 
 
 # --- failure path ----------------------------------------------------------
