@@ -41,6 +41,9 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 from mc_server_dashboard_api.community.domain.value_objects import CommunityName
 from mc_server_dashboard_api.config import load_settings
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.servers.adapters import (
+    lifecycle_lock as lifecycle_lock_mod,
+)
 from mc_server_dashboard_api.servers.adapters.backup_store import (
     StorageBackupStoreAdapter,
 )
@@ -48,7 +51,10 @@ from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleL
 from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
 )
-from mc_server_dashboard_api.servers.application.backups import CreateBackup
+from mc_server_dashboard_api.servers.application.backups import (
+    CreateBackup,
+    DeleteBackup,
+)
 from mc_server_dashboard_api.servers.application.integrity_sweep import IntegritySweep
 from mc_server_dashboard_api.servers.application.manage_server import CreateServer
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
@@ -375,6 +381,75 @@ async def test_a_sweep_during_a_backup_publication_finds_no_row_to_condemn(
     async with ServersUnitOfWork(factory) as uow:
         persisted = await uow.backups.get_by_id(created.id)
     assert persisted is not None and persisted.health is BackupHealth.HEALTHY
+
+
+class _ParkedDeleteStore(StorageBackupStoreAdapter):
+    """Parks ``DeleteBackup`` between its archive removal and its row removal."""
+
+    def __init__(self, *, storage: FsStorage) -> None:
+        super().__init__(storage=storage)
+        self.archive_removed = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def delete(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> None:
+        await super().delete(
+            community_id=community_id, server_id=server_id, storage_ref=storage_ref
+        )
+        self.archive_removed.set()
+        await self.release.wait()
+
+
+async def test_sweep_skips_a_backup_whose_delete_is_between_its_removals(
+    engine: AsyncEngine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A delete removes the archive before the row and holds the server's real
+    advisory lock across both (issue #3220). A sweep that lists the row in
+    between must not condemn its archive as missing: it waits on the lock, and
+    past the lock's budget skips the backup as busy."""
+
+    # The delete is parked until the sweep is done, so the sweep's wait can only
+    # end in a busy skip; a short budget just ends it sooner.
+    monkeypatch.setattr(lifecycle_lock_mod, "_ACQUIRE_BUDGET_SECONDS", 0.5)
+    community, server = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    storage = FsStorage(tmp_path)
+    ref = await _put_backup(
+        storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+    row = _backup(server, ref)
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.backups.add(row)
+        await uow.commit()
+    lock = PgLifecycleLock(engine=engine)
+    parked = _ParkedDeleteStore(storage=storage)
+    delete = DeleteBackup(
+        uow=ServersUnitOfWork(factory), backup_store=parked, lifecycle_lock=lock
+    )
+    audit = RecordingAuditRecorder()
+    sweep = IntegritySweep(
+        uow=ServersUnitOfWork(factory),
+        backup_store=StorageBackupStoreAdapter(storage=storage),
+        audit=audit,
+        lifecycle_lock=lock,
+    )
+
+    delete_task = asyncio.create_task(
+        delete(community_id=community, server_id=server, backup_id=row.id)
+    )
+    await parked.archive_removed.wait()
+    try:
+        summary = await sweep(server_id=server)
+    finally:
+        parked.release.set()
+    await delete_task
+
+    assert summary.backups_skipped_busy == 1
+    assert summary.backups_dangling == 0
+    assert audit.events == []
+    async with ServersUnitOfWork(factory) as uow:
+        assert await uow.backups.get_by_id(row.id) is None
 
 
 async def test_cli_sweep_completes_on_the_smallest_accepted_pool(
