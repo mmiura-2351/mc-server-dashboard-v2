@@ -519,10 +519,12 @@ ends when the message is applied, or when the session ends:
 
 If the database answered its liveness probe both just before a retry and just
 after the retry failed as if the database were down, the error is the message's
-own, and the message is dropped. A failure of any other kind drops the message
-too. When more than five drops follow one another, the API ends the session. A
-held message's failures do not count toward them; a drop after the Worker closed
-the stream does.
+own, and the message is dropped. A retry that ran out the connect or statement
+bound is the exception, and the message stays held (issue #4042): a database
+stalled on its disk answers the probe, which only reads, while its writes time
+out. A failure of any other kind drops the message too. When more than five
+drops follow one another, the API ends the session. A held message's failures do
+not count toward them; a drop after the Worker closed the stream does.
 
 Log lines and metrics wait in the same queue, except while a message is held
 (issue #4028). As the hold starts, the API drops the ones already queued, which

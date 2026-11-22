@@ -48,6 +48,7 @@ import grpc
 from grpc import aio
 
 from mc_server_dashboard_api.core.adapters.database import (
+    is_database_timeout,
     is_transient_database_error,
 )
 from mc_server_dashboard_api.core.domain.health import DatabasePing
@@ -891,8 +892,14 @@ class WorkerSessionServicer(WorkerServiceServicer):
                         raise
                     # Both pings must answer: one that fails after the retry
                     # means the database went down again, not that the error
-                    # is the message's own.
-                    if answered_before and await self._database_ping.is_reachable():
+                    # is the message's own. A timeout is never its own: a
+                    # database stalled on its disk answers a ping, which only
+                    # reads, while its writes time out (issue #4042).
+                    if (
+                        not is_database_timeout(exc)
+                        and answered_before
+                        and await self._database_ping.is_reachable()
+                    ):
                         _LOG.error(
                             "dropping a held worker message: the database "
                             "answers, yet the message still fails as if it were "

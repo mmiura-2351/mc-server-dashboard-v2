@@ -20,7 +20,7 @@ import asyncio
 import contextlib
 import datetime as dt
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import grpc
@@ -28,6 +28,8 @@ import pytest
 from grpc import aio
 
 from mc_server_dashboard_api.core.adapters.database import (
+    DatabaseConnectError,
+    DatabaseTimeoutError,
     create_engine,
     create_session_factory,
 )
@@ -3527,6 +3529,86 @@ async def test_a_connect_that_hangs_is_held_while_the_session_lives(
         finally:
             await h.stop()
             await engine.dispose()
+
+
+class _TimingOutSink(FakeServerStateSink):
+    """Writes that time out while the database still answers its pings, as on a
+    database stalled on its disk: the first hangs if ``hang_first``, the next
+    ``timeouts`` raise ``timeout()``, and the rest land."""
+
+    def __init__(
+        self, timeout: Callable[[], Exception], *, timeouts: int, hang_first: bool
+    ) -> None:
+        super().__init__()
+        self._timeout = timeout
+        self._timeouts = timeouts
+        self._hang = hang_first
+
+    async def record_observed_state(
+        self, *, server_id: str, worker_id: str, state: str, **frame: Any
+    ) -> bool:
+        if self._hang:
+            self._hang = False
+            await asyncio.Event().wait()
+        if self._timeouts:
+            self._timeouts -= 1
+            raise self._timeout()
+        return await super().record_observed_state(
+            server_id=server_id, worker_id=worker_id, state=state, **frame
+        )
+
+
+def _statement_timeout() -> Exception:
+    return DatabaseTimeoutError("the database did not answer")
+
+
+def _connect_timeout() -> Exception:
+    # What an engine that translates its connect outages raises for a connect
+    # that ran out its bound.
+    error = DatabaseConnectError("TimeoutError: ")
+    error.__cause__ = TimeoutError()
+    return error
+
+
+@pytest.mark.usefixtures("fast_hold")
+@pytest.mark.parametrize(
+    ("timeout", "hang_first"),
+    [
+        pytest.param(_statement_timeout, False, id="statement-bound"),
+        pytest.param(_connect_timeout, False, id="connect-bound"),
+        pytest.param(_statement_timeout, True, id="first-attempt-deadline"),
+    ],
+)
+async def test_a_report_that_times_out_while_the_database_answers_stays_held(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    timeout: Callable[[], Exception],
+    hang_first: bool,
+) -> None:
+    # A database stalled on its disk answers a ping, which only reads, while its
+    # writes time out. A timeout is never the message's own error, so the pings
+    # answering both sides of a retry do not drop the report: it stays held and
+    # lands once its write goes through (issue #4042).
+    caplog.set_level(logging.INFO, logger=_GRPC_SERVER_LOGGER)
+    monkeypatch.setattr(grpc_server, "_FIRST_ATTEMPT_TIMEOUT_SECONDS", 0.2)
+    sink = _TimingOutSink(timeout, timeouts=3, hang_first=hang_first)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        database_ping=FakeDatabasePing(reachable=True),
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+
+        await _wait_until(lambda: sink.observed, "the report did not land")
+        assert sink.observed == [(_SERVER_A, _WORKER_ID, "running")]
+        assert _logged(caplog, _HOLD_REFUSED) == []
+        assert _logged(caplog, _HOLD_APPLIED) != []
+        await call.done_writing()
+    finally:
+        await h.stop()
 
 
 @pytest.mark.usefixtures("fast_hold")

@@ -28,6 +28,7 @@ from mc_server_dashboard_api import integrity_sweep_cli
 from mc_server_dashboard_api.config import Settings, load_settings
 from mc_server_dashboard_api.core.adapters.database import (
     DatabaseConnectError,
+    DatabaseTimeoutError,
     is_transient_database_error,
 )
 from mc_server_dashboard_api.servers.application.integrity_sweep import SweepSummary
@@ -180,8 +181,19 @@ def test_main_reports_a_store_outage_cleanly(
             PoolTimeoutError("QueuePool limit reached"),
             "TimeoutError: QueuePool limit reached",
         ),
+        # A statement that outlasted the engine's bound (issue #4042).
+        (
+            DatabaseTimeoutError("the database did not answer"),
+            "DatabaseTimeoutError: the database did not answer",
+        ),
     ],
-    ids=["connection-closed", "terminated-in-flight", "connect-refused", "pool"],
+    ids=[
+        "connection-closed",
+        "terminated-in-flight",
+        "connect-refused",
+        "pool",
+        "statement-timeout",
+    ],
 )
 def test_main_reports_a_database_failure_cleanly(
     error: Exception,
@@ -322,6 +334,45 @@ def test_main_lets_a_store_os_error_propagate(
 
     with pytest.raises(OSError, match="No space left on device"):
         integrity_sweep_cli.main([])
+
+
+def test_main_lets_a_timeout_that_is_not_the_databases_propagate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A store's bare ``TimeoutError`` is not taken for a database outage either
+    (issue #4042): the engine's own arrives typed."""
+
+    async def _fake_run(
+        _settings: Settings, *, server_id: ServerId | None
+    ) -> SweepSummary:
+        raise TimeoutError("the store did not answer")
+
+    monkeypatch.setattr(integrity_sweep_cli, "run", _fake_run)
+
+    with pytest.raises(TimeoutError, match="the store did not answer"):
+        integrity_sweep_cli.main([])
+
+
+def test_main_reports_a_database_that_stopped_answering_cleanly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A database that stops answering stops the sweep at the statement bound with
+    exit 3 and one line, as a refused one does (issue #4042)."""
+
+    monkeypatch.setenv("MCD_API_STORAGE__BACKEND", "fs")
+    monkeypatch.setenv("MCD_API_STORAGE__FS__ROOT", str(tmp_path))
+    monkeypatch.setenv("MCD_API_DATABASE__STATEMENT_TIMEOUT_SECONDS", "0.2")
+    with silent_database() as url:
+        monkeypatch.setenv("MCD_API_DATABASE__URL", url)
+        assert integrity_sweep_cli.main([]) == 3
+
+    err = capsys.readouterr().err
+    assert err.count("\n") == 1
+    assert err.startswith(
+        "integrity sweep aborted: the database failed (DatabaseTimeoutError: "
+    )
 
 
 def test_main_reports_a_refused_database_connection_cleanly(

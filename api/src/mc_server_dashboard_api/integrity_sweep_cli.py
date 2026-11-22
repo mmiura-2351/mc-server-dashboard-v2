@@ -23,10 +23,12 @@ command logs through the API's handler (issue #3942).
 Exit status: 0 when the pass completed; 1 when the object store could not serve
 an archive read; 2 on a bad argument or configuration, with one line; 3 when the
 database failed or a server's lifecycle lock was lost. The database fails when it
-refuses a connection, at the start or mid-pass, or the driver raises an error
-(SQLAlchemy ``DBAPIError``, such as a dropped connection or a terminated
-backend). A 1 or a 3 stops the pass with a one-line message: verdicts already
-written this run are committed, and the sweep is safe to re-run.
+refuses a connection, at the start or mid-pass, when it does not answer within
+``database.connect_timeout_seconds`` or ``database.statement_timeout_seconds``,
+or when the driver raises an error (SQLAlchemy ``DBAPIError``, such as a dropped
+connection or a terminated backend). A 1 or a 3 stops the pass with a one-line
+message: verdicts already written this run are committed, and the sweep is safe
+to re-run.
 ``log.level=debug`` logs the traceback of a 3. Any other error, a full disk on
 the store for one, ends in a traceback, and Python exits 1 for it too, so a 1
 alone does not prove a store outage.
@@ -106,8 +108,8 @@ def _is_database_failure(exc: Exception) -> bool:
 
     A bare ``OSError`` never does: the fs adapter keeps a full disk or a permission
     fault raw (STORAGE.md Section 7.3), and the database's own connect failure
-    arrives typed (``_engine``). The rest of what the app counts as a database
-    outage, and every ``DBAPIError``, can only be the database's.
+    and timeout arrive typed (``_engine``). The rest of what the app counts as a
+    database outage, and every ``DBAPIError``, can only be the database's.
     """
 
     if isinstance(exc, OSError):

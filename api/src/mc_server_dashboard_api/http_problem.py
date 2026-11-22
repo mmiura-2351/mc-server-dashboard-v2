@@ -297,8 +297,11 @@ def _is_database_outage(exc: Exception) -> bool:
     """Whether ``exc`` means the database is unavailable for now (issue #4010).
 
     A bare ``OSError`` does not: a full disk or a permission fault escapes a
-    route as one (issue #542). The app's engines raise their refused connect as
-    ``DatabaseConnectError`` (``translate_connect_outages``), so the two differ.
+    route as one (issue #542), and so does a store's or a Worker's
+    ``TimeoutError``. The app's engines raise their refused connect as
+    ``DatabaseConnectError`` (``translate_connect_outages``) and the driver's
+    timeout as ``DatabaseTimeoutError`` (``create_engine``, issue #4042), so
+    they differ.
     """
 
     return not isinstance(exc, OSError) and is_transient_database_error(exc)

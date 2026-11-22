@@ -30,6 +30,7 @@ from mc_server_dashboard_api import http_problem
 from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.core.adapters.database import (
     DatabaseConnectError,
+    DatabaseTimeoutError,
     is_transient_database_error,
 )
 from mc_server_dashboard_api.dependencies import get_authenticate_request
@@ -158,6 +159,11 @@ def _get_me(client: TestClient, error: Exception) -> tuple[int, object, str | No
             ),
             id="interface-invalidated",
         ),
+        # A statement that outlasted the engine's bound (issue #4042).
+        pytest.param(
+            DatabaseTimeoutError("the database did not answer"),
+            id="statement-timeout",
+        ),
     ],
 )
 def test_an_outage_answers_503_with_one_warning(
@@ -226,6 +232,21 @@ def test_another_database_error_stays_a_500_with_its_traceback(
     [logged] = _records(logs, logging.ERROR)
     assert logged.exc_info is not None
     assert _records(logs, logging.WARNING) == []
+
+
+def test_a_timeout_that_is_not_the_databases_stays_a_500(
+    client: TestClient, logs: pytest.LogCaptureFixture
+) -> None:
+    # A store's or a Worker's bare ``TimeoutError`` is not taken for a database
+    # outage: the engine's own arrives typed (issue #4042).
+    assert _get_me(client, TimeoutError("the store did not answer")) == (
+        500,
+        _INTERNAL,
+        None,
+    )
+
+    [logged] = _records(logs, logging.ERROR)
+    assert logged.exc_info is not None
 
 
 def test_an_outage_warns_at_most_every_30_seconds(
@@ -399,6 +420,34 @@ def test_each_app_engine_bounds_a_connect_the_server_never_answers(
 
     assert elapsed < _WITHIN_SECONDS
     assert isinstance(error, DatabaseConnectError)
+
+
+def test_a_statement_the_database_never_answers_answers_503(
+    monkeypatch: pytest.MonkeyPatch, logs: pytest.LogCaptureFixture
+) -> None:
+    # The app's own engine at its configured bound: what the driver really
+    # raises, typed on its way out (issue #4042).
+    with silent_database() as url:
+        client = _bounded_client(monkeypatch, url, setting="statement_timeout_seconds")
+        app = client.app
+        assert isinstance(app, FastAPI)
+        key = app.state.settings.auth.token.signing_key
+        assert isinstance(key, str)
+        tokens = JwtTokenService(
+            signing_key=key,
+            algorithm="HS256",
+            access_ttl=dt.timedelta(minutes=15),
+            download_grant_ttl=dt.timedelta(minutes=1),
+            download_cookie_ttl=dt.timedelta(minutes=1),
+            clock=FakeClock(dt.datetime.now(dt.UTC)),
+        )
+        token = tokens.issue_access_token(make_user().id)
+
+        resp = client.get(_ROUTE, headers={"Authorization": f"Bearer {token}"})
+
+    assert (resp.status_code, resp.json()) == (503, _UNAVAILABLE)
+    assert resp.headers["retry-after"] == "5"
+    assert _records(logs, logging.ERROR) == []
 
 
 @pytest.mark.parametrize("engine", ["engine", "assignment_fence_engine"])

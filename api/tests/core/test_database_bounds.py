@@ -14,6 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from mc_server_dashboard_api.core.adapters.database import (
+    DatabaseTimeoutError,
     create_engine,
     is_transient_database_error,
 )
@@ -44,10 +45,14 @@ async def test_a_connect_the_server_never_answers_fails_within_the_bound() -> No
 
 async def test_a_query_the_server_never_answers_fails_within_the_bound() -> None:
     # The bound is the driver's own, not the server's ``statement_timeout``: a
-    # server that stopped answering cannot cancel anything.
+    # server that stopped answering cannot cancel anything. The queries that set
+    # up a new connection are the first it never answers. The driver's bare
+    # ``TimeoutError`` arrives typed, told apart from a store's or a Worker's.
     with silent_database() as url:
         engine = create_engine(url, statement_timeout=_BOUND_SECONDS)
         error, elapsed = await first_failure(lambda: _query(engine))
 
     assert elapsed < _WITHIN_SECONDS
+    assert isinstance(error, DatabaseTimeoutError)
+    assert isinstance(error.__cause__, TimeoutError)
     assert is_transient_database_error(error) is True
