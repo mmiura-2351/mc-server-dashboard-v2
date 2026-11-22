@@ -19,6 +19,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useId, useRef, useState } from "react";
+import { backupStatsKey, backupsKey } from "../api/backupQueryKeys.ts";
 import {
   ApiError,
   api,
@@ -61,16 +62,6 @@ import { serversKey } from "./useCommunityEvents.ts";
 type ServerResponse = components["schemas"]["ServerResponse"];
 type BackupResponse = components["schemas"]["BackupResponse"];
 type RetentionPolicyBody = components["schemas"]["RetentionPolicyBody"];
-
-/** Backups list query key — scoped to the server, invalidated on every change. */
-function backupsKey(communityId: string, serverId: string) {
-  return ["backups", communityId, serverId] as const;
-}
-
-/** Backups statistics query key. */
-function statsKey(communityId: string, serverId: string) {
-  return ["backups", communityId, serverId, "statistics"] as const;
-}
 
 // The presentation contract reads only an API problem's status and reason; a
 // failure that is not an API problem (a network error) takes the fallback.
@@ -139,7 +130,7 @@ export function ServerBackupsTab({
   };
 
   const statsQuery = useQuery({
-    queryKey: statsKey(communityId, serverId),
+    queryKey: backupStatsKey(communityId, serverId),
     enabled: canRead,
     queryFn: ({ signal }) =>
       api.get(
@@ -182,7 +173,7 @@ export function ServerBackupsTab({
       queryKey: backupsKey(communityId, serverId),
     });
     queryClient.invalidateQueries({
-      queryKey: statsKey(communityId, serverId),
+      queryKey: backupStatsKey(communityId, serverId),
     });
   };
 
@@ -703,7 +694,7 @@ function RetentionEditor({
         queryKey: backupsKey(communityId, server.id),
       });
       queryClient.invalidateQueries({
-        queryKey: statsKey(communityId, server.id),
+        queryKey: backupStatsKey(communityId, server.id),
       });
     },
     onError: onMutationError,
