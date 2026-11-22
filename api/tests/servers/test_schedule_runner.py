@@ -1584,6 +1584,63 @@ async def test_an_owed_record_of_a_deleted_schedule_is_audited_once_and_dropped(
     assert not [line for line in infos if "owed" in line]
 
 
+# A record that commits late advances as if it had committed when its run
+# finished, so the occurrences that came due meanwhile follow the missed-run rule.
+
+
+async def test_backups_due_while_a_record_is_owed_coalesce_into_one_catch_up() -> None:
+    store = FakeBackupArchiveStore()
+    env = _env(backup_store=store)
+    schedule = _backup_schedule(env)
+    outage = _RecordsFail(env)
+    await _tick_at(env, _NOW)
+    await _tick_at(env, _NOW.replace(hour=13, minute=30))
+    assert _archive_attempts(store) == 1
+
+    outage.down = False
+    recorded_at = _NOW.replace(hour=14, minute=10, second=20)
+    await _tick_at(env, recorded_at)
+
+    # The 13:00 and 14:00 occurrences: one catch-up, neither dropped nor doubled.
+    assert _archive_attempts(store) == 2
+    assert _run_rows(env, schedule) == [
+        (ScheduleRunOutcome.SUCCESS, None, _NOW, _NOW),
+        (ScheduleRunOutcome.SUCCESS, None, recorded_at, recorded_at),
+    ]
+    stored = env.uow.schedules.by_id[schedule.id]
+    assert stored.next_run_at == _NOW.replace(hour=15, minute=0, second=0)
+
+
+async def test_a_command_due_while_its_record_was_owed_is_skipped_as_too_stale() -> (
+    None
+):
+    env = _env()
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.COMMAND,
+        cadence=_HOURLY,
+        command="say hi",
+        next_run_at=_NOW.replace(minute=0, second=0),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+    outage = _RecordsFail(env)
+    await _tick_at(env, _NOW)
+    await _tick_at(env, _NOW.replace(hour=13, minute=30))
+
+    outage.down = False
+    await _tick_at(env, _NOW.replace(hour=14, minute=10, second=20))
+
+    assert [kind for kind, *_ in env.control_plane.dispatched] == ["command"]
+    assert _rows(env, schedule) == [
+        (ScheduleRunOutcome.SUCCESS, None),
+        (ScheduleRunOutcome.SKIPPED, "occurrence too stale"),
+    ]
+    stored = env.uow.schedules.by_id[schedule.id]
+    assert stored.next_run_at == _NOW.replace(hour=15, minute=0, second=0)
+
+
 async def test_backup_storage_timeout_records_distinguishable_detail() -> None:
     env = _env(backup_store=_StorageTimeoutBackupStore())
     server = _stopped_server()

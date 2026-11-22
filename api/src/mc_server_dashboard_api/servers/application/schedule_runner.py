@@ -684,7 +684,8 @@ class RunScheduleTick:
         prev_tick_at = self._last_tick_at
         self._last_tick_at = now
         # First the records earlier ticks owe (issue #4108): one that commits
-        # advances its schedule, so the poll below no longer lists it as due.
+        # advances its schedule from when it ran, so the poll below lists it
+        # again only for an occurrence that came due meanwhile.
         for ran in list(self._owed.values()):
             await self._record_owed(ran)
         async with self.uow:
@@ -1180,7 +1181,9 @@ class RunScheduleTick:
                     schedule.id, keep=self.history_cap
                 )
                 if advance:
-                    await self._advance(schedule, last_run_at=last_run_at)
+                    await self._advance(
+                        schedule, after=finished_at, last_run_at=last_run_at
+                    )
                 await self.uow.commit()
         if not recorded:
             _LOG.info(
@@ -1229,24 +1232,30 @@ class RunScheduleTick:
         return recorded
 
     async def _advance(
-        self, schedule: Schedule, *, last_run_at: dt.datetime | None
+        self,
+        schedule: Schedule,
+        *,
+        after: dt.datetime,
+        last_run_at: dt.datetime | None,
     ) -> None:
         # Staged inside _record's transaction, so the run row and the advance
-        # commit together. Recompute now HERE, not at tick start: after a long
-        # execution the next occurrence must be strictly in the future of the
-        # advance instant, or a slow run could land next_run_at already in the
-        # past. The write goes through the narrow bookkeeping UPDATE (guarded
-        # WHERE enabled AND next_run_at = fired_occurrence) so a concurrent CRUD
-        # edit that changed the cadence is never clobbered and a concurrently
-        # disabled schedule stays disabled — 0 rows matched is the silent-skip
-        # contract.
+        # commit together. ``after`` is when the run finished, not the tick
+        # start: after a long execution the next occurrence must be strictly in
+        # the future of the run, or a slow run could land next_run_at already in
+        # the past. Not the commit instant either: a record owed since an
+        # earlier tick (issue #4108) advances as if it had committed then, so an
+        # occurrence that came due meanwhile is polled next, under the
+        # missed-run rule (module docstring). The write goes through the narrow
+        # bookkeeping UPDATE (guarded WHERE enabled AND next_run_at =
+        # fired_occurrence) so a concurrent CRUD edit that changed the cadence
+        # is never clobbered and a concurrently disabled schedule stays
+        # disabled — 0 rows matched is the silent-skip contract.
         fired = schedule.next_run_at
         assert fired is not None  # list_due predicate guarantees non-None
-        now = self.clock.now()
         await self.uow.schedules.advance_run_state(
             schedule.id,
             fired_occurrence=fired,
-            next_run_at=self._next_after(schedule, now),
+            next_run_at=self._next_after(schedule, after),
             last_run_at=last_run_at,
         )
 
