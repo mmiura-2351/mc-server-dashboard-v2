@@ -80,6 +80,14 @@ _SECTION_LOADING_CASES = [
     ),
     pytest.param(
         "database",
+        {"pool_timeout_seconds": 10.0},
+        {"pool_timeout_seconds": 2.5},
+        {"pool_timeout_seconds": "4"},
+        {"pool_timeout_seconds": 4.0},
+        id="database-pool-timeout",
+    ),
+    pytest.param(
+        "database",
         {"connect_timeout_seconds": 5.0, "statement_timeout_seconds": 60.0},
         {"connect_timeout_seconds": 3.0, "statement_timeout_seconds": 30.0},
         {"statement_timeout_seconds": "45"},
@@ -390,6 +398,12 @@ _SCALAR_INVALID_CASES = [
     ),
     pytest.param(
         "database", "max_overflow = -1", "max_overflow", id="negative-database-overflow"
+    ),
+    pytest.param(
+        "database",
+        "pool_timeout_seconds = 0",
+        "pool_timeout_seconds",
+        id="zero-database-pool-timeout",
     ),
     pytest.param(
         "database",

@@ -358,6 +358,22 @@ staying transient so the backoff-reconnect path (Section 4.4) retries it. So the
 operator-visible signal for a Worker that will not register is the terminal
 status code.
 
+Before it acks, the API rebuilds the Worker's assignments from the database, and
+a registration whose database cannot serve that ends with `UNAVAILABLE` instead
+(issue #4050). The Worker treats that code as transient and reconnects under its
+backoff, which grows with each refusal. The rebuild ends the registration when
+it fails, or when it has not answered within 10 s. That deadline is a third of
+the 30 s the Worker waits for the ack
+([`proto/contract/control_plane_limits.json`](../../proto/contract/control_plane_limits.json)).
+The database's own statement bound (`database.statement_timeout_seconds`,
+CONFIGURATION.md Section 5.2) is longer than that wait, so without the deadline
+a stalled database would see each registration abandoned and the same stalled
+rebuild started again. Cancelling a read on a stalled connection takes up to
+2 s more, so the refusal leaves within 12 s. By then the Worker is marked
+offline, and no session for commands is open. The held-server lookup shares
+the deadline: a lookup still running at it sends the ack with an empty
+`unknown_held_server_ids`, as a failed one does.
+
 Once the API has acknowledged a registration, the Worker re-reports what it holds: a
 `StatusChange` for each live instance at its current state,
 `SERVER_STATE_UNKNOWN` for each failed-stop orphan (Section 6), and, for a server
@@ -506,7 +522,7 @@ rather than refuses fails a statement only at `database.statement_timeout_second
 silent, and by then a busy log stream behind the message would have filled the
 queue and ended the session, since the Worker drops a stream whose send stalls
 for 10 s. Cancelling the attempt instead could abandon a commit that still
-lands, and its retry would find the row already written and announce nothing.
+lands, and its retry would then apply the message a second time.
 If the attempt then succeeds, the hold ends; if it fails as an outage, the
 retries follow. Only the first attempt has the 3 s deadline. The retries back
 off from 0.5 s, doubling up to 10 s, with no time budget. A held `StatusChange`
@@ -527,9 +543,12 @@ after the retry failed as if the database were down, the error is the message's
 own, and the message is dropped. A retry that ran out the connect or statement
 bound is the exception, and the message stays held (issue #4042): a database
 stalled on its disk answers the probe, which only reads, while its writes time
-out. A failure of any other kind drops the message too. When more than five
-drops follow one another, the API ends the session. A held message's failures do
-not count toward them; a drop after the Worker closed the stream does.
+out. So is a retry that waited out `database.pool_timeout_seconds` for a
+connection (issue #4051): other work holds the pool, since no message takes more
+than one connection at a time. A failure of any other kind drops the message
+too. When more than five drops follow one another, the API ends the session. A
+held message's failures do not count toward them; a drop after the Worker closed
+the stream does.
 
 Log lines and metrics wait in the same queue, except while a message is held
 (issue #4028). As the hold starts, the API drops the ones already queued, which
@@ -547,7 +566,18 @@ leaves until the hold ends.
 
 The delivery guarantee: a report is applied at least once across transient
 database errors within a session; a report held when the session ends is lost;
-the Worker's sends are not acknowledged.
+the Worker's sends are not acknowledged. The live frame an applied message
+announces (Section 6) is published at least once too (issue #4062). An attempt
+whose commit lands but whose answer is lost with the connection fails as an
+outage. Its retry then finds the write already made: the row at the reported
+state, or, for a late final-snapshot result (Section 5.1), already released. It
+still publishes the frame the attempt would have, and logs the release. An
+attempt can also fail as an outage after it has committed and published: a
+`StatusChange` for a server with a Bedrock port then syncs the server's Bedrock
+tunnel ([`BEDROCK_TUNNEL.md`](BEDROCK_TUNNEL.md) Section 3), and that sync
+starts with a database read. Its retry finds the row at the reported state too,
+and publishes the frame again. So a held retry can publish a frame twice, and
+one that repeats the row's state publishes a frame a first attempt would not.
 
 ### 4.3 Heartbeat and liveness
 
@@ -1403,8 +1433,9 @@ and equally the writes the API makes without one, whose frames carry an empty
 A write that leaves the state as it was — the bulk `unknown` over a row already
 `unknown`, a confirmed stop the Worker's own `stopped` report preceded —
 publishes nothing, unless it is a `StatusChange` carrying a `detail` or crash
-reason. A report the API drops — it comes from a Worker that no longer owns
-the server, or is no fresher than the state already recorded — is not relayed.
+reason, or the held retry of a `StatusChange` (Section 4.2). A report the API
+drops — it comes from a Worker that no longer owns the server, or is no fresher
+than the state already recorded — is not relayed.
 
 Real-time delivery is best-effort end to end: if the control plane is down the
 API's REST endpoints still function and clients simply miss live updates

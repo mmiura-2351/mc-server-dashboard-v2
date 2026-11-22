@@ -143,9 +143,20 @@ _HOLD_RETRY_MAX_SECONDS = 10.0
 # ends 10 s later when the Worker's send stalls, or once the heartbeats lapse. So
 # the hold, and its purge of the queue, starts at this deadline, under a third of
 # the Worker's limit, while the attempt goes on: cancelling it could abandon a
-# commit that still lands, whose frame the retry would not stage again (review r1
-# of #4049). The driver's bounds end the attempt.
+# commit that still lands, which the retry would then apply a second time (review
+# r1 of #4049). The driver's bounds end the attempt.
 _FIRST_ATTEMPT_TIMEOUT_SECONDS = 3.0
+
+# How long a registration's database work may run before its RegisterAck: the
+# assignment rebuild and the held-server lookup, together (issue #4050). The
+# driver's statement bound is past the Worker's 30 s wait for the ack, after which
+# it re-registers and starts the same stalled work again. So the work is cancelled
+# at this deadline, a third of that wait: a rebuild ends the registration with
+# UNAVAILABLE, which the Worker retries with backoff, and a lookup sends the ack
+# with no ids, as on any of its failures. Both are reads, so the cancel abandons no
+# write. A read cancelled on a stalled connection returns once SQLAlchemy has given
+# that connection 2 s to close, so the answer leaves within 12 s.
+_REGISTRATION_DATABASE_TIMEOUT_SECONDS = 10.0
 
 # Backpressure limit on the queue between the inbound reader task and the
 # processor task (issue #1698). Heartbeats bypass this queue entirely. Every
@@ -499,8 +510,25 @@ class WorkerSessionServicer(WorkerServiceServicer):
             # The registry resets this Worker's load to zero on (re)registration;
             # rebuild it from the authoritative running-server tally so placement is
             # correct after a reconnect (epic #7 reconciliation obligation).
+            deadline = (
+                asyncio.get_running_loop().time()
+                + _REGISTRATION_DATABASE_TIMEOUT_SECONDS
+            )
             try:
-                await self._rebuild_assignments(worker_id, session)
+                async with asyncio.timeout_at(deadline):
+                    await self._rebuild_assignments(worker_id, session)
+            except TimeoutError:
+                _LOG.warning(
+                    "the database did not answer the assignment rebuild within "
+                    "%.1fs; refusing the registration",
+                    _REGISTRATION_DATABASE_TIMEOUT_SECONDS,
+                    extra={"worker_id": worker_id.value},
+                )
+                self._registry.mark_disconnected(worker_id, session)
+                await context.abort(
+                    grpc.StatusCode.UNAVAILABLE,
+                    "the database did not answer the registration in time",
+                )
             except Exception:
                 _LOG.warning(
                     "assignment rebuild failed; tearing down registration",
@@ -535,7 +563,8 @@ class WorkerSessionServicer(WorkerServiceServicer):
             # Compute which servers the Worker listed no longer exist: the held ones
             # (issue #924) and the ones whose scratch dir holds no working set
             # (issue #3794). Fail-safe: any exception returns an empty list so a DB
-            # error never misclassifies a live server as deleted. The lookup runs
+            # error never misclassifies a live server as deleted, and so does the
+            # registration's deadline running out (issue #4050). The lookup runs
             # with the session already open (issue #3679): a delete that commits
             # after the lookup read its server is reported to every connected
             # Worker, and that report lands on this session's queue, behind the ack,
@@ -544,9 +573,10 @@ class WorkerSessionServicer(WorkerServiceServicer):
             unknown_held_ids: list[str] = []
             if checked_ids:
                 try:
-                    existing = await self._state_sink.existing_server_ids(
-                        server_ids=checked_ids
-                    )
+                    async with asyncio.timeout_at(deadline):
+                        existing = await self._state_sink.existing_server_ids(
+                            server_ids=checked_ids
+                        )
                     unknown_held_ids = [
                         sid for sid in checked_ids if sid not in existing
                     ]
@@ -834,6 +864,9 @@ class WorkerSessionServicer(WorkerServiceServicer):
         does. Any other failure is raised, and so is an outage's failure on a
         retry the database answered a ping both just before and just after: that
         error is the message's own, and holding it would block the queue for good.
+        Each retry is handled as one (:meth:`_handle`'s ``retry``): a failed
+        attempt may have committed, so its retry publishes the frame of a write
+        it finds already made (issue #4062).
         However the hold ends, one WARNING counts the log lines and metrics
         dropped meanwhile, those purged from the queue as it started included,
         if any (issue #4028). The hold also starts while a first attempt is
@@ -896,7 +929,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
                     return
                 attempts += 1
                 try:
-                    await self._handle(worker_id, message)
+                    await self._handle(worker_id, message, retry=True)
                 except Exception as exc:
                     if last:
                         _LOG.info(
@@ -910,7 +943,10 @@ class WorkerSessionServicer(WorkerServiceServicer):
                     # means the database went down again, not that the error
                     # is the message's own. A timeout is never its own: a
                     # database stalled on its disk answers a ping, which only
-                    # reads, while its writes time out (issue #4042).
+                    # reads, while its writes time out (issue #4042). Nor is
+                    # a wait for a connection: other work holds the pool, as
+                    # no handler takes more than one connection at a time
+                    # (issue #4051).
                     if (
                         not is_database_timeout(exc)
                         and answered_before
@@ -1067,7 +1103,16 @@ class WorkerSessionServicer(WorkerServiceServicer):
         )
         return worker_id, first.correlation_id, session, checked_ids
 
-    async def _handle(self, worker_id: WorkerId, message: pb.WorkerMessage) -> None:
+    async def _handle(
+        self, worker_id: WorkerId, message: pb.WorkerMessage, *, retry: bool = False
+    ) -> None:
+        """Apply ``message``; ``retry`` when an earlier attempt of it failed.
+
+        That attempt may have committed with its answer lost, so a retry tells
+        the sinks to publish the frame of a write they find already made (issue
+        #4062).
+        """
+
         payload = message.WhichOneof("payload")
         if payload == "command_result":
             # Match the result to its in-flight command by command_id, carried as
@@ -1078,7 +1123,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
             # through the late-snapshot sink (issue #891); the common match path is
             # still synchronous dict work that returns without awaiting.
             await self._control_plane.resolve(
-                message.correlation_id, worker_id, message.command_result
+                message.correlation_id, worker_id, message.command_result, retry=retry
             )
             return
         if payload != "event":
@@ -1089,14 +1134,21 @@ class WorkerSessionServicer(WorkerServiceServicer):
         emitted_at = _emitted_at_from_proto(message)
         event = message.event.WhichOneof("event")
         if event == "status_change":
-            await self._reconcile_status(worker_id, message.event, emitted_at)
+            await self._reconcile_status(
+                worker_id, message.event, emitted_at, retry=retry
+            )
         elif event == "log_line":
             self._relay_log(message.event, emitted_at)
         elif event == "metrics":
             self._relay_metrics(message.event, emitted_at)
 
     async def _reconcile_status(
-        self, worker_id: WorkerId, event: pb.Event, emitted_at: dt.datetime | None
+        self,
+        worker_id: WorkerId,
+        event: pb.Event,
+        emitted_at: dt.datetime | None,
+        *,
+        retry: bool,
     ) -> None:
         state = _STATE_BY_PROTO.get(event.status_change.state)
         if state is None or not event.server_id:
@@ -1112,6 +1164,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
             detail=event.status_change.detail,
             reason=_CRASH_REASON_BY_PROTO.get(event.status_change.crash_reason, ""),
             emitted_at=emitted_at,
+            retry=retry,
         )
 
     def _relay_log(self, event: pb.Event, emitted_at: dt.datetime | None) -> None:

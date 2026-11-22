@@ -21,9 +21,17 @@
     "The API refuses a longer line at its HTTP edge and the Worker before it dials",
     "RCON. Its tests:",
     "  - api:    api/tests/servers/test_lifecycle_endpoints.py",
-    "  - worker: worker/internal/application/instancemanager/files_properties_cap_test.go"
+    "  - worker: worker/internal/application/instancemanager/files_properties_cap_test.go",
+    "",
+    "register_ack_timeout_seconds is how long the Worker waits for the RegisterAck",
+    "after it sends Register (issue #4050). The API ends a registration whose",
+    "database work has not answered within a third of it, so the Worker hears the",
+    "refusal before it gives up. Its tests:",
+    "  - api:    api/tests/fleet/test_grpc_session.py",
+    "  - worker: worker/internal/adapters/controlplane/register_ack_deadline_test.go"
   ],
   "max_file_bytes": 4194304,
   "max_message_bytes": 4259840,
-  "max_console_line_bytes": 1446
+  "max_console_line_bytes": 1446,
+  "register_ack_timeout_seconds": 30
 }

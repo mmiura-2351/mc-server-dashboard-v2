@@ -31,6 +31,7 @@ class ServerStateSink(abc.ABC):
         detail: str = "",
         reason: str = "",
         emitted_at: dt.datetime | None = None,
+        retry: bool = False,
     ) -> bool:
         """Cache the worker-reported observed state for ``server_id`` (FR-SRV-4).
 
@@ -47,6 +48,11 @@ class ServerStateSink(abc.ABC):
         adapter's job, not the caller's, so that every observed-state write —
         this one, the disconnect below, the API's own convergence writes —
         publishes through one seam, after its commit (issue #3212).
+
+        ``retry`` marks a retry of a report whose earlier attempt failed. That
+        attempt may have committed with its answer lost, so a retry that finds
+        the row already at the reported state still publishes the event that
+        attempt would have (issue #4062).
 
         ``worker_id`` is the reporting worker; the adapter applies the write
         only when it is the server's assigned worker, so a stale or misrouted

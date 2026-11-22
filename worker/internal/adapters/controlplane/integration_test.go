@@ -54,6 +54,10 @@ type fakeServer struct {
 	wantCredential string
 	heartbeatEvery time.Duration
 	dropAfterFirst bool
+	// refuseRegisters is how many Registers, from the first, the server refuses
+	// with UNAVAILABLE, as the API does one its database did not answer in time
+	// (issue #4050).
+	refuseRegisters int
 
 	mu          sync.Mutex
 	registers   int
@@ -85,8 +89,12 @@ func (s *fakeServer) Session(stream controlplanev1.WorkerService_SessionServer) 
 	s.unheldIDs = first.GetRegister().GetUnheldScratchServerIds()
 	s.resources = first.GetRegister().GetCapabilities().GetResources()
 	s.messages = append(s.messages, first)
+	refuse := s.registers <= s.refuseRegisters
 	s.mu.Unlock()
 
+	if refuse {
+		return status.Error(codes.Unavailable, "the database did not answer the registration in time")
+	}
 	if err := stream.Send(acceptAck(s.heartbeatEvery)); err != nil {
 		return err
 	}
@@ -380,6 +388,70 @@ func TestServerDropTriggersReconnect(t *testing.T) {
 
 	cancel()
 	<-done
+}
+
+// backoffClock is the real clock, except that it records each delay the Runner
+// backs off for and lets it pass at once.
+type backoffClock struct {
+	realClock
+
+	mu     sync.Mutex
+	delays []time.Duration
+}
+
+func (c *backoffClock) After(d time.Duration) <-chan time.Time {
+	c.mu.Lock()
+	c.delays = append(c.delays, d)
+	c.mu.Unlock()
+	ch := make(chan time.Time, 1)
+	ch <- time.Now()
+	return ch
+}
+
+func (c *backoffClock) backoffs() []time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.delays)
+}
+
+// TestAnUnavailableRegistrationIsRetriedWithBackoff: the API refuses a
+// registration its database did not answer in time with UNAVAILABLE (issue
+// #4050). The Worker must retry it, waiting longer after each refusal rather than
+// re-registering at once against a database that is still down, and register once
+// the API acks again.
+func TestAnUnavailableRegistrationIsRetriedWithBackoff(t *testing.T) {
+	srv := &fakeServer{
+		wantCredential:  "the-secret",
+		heartbeatEvery:  20 * time.Millisecond,
+		refuseRegisters: 3,
+	}
+	conn := startServer(t, srv)
+
+	clock := &backoffClock{}
+	dialer := controlplane.NewDialer(conn, "the-secret", clock)
+	// Half of each attempt's ceiling under the default backoff: 1 s, 2 s, 4 s.
+	runner := session.NewRunner(dialer, testCaps(), clock, testLogger(),
+		session.WithRandFloat(func() float64 { return 0.5 }))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- runner.Run(ctx) }()
+
+	// A heartbeat on the fourth stream: its registration was acked.
+	waitFor(t, func() bool { return srv.heartbeatCount() >= 1 })
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("Run() = %v, want nil after the shutdown", err)
+	}
+
+	if got := srv.registerCount(); got != 4 {
+		t.Errorf("registerCount = %d, want 4 (three refused, then the accepted one)", got)
+	}
+	want := []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second}
+	if got := clock.backoffs(); !slices.Equal(got, want) {
+		t.Errorf("backoffs = %v, want %v", got, want)
+	}
 }
 
 // TestRegisterAdvertisesResources proves the adapter maps the domain

@@ -388,6 +388,7 @@ class SqlAlchemyServerRepository(ServerRepository):
         detail: str = "",
         reason: CrashReason | None = None,
         emitted_at: dt.datetime | None = None,
+        retry: bool = False,
     ) -> bool:
         values: dict[str, Any] = {}
         # On a CONFIRMED stop, clear the assignment in the same write so a later
@@ -444,6 +445,7 @@ class SqlAlchemyServerRepository(ServerRepository):
             detail=detail,
             reason=reason,
             emitted_at=emitted_at,
+            retry=retry,
         )
         # Report whether the guard accepted the write (one row written) so a
         # convergence caller can keep its returned entity honest (issue #292):
@@ -461,6 +463,7 @@ class SqlAlchemyServerRepository(ServerRepository):
         detail: str = "",
         reason: CrashReason | None = None,
         emitted_at: dt.datetime | None = None,
+        retry: bool = False,
     ) -> int:
         """Write ``observed_state`` to the rows matching ``conditions``; stage frames.
 
@@ -485,7 +488,10 @@ class SqlAlchemyServerRepository(ServerRepository):
         nothing it does not hold. That keeps the bulk invalidations quiet for
         rows they do not change, while a Worker report that explains itself is
         always relayed. A release of such a row stages the release alone: the
-        assignment and the refusal it clears.
+        assignment and the refusal it clears. A ``retry`` stages the state
+        anyway (issue #4062): the attempt it retries may have committed with its
+        answer lost, so the row's state may be that attempt's, whose frame no
+        subscriber received.
 
         The same UPDATE stores the last crash (issue #3281): ``reason`` and
         ``detail`` when ``observed_state`` is ``crashed``, NULL for every other
@@ -527,7 +533,7 @@ class SqlAlchemyServerRepository(ServerRepository):
         )
         for row in locked:
             payload: dict[str, object] = {}
-            if row.observed_state != observed_state.value or detail or reason:
+            if row.observed_state != observed_state.value or detail or reason or retry:
                 payload |= {
                     "state": observed_state.value,
                     "detail": detail,
@@ -575,19 +581,24 @@ class SqlAlchemyServerRepository(ServerRepository):
         del self._staged_status_events[mark:]
 
     async def clear_assignment_after_final_snapshot(
-        self, server_id: ServerId, worker_id: WorkerId
+        self, server_id: ServerId, worker_id: WorkerId, *, retry: bool = False
     ) -> bool:
         # Guarded so the late unassign only clears OUR held assignment (issue #847):
         # match only a still desired=stopped row still assigned to worker_id. A start
         # cannot have re-placed during the snapshot window (its unassigned-only CAS
         # saw the held assignment), so the guard normally matches; it makes the clear
-        # a no-op rather than a clobber if the row moved by any other path.
+        # a no-op rather than a clobber if the row moved by any other path. A retry
+        # also matches the row already released, perhaps by the attempt it retries,
+        # whose commit landed unanswered (issue #4062), so the release is announced.
+        held = ServerModel.assigned_worker_id == worker_id.value
+        if retry:
+            held = or_(held, ServerModel.assigned_worker_id.is_(None))
         stmt = (
             update(ServerModel)
             .where(
                 ServerModel.id == server_id.value,
                 ServerModel.desired_state == DesiredState.STOPPED.value,
-                ServerModel.assigned_worker_id == worker_id.value,
+                held,
             )
             .values(
                 assigned_worker_id=None,
@@ -698,9 +709,10 @@ class SqlAlchemyServerRepository(ServerRepository):
     def _stage_release(self, server_id: ServerId) -> None:
         """Stage the frame of a release that ends a stop (issue #3818).
 
-        The guard matched a row still assigned, so live subscribers learn the
-        server is free to start again. The release changes nothing else but the
-        refusal it clears with the assignment (issue #4054).
+        The guard matched a row still assigned, or one a retry's earlier attempt
+        may have released unannounced (issue #4062), so live subscribers learn
+        the server is free to start again. The release changes nothing else but
+        the refusal it clears with the assignment (issue #4054).
         """
 
         self._staged_status_events.append(

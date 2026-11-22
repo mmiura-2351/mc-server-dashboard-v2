@@ -766,7 +766,13 @@ class _RecordingLateSnapshotSink(LateSnapshotResultSink):
         self.calls: list[tuple[str, str, bool, str | None]] = []
 
     async def clear_held_assignment_on_late_snapshot(
-        self, *, server_id: str, worker_id: str, succeeded: bool, message: str | None
+        self,
+        *,
+        server_id: str,
+        worker_id: str,
+        succeeded: bool,
+        message: str | None,
+        retry: bool = False,
     ) -> None:
         self.calls.append((server_id, worker_id, succeeded, message))
 
@@ -1154,7 +1160,13 @@ class _DownLateSnapshotSink(_RecordingLateSnapshotSink):
     """Records each clear call, failing every one as a database outage."""
 
     async def clear_held_assignment_on_late_snapshot(
-        self, *, server_id: str, worker_id: str, succeeded: bool, message: str | None
+        self,
+        *,
+        server_id: str,
+        worker_id: str,
+        succeeded: bool,
+        message: str | None,
+        retry: bool = False,
     ) -> None:
         await super().clear_held_assignment_on_late_snapshot(
             server_id=server_id,
@@ -1197,7 +1209,13 @@ class _SupersededDuringWriteSink(_RecordingLateSnapshotSink):
         self._error = error
 
     async def clear_held_assignment_on_late_snapshot(
-        self, *, server_id: str, worker_id: str, succeeded: bool, message: str | None
+        self,
+        *,
+        server_id: str,
+        worker_id: str,
+        succeeded: bool,
+        message: str | None,
+        retry: bool = False,
     ) -> None:
         await super().clear_held_assignment_on_late_snapshot(
             server_id=server_id,

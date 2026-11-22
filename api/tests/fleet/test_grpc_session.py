@@ -19,8 +19,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime as dt
+import json
 import logging
 from collections.abc import AsyncIterator, Callable
+from pathlib import Path
 from typing import Any
 
 import grpc
@@ -1950,6 +1952,189 @@ async def test_stale_rebuild_failure_does_not_offline_newer_session() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Registration deadline (issue #4050)
+# ---------------------------------------------------------------------------
+
+_REGISTRATION_DEADLINE_SECONDS = 0.2
+_LIMITS_PATH = (
+    Path(__file__).resolve().parents[3]
+    / "proto"
+    / "contract"
+    / "control_plane_limits.json"
+)
+
+
+class _StalledRegistrationSink(FakeServerStateSink):
+    """A database that does not answer the registration's rebuild, or its
+    held-server lookup."""
+
+    def __init__(self, *, rebuild: bool, lookup: bool) -> None:
+        super().__init__(running_ids={_WORKER_ID: {_SERVER_A}})
+        self._rebuild = rebuild
+        self._lookup = lookup
+
+    async def running_assignment_ids(self, *, worker_id: str) -> dict[str, int]:
+        if self._rebuild:
+            await asyncio.Event().wait()
+        return await super().running_assignment_ids(worker_id=worker_id)
+
+    async def existing_server_ids(self, *, server_ids: list[str]) -> set[str]:
+        if self._lookup:
+            await asyncio.Event().wait()
+        return await super().existing_server_ids(server_ids=server_ids)
+
+
+def test_the_registration_deadline_is_a_third_of_the_workers_wait_for_its_ack() -> None:
+    limits = json.loads(_LIMITS_PATH.read_text())
+
+    assert (
+        grpc_server._REGISTRATION_DATABASE_TIMEOUT_SECONDS * 3
+        <= limits["register_ack_timeout_seconds"]
+    )
+
+
+class _StatusAtAbortContext(_FakeContext):
+    """Also records the Worker's status in ``registry`` as the abort is sent."""
+
+    def __init__(
+        self, metadata: list[tuple[str, str]], registry: InMemoryWorkerRegistry
+    ) -> None:
+        super().__init__(metadata)
+        self._registry = registry
+        self.status_at_abort: WorkerStatus | None = None
+
+    async def abort(self, code: grpc.StatusCode, details: str = "") -> None:
+        self.status_at_abort = self._registry.list_workers()[0].status
+        await super().abort(code, details)
+
+
+async def test_a_rebuild_the_database_does_not_answer_refuses_the_registration(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def _requests() -> AsyncIterator[pb.WorkerMessage]:
+        yield _register_message()
+
+    monkeypatch.setattr(
+        grpc_server,
+        "_REGISTRATION_DATABASE_TIMEOUT_SECONDS",
+        _REGISTRATION_DEADLINE_SECONDS,
+    )
+    registry = InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
+    control_plane = ControlPlaneState()
+    servicer = WorkerSessionServicer(
+        registry=registry,
+        clock=FakeClock(_T0),
+        worker_credential=_CREDENTIAL,
+        heartbeat_timeout=_TIMEOUT,
+        transfer_deadline=_TRANSFER_DEADLINE,
+        control_plane=control_plane,
+        state_sink=_StalledRegistrationSink(rebuild=True, lookup=False),
+        real_time_events=RecordingRealTimeEvents(),
+        database_ping=FakeDatabasePing(),
+    )
+    context = _StatusAtAbortContext(_auth(_CREDENTIAL), registry)
+
+    with pytest.raises(_Aborted):
+        await asyncio.wait_for(anext(servicer.Session(_requests(), context)), 5)
+
+    assert context.aborted == (
+        grpc.StatusCode.UNAVAILABLE,
+        "the database did not answer the registration in time",
+    )
+    # Offline before the Worker hears the refusal, so never placeable meanwhile.
+    assert context.status_at_abort is WorkerStatus.OFFLINE
+    assert control_plane.outbound_for(WorkerId(_WORKER_ID)) is None
+    assert _warnings(caplog) == [
+        "the database did not answer the assignment rebuild within 0.2s; "
+        "refusing the registration"
+    ]
+
+
+async def test_a_held_lookup_the_database_does_not_answer_still_acks_in_time(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(
+        grpc_server,
+        "_REGISTRATION_DATABASE_TIMEOUT_SECONDS",
+        _REGISTRATION_DEADLINE_SECONDS,
+    )
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=_StalledRegistrationSink(rebuild=False, lookup=True),
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message(held_servers={_SERVER_A: 1}))
+        response = await asyncio.wait_for(call.read(), timeout=5)
+        candidates = h.registry.candidates_for_placement()
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+    assert list(response.register_ack.unknown_held_server_ids) == []
+    assert [candidate.load for candidate in candidates] == [1]
+    assert _warnings(caplog) == [
+        "failed to compute unknown held servers; sending empty list"
+    ]
+
+
+# A rebuild that answers at half the deadline leaves the held-server lookup the
+# other half, so the ack is due at the deadline. A lookup with a deadline of its
+# own could not answer before the rebuild's time plus a whole deadline, 1.5 s.
+_SHARED_DEADLINE_SECONDS = 1.0
+_SLOW_REBUILD_SECONDS = 0.5
+
+
+class _SlowRebuildSink(_StalledRegistrationSink):
+    """A database that answers the rebuild only after half the deadline, and not
+    the held-server lookup."""
+
+    def __init__(self) -> None:
+        super().__init__(rebuild=False, lookup=True)
+
+    async def running_assignment_ids(self, *, worker_id: str) -> dict[str, int]:
+        await asyncio.sleep(_SLOW_REBUILD_SECONDS)
+        return await super().running_assignment_ids(worker_id=worker_id)
+
+
+async def test_the_rebuild_and_the_held_lookup_answer_within_one_deadline(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(
+        grpc_server,
+        "_REGISTRATION_DATABASE_TIMEOUT_SECONDS",
+        _SHARED_DEADLINE_SECONDS,
+    )
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=_SlowRebuildSink(),
+    )
+    loop = asyncio.get_running_loop()
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        started = loop.time()
+        await call.write(_register_message(held_servers={_SERVER_A: 1}))
+        response = await asyncio.wait_for(call.read(), timeout=5)
+        elapsed = loop.time() - started
+        candidates = h.registry.candidates_for_placement()
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+    assert list(response.register_ack.unknown_held_server_ids) == []
+    assert [candidate.load for candidate in candidates] == [1]
+    assert _warnings(caplog) == [
+        "failed to compute unknown held servers; sending empty list"
+    ]
+    # About one deadline, short of the 1.5 s a fresh one would take.
+    assert _SHARED_DEADLINE_SECONDS <= elapsed < 1.4
+
+
+# ---------------------------------------------------------------------------
 # Heartbeat fast-path (issue #1698)
 # ---------------------------------------------------------------------------
 
@@ -3174,17 +3359,67 @@ async def test_a_held_report_gets_a_last_attempt_when_the_worker_closes_the_stre
         await h.stop()
 
 
+class _RetryFlagSink(_OutageSink):
+    """Records, per write, whether it was told it retries an earlier attempt."""
+
+    def __init__(self, **outage: Any) -> None:
+        super().__init__(**outage)
+        self.retries: list[bool] = []
+
+    async def record_observed_state(
+        self, *, server_id: str, worker_id: str, state: str, **frame: Any
+    ) -> bool:
+        self.retries.append(frame.get("retry", False))
+        return await super().record_observed_state(
+            server_id=server_id, worker_id=worker_id, state=state, **frame
+        )
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_held_report_tells_the_sink_its_retries_are_retries() -> None:
+    # Issue #4062: an attempt that failed as an outage may have committed, its
+    # answer lost with the connection. Its retry then finds the row already at
+    # the reported state, and must say it is a retry for the sink to publish the
+    # frame anyway. A first attempt is none, so a repeated report stays quiet.
+    sink = _RetryFlagSink(errors={_SERVER_A: [_OUTAGE] * 2})
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await call.write(_status_message(_SERVER_B, pb.SERVER_STATE_STOPPED))
+        await _wait_until(lambda: len(sink.observed) == 2, "both reports not applied")
+
+        assert sink.retries == [False, True, True, False]
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
 class _OutageLateSnapshotSink(LateSnapshotResultSink):
-    """Fails the first clear with an outage, then records each server it clears."""
+    """Fails the first clear with an outage, then records each server it clears,
+    and whether each clear was told it retries an earlier attempt."""
 
     def __init__(self) -> None:
         self.attempts = 0
         self.cleared: list[str] = []
+        self.retries: list[bool] = []
 
     async def clear_held_assignment_on_late_snapshot(
-        self, *, server_id: str, worker_id: str, succeeded: bool, message: str | None
+        self,
+        *,
+        server_id: str,
+        worker_id: str,
+        succeeded: bool,
+        message: str | None,
+        retry: bool = False,
     ) -> None:
         self.attempts += 1
+        self.retries.append(retry)
         if self.attempts == 1:
             raise _OUTAGE("connect call failed")
         self.cleared.append(server_id)
@@ -3221,6 +3456,36 @@ async def test_a_held_late_final_snapshot_result_releases_on_its_retry() -> None
 
         assert sink.cleared == [_SERVER_A]
         assert sink.attempts == 2
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_held_late_final_snapshot_result_tells_the_sink_its_retry_is_one() -> (
+    None
+):
+    # Issue #4062: the release the first attempt wrote may have committed, its
+    # answer lost with the connection. The retry must say it is one, for the
+    # sink to announce a release it finds already made.
+    sink = _OutageLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        control_plane=state,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        state.register_pending(
+            "snapshot-1", WorkerId(_WORKER_ID), snapshot_server_id=_SERVER_A
+        )
+        state.discard_pending("snapshot-1")
+        await call.write(_command_result_message("snapshot-1"))
+        await _wait_until(lambda: sink.cleared, "the held release was not applied")
+
+        assert sink.retries == [False, True]
         await call.done_writing()
     finally:
         await h.stop()
@@ -3268,10 +3533,15 @@ class _RecordingControlPlane(ControlPlaneState):
         self.resolved: list[tuple[str, list[tuple[str, str, str]]]] = []
 
     async def resolve(
-        self, command_id: str, worker_id: WorkerId, result: pb.CommandResult
+        self,
+        command_id: str,
+        worker_id: WorkerId,
+        result: pb.CommandResult,
+        *,
+        retry: bool = False,
     ) -> None:
         self.resolved.append((command_id, list(self._observed)))
-        await super().resolve(command_id, worker_id, result)
+        await super().resolve(command_id, worker_id, result, retry=retry)
 
 
 async def _write_all(
