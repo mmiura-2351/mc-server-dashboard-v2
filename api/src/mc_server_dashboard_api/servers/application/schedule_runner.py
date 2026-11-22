@@ -787,7 +787,7 @@ class RunScheduleTick:
                 last_run_at=started_at,
             )
         if gave_up:
-            self._end_deferral(schedule, "occurrence")
+            self._end_deferral(schedule, "occurrence", recorded=recorded)
             # One skipped run stands for the backup the schedule owes: a retry
             # already due would meet the same hold. One not yet due keeps its
             # own time (issue #4047).
@@ -821,14 +821,20 @@ class RunScheduleTick:
                 return
             gave_up = True
             result = _SKIPPED_ASSIGNED
+            # Armed until the skipped run is recorded: a record that fails
+            # leaves it to the next tick, still past the bound.
+            self._backup_retry[schedule_id] = retry_at
         else:
             # The hold, if there was one, has ended.
             self._deferred.pop(schedule_id, None)
         # The retry records (and notifies on failure) but never moves next_run_at:
         # it is a catch-up for the failed occurrence, not a new occurrence.
-        await self._record(schedule, result, started_at, finished_at, advance=False)
+        recorded = await self._record(
+            schedule, result, started_at, finished_at, advance=False
+        )
         if gave_up:
-            self._end_deferral(schedule, "retry")
+            self._backup_retry.pop(schedule_id, None)
+            self._end_deferral(schedule, "retry", recorded=recorded)
         await self._prune_after_backup(schedule, result)
 
     def _deferral_outlived(
@@ -858,17 +864,24 @@ class RunScheduleTick:
             return False
         return now - deferred[1] > self.deferral_bound
 
-    def _end_deferral(self, schedule: Schedule, what: str) -> None:
-        """Forget a deferral its skipped run now records (issue #4047)."""
+    def _end_deferral(self, schedule: Schedule, what: str, *, recorded: bool) -> None:
+        """Forget a deferral given up past the bound (issue #4047).
+
+        ``recorded`` is :meth:`_record`'s answer: ``False`` when the schedule
+        was deleted, so no skipped run stands for the backup.
+        """
 
         self._deferred.pop(schedule.id, None)
         _LOG.warning(
             "schedule %s: server %s is still assigned to a Worker after %s; "
-            "backup %s recorded as skipped (server_assigned)",
+            "backup %s %s",
             schedule.id.value,
             schedule.server_id.value,
             self.deferral_bound,
             what,
+            "recorded as skipped (server_assigned)"
+            if recorded
+            else "given up; the schedule was deleted, so no run was recorded",
         )
 
     async def _claim(self, schedule_id: ScheduleId, what: str) -> Schedule | None:
