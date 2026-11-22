@@ -43,11 +43,9 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     WorkerId,
 )
 from mcsd.controlplane.v1 import control_plane_pb2 as pb
-from tests.fleet.fakes import FakeClock as FleetFakeClock
 from tests.fleet.fakes import FakeServerStateSink
 from tests.fleet.test_grpc_session import (
     _CREDENTIAL,
-    _T0,
     _TIMEOUT,
     _auth,
     _Harness,
@@ -76,17 +74,6 @@ pytestmark = pytest.mark.skipif(
 _WORKER = uuid.UUID("22222222-2222-2222-2222-222222222222")
 _ANSWER_GUARD_SECONDS = 10.0
 _BACKSTOP_MARKED = "marked them unknown"
-
-
-class _WorldFleetClock(FleetFakeClock):
-    """The world's clock, for the servicer and the registry."""
-
-    def __init__(self, world: _World) -> None:  # noqa: F811
-        super().__init__(_T0)
-        self._world = world
-
-    def now(self) -> dt.datetime:
-        return self._world.clock.now()
 
 
 class _Sink(FakeServerStateSink):
@@ -181,7 +168,7 @@ async def _supersede_a_report_in_flight(
     server_id = str(server.id.value)
     read_gate, mark_gate = _gate_reads_and_marks(monkeypatch)
     sink = _Sink(world.sink())
-    clock = _WorldFleetClock(world)
+    clock = world.fleet_clock()
     registry = InMemoryWorkerRegistry(clock=clock, heartbeat_timeout=_TIMEOUT)
     h = _Harness(registry, clock, state_sink=sink)
     try:

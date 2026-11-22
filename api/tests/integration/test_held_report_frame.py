@@ -168,7 +168,7 @@ async def test_a_commit_answered_after_the_deadline_still_reaches_subscribers(
     watching = world.watch(server)
     h = _Harness(
         InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
-        FakeClock(_T0),
+        world.fleet_clock(),
         state_sink=_RealWriteSink(sink),
         database_ping=FakeDatabasePing(reachable=True),
     )
@@ -301,7 +301,7 @@ async def test_a_report_whose_commit_answer_was_lost_reaches_subscribers(
         )
         h = _Harness(
             InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
-            FakeClock(_T0),
+            world.fleet_clock(),
             state_sink=_RealWriteSink(sink),
             database_ping=FakeDatabasePing(reachable=True),
         )
@@ -335,7 +335,7 @@ async def test_a_repeated_report_through_the_servicer_publishes_nothing(
     watching = world.watch(server)
     h = _Harness(
         InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
-        FakeClock(_T0),
+        world.fleet_clock(),
         state_sink=_RealWriteSink(world.sink()),
     )
     try:
@@ -426,6 +426,7 @@ async def test_a_retry_that_changes_the_state_publishes_one_frame(
         worker_id=_WORKER_ID,
         state="running",
         retry=True,
+        observed_at=world.clock.now(),
     )
 
     assert [event.payload for event in await _received(watching)] == [

@@ -143,7 +143,7 @@ async def _stallable_teardowns(
     )
     h = _Harness(
         InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
-        FakeClock(_T0),
+        world.fleet_clock(),
         state_sink=sink,
     )
     try:
