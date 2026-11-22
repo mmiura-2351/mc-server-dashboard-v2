@@ -436,6 +436,15 @@ depend on a Worker.
 | `put_backup(community_id, server_id, WriteStream) -> BackupKey` | Store an uploaded archive verbatim under a fresh key | Upload: the **application** has already validated the archive (opens, reads to its gzip end, and every member passes the one archive member rule below) before this is called; `Storage` only stores the bytes, so the new backup is restorable through `restore_backup` like a created one. One exception until issue #3828: the upload gate does not yet read member headers the way restore does, so an archive holding a GNU sparse map that cannot describe a file (issue #3802) passes the upload and is then refused by `restore_backup` and `check_backup_health` as `ArchiveUnreadableError`. |
 | `backup_size(community_id, server_id, BackupKey) -> int` | Report a stored archive's byte count | The size recorded as `size_bytes` at create/upload. `NotFoundError` for an unknown key. |
 
+**Archive before row.** A backup's create and its upload write the archive
+first, under a `BackupKey` the application generated, and record the backup's DB
+row only once it exists, with its size (issue #4086). A failure after the archive
+write, a cancellation included, deletes the archive again through
+`delete_backup`, best effort: a delete that fails is logged as a `WARNING`. So no
+row is recorded ahead of its archive. What a crash, or a delete that failed,
+leaves is an archive with no row: no listing shows it, and `DeleteServer` deletes
+it with the server's other non-retained archives (Section 2.1).
+
 **One archive member rule.** Both backends judge a backup archive's members by
 one rule, shared code in both adapters (`refuse_unrestorable_member`), wherever
 they read them: in `restore_backup` and in the `check_backup_health` probe. So

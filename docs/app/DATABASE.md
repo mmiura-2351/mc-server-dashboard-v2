@@ -884,9 +884,9 @@ this row only points at them.
 | `id` | uuid PK | |
 | `server_id` | uuid FK → `server.id` | `ON DELETE CASCADE` |
 | `storage_ref` | text | locator of the archive in `Storage` (opaque to the DB) |
-| `size_bytes` | bigint nullable | recorded archive size; set at create/upload. NULL is reported as "unknown" in statistics — an honest gap, not a wrong total |
+| `size_bytes` | bigint nullable | recorded archive size; set by the insert that records the row, once the archive is written (issue #4086). NULL only on older rows: those from before size tracking, and those a create committed ahead of its archive. NULL is reported as "unknown" in statistics — an honest gap, not a wrong total |
 | `source` | text | `manual` / `scheduled` / `event` / `uploaded` (CHECK enum). `uploaded` is an off-host archive brought in via the upload endpoint |
-| `health` | text | `healthy` / `quarantined` / `unreadable` / `unknown` (CHECK enum). Health of the archive and its contents. A backup created through the integrity-gated create path is `healthy` by construction; an `uploaded` archive (which bypasses that gate) is `unknown` until the operator-run integrity sweep (`integrity_sweep_cli`, STORAGE.md) classifies it; a row a check found structurally corrupt is `quarantined` (still restorable with the `?force=true` override); a row whose archive could not be read back at all, or is missing, is `unreadable` (not restorable). The sweep re-checks every row, so a later sound read returns `quarantined` / `unreadable` to `healthy`. NOT NULL, defaults `unknown` |
+| `health` | text | `healthy` / `quarantined` / `unreadable` / `unknown` (CHECK enum). Health of the archive and its contents. A backup created through the integrity-gated create path is `healthy` by construction, as its row is recorded only once the gated archive is written; an `uploaded` archive (which bypasses that gate) is `unknown` until the operator-run integrity sweep (`integrity_sweep_cli`, STORAGE.md) classifies it; a row a check found structurally corrupt is `quarantined` (still restorable with the `?force=true` override); a row whose archive could not be read back at all, or is missing, is `unreadable` (not restorable). The sweep re-checks every row, so a later sound read returns `quarantined` / `unreadable` to `healthy`. NOT NULL, defaults `unknown` |
 | `created_by` | uuid nullable | the user who triggered the backup; **soft reference** (no FK) so the row survives the actor's deletion (Section 9) |
 | `created_at` | timestamptz | |
 
@@ -894,6 +894,14 @@ Constraints: index on `(server_id, created_at)` for listing a server's backups
 newest-first. Deleting a backup row must also delete the archive in `Storage`;
 that two-store cleanup is a use-case concern (orchestrated in `application`), not a
 DB cascade.
+
+Creating a backup is the same two-store write in the other order (issue #4086). A
+create or an upload writes the archive first and inserts the row, with its size,
+in one transaction once the archive exists. A failure after the archive write, a
+cancellation included, deletes the archive again, best effort. So no row is
+visible without its archive. A crash, or a delete that fails, leaves an archive
+with no row instead: no listing shows it, and the server's delete prunes it
+(STORAGE.md Section 3.3).
 
 Backups are downloadable and uploadable: download streams the
 archive in its native `tar.gz` form (no recompression); upload validates the

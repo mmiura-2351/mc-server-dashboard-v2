@@ -24,22 +24,22 @@ artifacts of every server (or a single server) and persists/surfaces the result:
   reports its snapshots as **not examined** rather than counting them scanned and
   clean (#2377).
 
-Backup creation commits the metadata row before it writes the archive, so a row
-can be visible while its archive does not exist yet (issue #3220). The backup half
-checks each backup under the server's lifecycle lock, which ``CreateBackup`` holds
-across that row commit and archive write: the sweep waits out a publication in
-flight instead of condemning its archive as missing. The lock is taken per backup,
-not per server, so a heavy pass never blocks a start, restore or backup for more
-than one archive check; inside it the row is re-read, since it may have been
-deleted since the listing. A backup whose lock stays busy past the lock's wait
-budget is skipped for this run — no verdict, no audit — and counted as
-``backups_skipped_busy`` so the operator knows to re-run the sweep; the server's
-other backups and its snapshot are still checked. The snapshot half takes no
-lifecycle lock: it has no row-before-archive window, since ``current`` is published
-by an atomic swap. The fsck holds a reader lease on the snapshot it walks (#1702),
-but that lease is per-process: it stops this process's own publishes from
-reclaiming the snapshot mid-walk, not another process's, so a CLI walk is not
-protected against a concurrent API publish reclaiming it (#3537).
+A backup's row is recorded only once its archive exists (issue #4086), but a
+delete removes the archive before the row, so a row can be visible while its
+archive is already gone. The backup half checks each backup under the server's
+lifecycle lock (issue #3220), which a delete holds across both removals: the sweep
+waits out a delete in flight instead of condemning its archive as missing. The
+lock is taken per backup, not per server, so a heavy pass never blocks a start,
+restore or backup for more than one archive check; inside it the row is re-read,
+since it may have been deleted since the listing. A backup whose lock stays busy
+past the lock's wait budget is skipped for this run — no verdict, no audit — and
+counted as ``backups_skipped_busy`` so the operator knows to re-run the sweep; the
+server's other backups and its snapshot are still checked. The snapshot half takes
+no lifecycle lock: it has no row-before-archive window, since ``current`` is
+published by an atomic swap. The fsck holds a reader lease on the snapshot it
+walks (#1702), but that lease is per-process: it stops this process's own
+publishes from reclaiming the snapshot mid-walk, not another process's, so a CLI
+walk is not protected against a concurrent API publish reclaiming it (#3537).
 
 A quarantined backup, an unreadable backup and a flagged snapshot each emit an
 audit entry. The pass is
@@ -218,10 +218,10 @@ class IntegritySweep:
             backups = await self.uow.backups.list_for_server(server.id)
         outcomes = Counter[_BackupOutcome]()
         for listed in backups:
-            # The lifecycle lock per backup (issue #3220): ``CreateBackup`` holds it
-            # from its row commit to its archive write, so under it a row is never
-            # seen mid-publication. Per backup rather than per server, so the lock
-            # is never held across more than one archive check.
+            # The lifecycle lock per backup (issue #3220): a delete holds it from
+            # its archive removal to its row removal, so under it a row is never
+            # seen mid-delete. Per backup rather than per server, so the lock is
+            # never held across more than one archive check.
             try:
                 async with self.lifecycle_lock.hold(server.id) as lock:
                     # Re-read under the lock: the row may have been deleted (or

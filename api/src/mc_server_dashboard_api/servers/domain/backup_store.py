@@ -54,13 +54,11 @@ class BackupArchiveStore(abc.ABC):
     ) -> None:
         """Archive the authoritative ``current/`` under the given ref (FR-BAK-1).
 
-        The caller pre-generates the ref and commits the metadata row first (#1707),
-        then writes the archive. A crash after the row commit but before the archive
-        write leaves a dangling row (detectable, self-healing), never an orphaned
-        archive with no row. Raises :class:`BackupNotFoundError` if nothing is
-        published to archive, and :class:`BackupTooLargeError`, writing nothing,
-        if the working set's archive would be past the decompressed-size cap
-        (#3859).
+        The caller pre-generates the ref, writes the archive, and only then records
+        its metadata row (issue #4086), so no row is visible without its archive.
+        Raises :class:`BackupNotFoundError` if nothing is published to archive, and
+        :class:`BackupTooLargeError`, writing nothing, if the working set's archive
+        would be past the decompressed-size cap (#3859).
         """
 
     @abc.abstractmethod
@@ -213,10 +211,8 @@ class BackupArchiveStore(abc.ABC):
     ) -> None:
         """Store an uploaded archive verbatim under the given ref (issue #281).
 
-        The caller pre-generates the ref and commits the metadata row first (#1707),
-        then stores the archive bytes. A crash after the row commit but before the
-        store write leaves a dangling row (detectable, self-healing), never an
-        orphaned archive with no row.
+        The caller pre-generates the ref, stores the archive bytes, and only then
+        records its metadata row (issue #4086), as for :meth:`create_from_current`.
         """
 
     @abc.abstractmethod

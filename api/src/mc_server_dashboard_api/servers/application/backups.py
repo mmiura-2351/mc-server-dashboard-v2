@@ -20,12 +20,13 @@ state per the 6.9 table:
 - **anything else** (starting/stopping/restarting/crashed, or a desired/observed
   mismatch) -> :class:`BackupUnsettledError` (409): neither source is well-defined.
 
-Each create commits a :class:`Backup` metadata row (source manual or scheduled,
-the archive ref, the actor) **before** writing the archive (#1707) — a crash
-after the row commit but before the archive write leaves a dangling row
-(detectable via the lazy size backfill and health sweep), never an orphaned
-archive with no row to find it by.  The archive size is backfilled once the
-archive lands (the lazy path legacy rows already use, #661).
+Each create writes the archive **before** it records its :class:`Backup` metadata
+row (source manual or scheduled, the archive ref, its size, the actor), and an
+upload stores its archive the same way (issue #4086). The row is inserted with
+its size in one transaction, so no row is ever visible without its archive. A
+failure after the archive write, a cancellation included, deletes the archive
+again (best effort). A crash, or a delete that fails, leaves an archive with no
+row: no listing shows it, and the server's delete prunes it.
 
 Restore requires the server **at rest** (FR-BAK-4): a hot replacement of a live
 working set is unsafe, so a running server is 409. Restore republishes the
@@ -1512,9 +1513,9 @@ async def _backfill_null_sizes(
     caller's open unit of work; the returned ``rows`` carry any computed size so
     the listing/total reflect it immediately.
 
-    **Only a missing archive is tolerated** (``BackupNotFoundError``, the
-    dangling-row case create is designed to leave behind): that row keeps its NULL
-    size and the remaining rows are still backfilled. **Everything else propagates
+    **Only a missing archive is tolerated** (``BackupNotFoundError``, a row left
+    dangling before creates wrote the archive first, issue #4086): its NULL size
+    stays and the remaining rows are still backfilled. **Everything else propagates
     and fails the read** (issue #2405), where a bare ``except Exception`` used to
     degrade it to a success with null sizes. A null size is indistinguishable from a
     genuinely unrecorded one, so nothing in a degraded response identified it as
