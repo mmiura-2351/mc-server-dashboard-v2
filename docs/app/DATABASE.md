@@ -1076,8 +1076,11 @@ backup does not retry every tick — it gets the runner's bounded retry (one,
 
 #### `schedule_run`
 
-One row per fired occurrence, written after it completes. History is capped at
-50 rows per schedule by the runner's prune, not by the schema.
+One row per run (an occurrence, a backup's retry, or a skip the runner decides
+itself), written after it completes. The runner mints the `id` once per run and
+inserts the row `ON CONFLICT (id) DO NOTHING`, so a record that is retried
+writes no second row. History is capped at 50 rows per schedule by the runner's
+prune, not by the schema.
 
 | Column | Type | Notes |
 |---|---|---|
