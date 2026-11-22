@@ -13,6 +13,7 @@ either, and answers the conflict. The data-plane side, with a real upload, is in
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import uuid
 from collections.abc import Awaitable, Callable
@@ -27,6 +28,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     LifecycleTransitionConflictError,
+    ServerError,
     SnapshotUploadInFlightError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
@@ -38,7 +40,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerType,
     WorkerId,
 )
-from tests.servers.contract_table import worker_message
+from tests.servers.contract_table import worker_message, worker_status
 from tests.servers.fakes import (
     FakeClock,
     FakeControlPlane,
@@ -381,3 +383,80 @@ async def test_a_start_whose_intent_was_withdrawn_during_the_wait_sends_nothing(
     row = uow.servers.by_id[server.id]
     assert row.observed_state is ObservedState.STOPPED
     assert row.updated_at == _NOW + dt.timedelta(seconds=1)
+
+
+def _hydrate_answers(precondition: str) -> CommandOutcome:
+    return CommandOutcome(
+        status=worker_status("HydrateTrigger", precondition), message="refused"
+    )
+
+
+@pytest.mark.parametrize(
+    ("hydrate", "settled", "stopped", "marked"),
+    [
+        pytest.param(None, True, False, False, id="hydrated"),
+        pytest.param(None, False, False, True, id="wait-ran-out"),
+        pytest.param(
+            _hydrate_answers("command_in_flight"), True, False, True, id="busy"
+        ),
+        pytest.param(
+            _hydrate_answers("instance_running"),
+            True,
+            False,
+            False,
+            id="instance-running",
+        ),
+        pytest.param(None, True, True, True, id="stopped-during-the-wait"),
+    ],
+)
+@pytest.mark.parametrize("entry", ["start", "redispatch_start"])
+async def test_a_resent_start_leaves_the_mark_as_a_start_that_placed_the_server(
+    entry: str,
+    hydrate: CommandOutcome | None,
+    settled: bool,
+    stopped: bool,
+    marked: bool,
+) -> None:
+    # Issue #4024. A user start's placement marks the row ``awaiting_hydrate``,
+    # and a re-sent start that hydrates marks it before its wait, so the row is
+    # marked while either waits. Each outcome then leaves the mark the same way:
+    # cleared once the hydrate landed or the Worker proved an instance of the
+    # server there, kept while the server stays on the Worker unhydrated or a
+    # stop withdrew the start and still holds the row. What each start answers
+    # is pinned in the tests above and in ``test_lifecycle.py``.
+    resend = entry == "redispatch_start"
+    server = _server(
+        desired=DesiredState.RUNNING if resend else DesiredState.STOPPED,
+        on_worker=resend,
+    )
+    uow = FakeUnitOfWork()
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        place_to=_WORKER,
+        outcomes={} if hydrate is None else {"hydrate": hydrate},
+        hydrate_timeout_seconds=_BUDGET,
+    )
+    clock = FakeClock(_NOW)
+    at_wait: list[bool] = []
+
+    def _during() -> None:
+        row = uow.servers.by_id[server.id]
+        at_wait.append(row.awaiting_hydrate)
+        if stopped:
+            # The stop's commit: the row keeps its Worker for the final snapshot.
+            row.desired_state = DesiredState.STOPPED
+            row.updated_at = _NOW + dt.timedelta(seconds=1)
+
+    reader = _Uploads(
+        clock, takes=0 if settled else _BUDGET, settled=settled, during=_during
+    )
+    start = _start(uow, cp, reader, clock)
+    run = start.redispatch_start if resend else start
+
+    with contextlib.suppress(ServerError):
+        await run(community_id=server.community_id, server_id=server.id)
+
+    assert (at_wait, uow.servers.by_id[server.id].awaiting_hydrate) == (
+        [True],
+        marked,
+    )

@@ -25,10 +25,11 @@ someone else committed reads the count while a stop of that intent may already
 be past its own read and waiting on its write. A bump made before that write
 would land before the start read the count, and the stop could then be enqueued
 ahead of the start unseen. A stop or drain bumps when its commit raises, too: the
-commit may have landed (a lost response, or a client disconnect cancelling the
-request at that await), and then no stop is sent at all. The cost is a commit
-that truly failed: the intent is still running, but an in-flight start of it is
-refused and waits for the reconciler's re-send.
+commit may have landed (a lost response, or the task cancelled at that await,
+which a client disconnect does not do on the shipped server stack unless the
+handler reads the request body, issue #3950), and then no stop is sent at all.
+The cost is a commit that truly failed: the intent is still running, but an
+in-flight start of it is refused and waits for the reconciler's re-send.
 
 What this does not hold back is a withdrawal that sends no stop and lands after a
 start compares: a stop commit that was still in flight and then lands but

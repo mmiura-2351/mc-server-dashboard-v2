@@ -639,6 +639,9 @@ async def test_a_re_sent_start_sees_a_stop_that_was_waiting_on_its_write() -> No
     # the stop then commits and is sent while the re-send re-reads. A bump made
     # before the write would precede the re-send's read of the counter, and the
     # start would follow the stop out. The bump follows the commit, so it is seen.
+    # The re-send marked the row before its hydrate and does not clear the mark
+    # of a row no longer its own, so the release takes no snapshot, as after a
+    # user start (issue #4024).
     world = _World(desired=DesiredState.RUNNING, assigned=True)
     write = asyncio.Event()
     world.repo.pause_next_flip = write
@@ -656,7 +659,7 @@ async def test_a_re_sent_start_sees_a_stop_that_was_waiting_on_its_write() -> No
             community_id=world.community, server_id=world.server_id
         )
 
-    assert world.kinds() == ["hydrate", "stop", "snapshot"]
+    assert world.kinds() == ["hydrate", "stop"]
     assert world.stored() == (DesiredState.STOPPED, None)
     assert world.cp.live == set()
 

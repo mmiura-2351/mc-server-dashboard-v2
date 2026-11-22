@@ -1688,6 +1688,156 @@ async def test_the_retried_start_of_a_kept_server_clears_the_mark(
     assert uow.servers.by_id[ServerId(server_id)].awaiting_hydrate is False
 
 
+@pytest.mark.parametrize(
+    ("held", "marks"),
+    [
+        (None, [("hydrate", True), ("start", False)]),
+        (5, [("start", False)]),
+    ],
+    ids=["hydrate", "skip-hydrate"],
+)
+async def test_a_resent_start_that_hydrates_owes_the_hydrate_until_it_lands(
+    held: int | None, marks: list[tuple[str, bool]]
+) -> None:
+    # Issue #4024. The row is not marked: a hydrate on this Worker cleared the
+    # mark, or an instance there reported running. The re-sent start hydrates the
+    # Worker when it does not hold the store's working set, and it marks the row
+    # first, as a placement does, so nothing publishes from that Worker until the
+    # hydrate lands. A start that skips the hydrate owes none.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+            worker_id=worker,
+        )
+    )
+    cp = _MarkAtDispatch(
+        uow,
+        held=({} if held is None else {(WorkerId(worker), ServerId(server_id)): held}),
+    )
+
+    await _start_server(uow, cp, store_generation=5).redispatch_start(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert cp.marks == marks
+    assert uow.servers.by_id[ServerId(server_id)].awaiting_hydrate is False
+
+
+@pytest.mark.parametrize(
+    ("cp_kwargs", "error"),
+    [
+        (
+            {
+                "outcomes": {
+                    "hydrate": CommandOutcome(
+                        status=CommandStatus.TRANSFER_FAILED, message="boom"
+                    )
+                }
+            },
+            CommandDispatchError,
+        ),
+        ({"unavailable_kinds": {"hydrate"}}, WorkerUnavailableError),
+    ],
+    ids=["failed", "unavailable"],
+)
+async def test_a_resent_start_whose_hydrate_failed_still_owes_it(
+    cp_kwargs: dict[str, Any], error: type[Exception]
+) -> None:
+    # Issue #4024. A user start whose hydrate fails this way releases the row,
+    # and the mark goes with the assignment. A re-sent start keeps the server on
+    # its Worker, whose scratch the hydrate may have left torn, so the mark it
+    # set stays until a hydrate lands, as for a start that keeps its Worker.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(**cp_kwargs)
+
+    with pytest.raises(error):
+        await _start_server(uow, cp).redispatch_start(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert (
+        stored.desired_state,
+        stored.assigned_worker_id,
+        stored.awaiting_hydrate,
+    ) == (DesiredState.RUNNING, WorkerId(worker), True)
+
+
+class _GenerationReadHook(FakeStoreGenerationReader):
+    """A store whose generation read runs ``during`` first."""
+
+    def __init__(self, during: Callable[[], None]) -> None:
+        super().__init__(generation=5)
+        self._during = during
+
+    async def current_generation(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> int:
+        self._during()
+        return await super().current_generation(
+            community_id=community_id, server_id=server_id
+        )
+
+
+async def test_a_resent_start_whose_intent_was_withdrawn_marks_nothing() -> None:
+    # Issue #4024. While the re-sent start read the store's generation, a stop
+    # withdrew its intent and a newer start placed the server on the same Worker
+    # and hydrated it, clearing that placement's mark. The row reads as the
+    # re-sent start found it, but the intent is no longer this start's: it
+    # answers the conflict without marking the row or sending anything, so the
+    # newer instance's snapshots still publish.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane()
+    intents = StopIntentCounter()
+
+    def _withdrawn_and_placed_again() -> None:
+        intents.bump(ServerId(server_id))
+        uow.servers.by_id[ServerId(server_id)].updated_at = _LATER
+
+    start = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=_GenerationReadHook(_withdrawn_and_placed_again),
+        file_store=FakeFileStore(seed_eula=True),
+        stop_intents=intents,
+    )
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await start.redispatch_start(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert cp.dispatched == []
+    assert uow.servers.by_id[ServerId(server_id)].awaiting_hydrate is False
+
+
 async def test_adopting_an_instance_on_a_kept_worker_clears_the_mark() -> None:
     # The Worker answers the retried hydrate INVALID_STATE: an instance of the
     # server runs there, and its snapshots capture its own working set, as the

@@ -96,11 +96,12 @@ observed=unknown, and raise the refusal as before, so the reconciler retries the
 start on that same Worker.
 
 A kept Worker has not hydrated the server, and its scratch may be a leftover older
-than the store. The placement's commit sets the row's ``awaiting_hydrate``, and
-``_launch`` clears it only once the Worker holds the store's working set, and only
-for its own placement. While it is set, nothing publishes a snapshot from that
-Worker: the periodic tick skips the row, ``_final_snapshot`` takes none and lets the
-stop release, and the data plane refuses every publish from the Worker. A
+than the store. The placement's commit sets the row's ``awaiting_hydrate``, as
+does a ``redispatch_start`` that hydrates its Worker (issue #4024), and ``_launch``
+clears it only once the Worker holds the store's working set, and only for its own
+placement. While it is set, nothing publishes a snapshot from that Worker: the
+periodic tick skips the row, ``_final_snapshot`` takes none and lets the stop
+release, and the data plane refuses every publish from the Worker. A
 ``running`` report from the Worker clears it too, since that instance's working set
 is what its snapshots capture from then on.
 
@@ -979,8 +980,9 @@ class StartServer:
         and a Worker is assigned, but the launch was never sent (crash between
         commit and dispatch) or the Worker is not actually running it. The intent
         and assignment stand; only the dispatch is replayed, so this changes no DB
-        row but the ``awaiting_hydrate`` mark ``_launch`` clears (issue #3890) —
-        and on failure it reverts nothing (a later reconcile tick retries under
+        row but the ``awaiting_hydrate`` mark — set before a hydrate, as a
+        placement sets it (issue #4024), and cleared by ``_launch`` (issue #3890)
+        — and on failure it reverts nothing (a later reconcile tick retries under
         backoff). The placement load was already counted on the original
         assignment, so it is not incremented again.
 
@@ -1056,6 +1058,22 @@ class StartServer:
         skip_hydrate = (
             held_generation is not None and held_generation >= store_generation
         )
+        if not skip_hydrate:
+            # The Worker does not hold the store's working set, so it owes the
+            # hydrate, as after a placement (issue #4024): mark the row before the
+            # wait for its uploads in ``_launch``, so that one arriving after the
+            # wait is refused rather than committed over the hydrated set. Only
+            # while the intent is still this one's, as the clear in ``_launch``
+            # checks: a stop and a newer start may have hydrated and cleared the
+            # mark on this Worker since the load above.
+            async with self.uow:
+                current = await self.uow.servers.get_by_id(server_id)
+                if current is None or not self._still_owns(
+                    current, worker_id, stop_intent_count
+                ):
+                    raise LifecycleTransitionConflictError(str(server_id.value))
+                await self.uow.servers.mark_awaiting_hydrate(server_id, worker_id)
+                await self.uow.commit()
         outcome = await self._launch(
             server,
             community_id,
@@ -1171,9 +1189,8 @@ class StartServer:
             # an upload needs. A skipped hydrate does not wait: the Worker runs
             # on the tree such an upload packed, or a newer one. An upload that
             # registers only after the wait is refused by the ``awaiting_hydrate``
-            # mark on a start that placed the server, but not on a
-            # ``redispatch_start``, which does not mark the row: CONTROL_PLANE.md
-            # Section 5 says what keeps that case out today (issue #4024).
+            # mark, which every caller has set before it: the placement's commit,
+            # ``redispatch_start`` (issue #4024) and the #2499 replay below.
             #
             # The wait and the hydrate share one deadline, the hydrate budget from
             # the moment the wait begins, measured on the monotonic clock, so the
@@ -1184,8 +1201,8 @@ class StartServer:
             # command handed that little is dropped unsent, and the Worker is not
             # hydrated over the upload: ``__call__`` and ``place_and_start`` keep
             # the server on this Worker, as for a hydrate refused BUSY, and
-            # ``redispatch_start`` changes nothing, so the reconciler retries the
-            # start here without placing it again.
+            # ``redispatch_start`` changes nothing but the mark it set, so the
+            # reconciler retries the start here without placing it again.
             budget = self.control_plane.hydrate_timeout_seconds()
             began = self.clock.monotonic()
             settled = await self.store_generation.uploads_settled(

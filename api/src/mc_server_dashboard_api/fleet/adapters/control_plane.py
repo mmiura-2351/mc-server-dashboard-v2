@@ -830,13 +830,17 @@ class GrpcControlPlane(ControlPlane):
             # one dispatched to a Worker with no session (issue #3781).
             raise SessionEndedError(worker_id.value) from exc
         except asyncio.CancelledError:
-            # A cancelled dispatch (the awaiting HTTP-request task died at this
-            # await, e.g. a client disconnect during the stop flow's final
+            # A cancelled dispatch (the awaiting task was cancelled at this
+            # await, e.g. the reconciler's at API shutdown during a stop's final
             # snapshot) abandons the future exactly like a timeout: the worker
             # keeps working and may report late. Discard the pending entry so a
             # final snapshot's record is promoted and its late result clears the
             # held assignment (issue #901) instead of being dropped on the
             # matched path — and so a cancelled future never lingers in _pending.
+            # A client disconnect does not cancel an HTTP request's task here: on
+            # the shipped uvicorn (h11) and Starlette ``BaseHTTPMiddleware``
+            # stack, a disconnect reaches only a handler that reads the request
+            # body (issue #3950).
             self._state.discard_pending(command_id)
             raise
         return _to_result(result)

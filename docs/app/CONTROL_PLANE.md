@@ -863,8 +863,13 @@ Notes:
   final snapshot published, since overtaken by a run on another Worker, a backup
   restore or an at-rest file edit. Publishing it would replace the store's
   newer working set. So the write that places a server on a Worker for a start
-  marks it `awaiting_hydrate` (DATABASE.md Section 7), and while the mark is
-  set:
+  marks it `awaiting_hydrate` (DATABASE.md Section 7). A start re-sent to the
+  Worker the server is assigned to marks it too when it is about to hydrate that
+  Worker, before it waits for the Worker's uploads (next note): the Worker does
+  not hold the store's working set either (issue #4024). It marks the server
+  only while the start's intent is still the server's, so it never marks again
+  a newer placement on the same Worker whose hydrate has landed. While the mark
+  is set:
   - the periodic snapshot skips the server but keeps it due, so the first tick
     after the mark clears takes it;
   - a final snapshot is not taken, whether a stop, a replayed stop or the
@@ -911,6 +916,9 @@ Notes:
     then gives the server back, such an upload lands as it would have anyway.
   - A start that skips the hydrate does not wait: its Worker runs on the tree
     such an upload packed, or a newer one.
+  - An upload from the Worker that arrives only after the wait has passed is
+    refused: every start that hydrates has marked the server
+    `awaiting_hydrate` (previous note) before it waits.
   - The wait comes after the start's placement commit and holds nothing: no
     lifecycle lock, database session or storage lock. In practice it lasts as
     long as a commit: an upload whose Worker went away mid-body aborts at the
@@ -947,31 +955,6 @@ Notes:
     ended and after a start's wait passed, so request bodies must stream to
     the API ([`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md), "The data-plane
     URL for a cross-host worker").
-  - Not covered either: an upload from the Worker that reaches the data plane
-    only after a `redispatch_start`'s wait has passed, and before its hydrate
-    is served. A start that places the server marks the row
-    `awaiting_hydrate`, which refuses such an upload, but a
-    `redispatch_start` does not mark it, so the upload would commit after the
-    hydrate read the older generation. Marking the row there too is issue
-    #4024. Until then, three things keep the case out, and a change to any of
-    them must be read against it:
-    - A request whose Worker has gone cannot register late and still stage a
-      body: on the shipped uvicorn (h11), the handler's first read of a
-      request whose connection has closed answers a disconnect, even with
-      body bytes buffered.
-    - A snapshot of a stopped server holds the Worker's reservation of the
-      server until its upload ends, even after the command has answered, so
-      the Worker refuses the hydrate `BUSY` meanwhile.
-    - A snapshot of a running server holds no reservation. While the instance
-      runs, the Worker refuses the hydrate `INVALID_STATE`. Once it has
-      exited, only the Worker's per-server lane and the reconciler grace keep
-      the upload ahead of the hydrate: a `redispatch_start` that hydrates
-      waits the full `reconciler.grace_seconds` (660 s by default), and the
-      Worker's transfer deadline, the larger of the hydrate and snapshot
-      budgets plus 60 s (Section 5.2), is also 660 s by default. That is no
-      slack, and the grace floor (CONFIGURATION.md Section 5.1, note 3) does
-      not require the grace to exceed the transfer deadline: its stock value
-      is 630 s.
 - **Expiry.** `ApiCommand.expires_after` is how long the Worker may hold a
   command before it starts executing it. It is measured from when the Worker
   received the command, so the two hosts' clocks never meet. The API stamps it
