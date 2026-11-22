@@ -3372,6 +3372,52 @@ async def test_a_hold_reports_what_it_dropped_in_one_warning(
         await h.stop()
 
 
+@pytest.mark.usefixtures("fast_hold")
+async def test_each_hold_of_a_session_counts_only_its_own_drops(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A session can hold one report after another. Each hold's WARNING counts
+    # what was dropped during that hold, not since the session began.
+    sink = _OutageSink(down=True)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        for held, (server, lines) in enumerate(((_SERVER_A, 3), (_SERVER_B, 1)), 1):
+            sink.down = True
+            await call.write(_status_message(server, pb.SERVER_STATE_RUNNING))
+            await _wait_until(
+                lambda server=server: sink.attempts.get(server, 0) >= 2,
+                "the report was not held",
+            )
+            await _write_all(call, [_log_message(server, str(i)) for i in range(lines)])
+            beat = _T0 + dt.timedelta(seconds=held)
+            h.clock.set(beat)
+            await call.write(_heartbeat_message())
+            await _wait_for_heartbeat_at(h, beat)
+            sink.down = False
+            await _wait_until(
+                lambda held=held: len(sink.observed) == held,
+                "the held report was not applied",
+            )
+
+        assert sink.observed == [
+            (_SERVER_A, _WORKER_ID, "running"),
+            (_SERVER_B, _WORKER_ID, "running"),
+        ]
+        assert [m for m in _warnings(caplog) if m.startswith("dropped ")] == [
+            _dropped(3, 0),
+            _dropped(1, 0),
+        ]
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
 async def test_without_a_hold_log_lines_queue_in_order_and_back_pressure_the_reader(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
