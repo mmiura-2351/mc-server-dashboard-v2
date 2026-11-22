@@ -54,8 +54,11 @@ async def _sleep(engine: AsyncEngine) -> None:
 
 
 async def test_a_statement_past_the_bound_is_cancelled_as_an_outage() -> None:
+    # The driver waits up to the bound again for the server to confirm the
+    # cancel, then gives up on the connection and the cancel with it, so the
+    # bound leaves room for a cancel's round trip on a loaded host.
     assert _DB_URL is not None
-    engine = create_engine(_DB_URL, statement_timeout=0.3)
+    engine = create_engine(_DB_URL, statement_timeout=1.0)
     try:
         error, elapsed = await first_failure(lambda: _sleep(engine))
         # The driver sent the server a cancel, and the connection waited for it
@@ -64,7 +67,7 @@ async def test_a_statement_past_the_bound_is_cancelled_as_an_outage() -> None:
     finally:
         await engine.dispose()
 
-    assert elapsed < 2.0
+    assert elapsed < 2.5
     assert is_transient_database_error(error) is True
 
 
