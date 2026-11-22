@@ -124,6 +124,11 @@ export const en = {
   // database is down (issue #4010).
   "common.databaseUnavailable":
     "The dashboard's database is unavailable right now. Please try again shortly.",
+  // A write the stop's Worker still holds the server for (409
+  // server_assigned, #3998), and the reason beside a control held for it
+  // (#4003). One key on every surface, so a hold can be worded by its cause.
+  "common.serverAssigned":
+    "The server is still assigned to a Worker. Wait for it to be released, then try again.",
 
   // Upload progress (issue #1207). `{loaded}`/`{total}` are humanized byte
   // sizes; `{percent}` is an integer; `{seconds}` is the elapsed seconds.

@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   actionApplies,
   atRest,
+  atRestWriteRefusal,
   bucketOf,
   converging,
   crashNotRestarted,
@@ -182,8 +183,8 @@ describe("startRefusal", () => {
 });
 
 describe("atRest", () => {
-  // Export / delete / settings edits need the server at rest (the API answers
-  // 409 server_unsettled / server_not_stopped otherwise, SPEC 6.9).
+  // The at-rest copy is served here (the API answers 409 server_unsettled /
+  // server_not_stopped otherwise); a write also needs the release, below.
   it("is true for the settled states", () => {
     expect(atRest("stopped")).toBe(true);
     expect(atRest("crashed")).toBe(true);
@@ -211,6 +212,47 @@ describe("atRest", () => {
 
   it("running with desired is not at rest", () => {
     expect(atRest("running", "running")).toBe(false);
+  });
+});
+
+describe("atRestWriteRefusal", () => {
+  // The API's gate on a write to the at-rest data (`Server.is_quiescent()`,
+  // issue #3998): at rest and no Worker assigned. Not at rest is named first,
+  // as `not_quiescent_error` does: a running server is always assigned, and
+  // the release reason would be the wrong remedy for it.
+  const atRestStates: readonly ObservedState[] = [
+    "stopped",
+    "crashed",
+    "unknown",
+  ];
+  const rows = ["running", "stopped"].flatMap((desired) =>
+    KNOWN.flatMap((observed) =>
+      [false, true].map((assigned) => ({
+        desired,
+        observed,
+        assigned,
+        refusal:
+          desired !== "stopped" || !atRestStates.includes(observed)
+            ? "not_at_rest"
+            : assigned
+              ? "server_assigned"
+              : null,
+      })),
+    ),
+  );
+
+  it.each(rows)(
+    "$desired / $observed / assigned=$assigned answers $refusal",
+    ({ desired, observed, assigned, refusal }) => {
+      expect(atRestWriteRefusal(observed, desired, assigned)).toBe(refusal);
+    },
+  );
+
+  it("holds a stopped server its Worker still holds, and frees it on the release", () => {
+    expect(atRestWriteRefusal("stopped", "stopped", true)).toBe(
+      "server_assigned",
+    );
+    expect(atRestWriteRefusal("stopped", "stopped", false)).toBeNull();
   });
 });
 

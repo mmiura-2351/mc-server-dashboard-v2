@@ -32,7 +32,7 @@ import { humanizeBytes } from "../format.ts";
 import { t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { createQueryClient } from "../queryClient.ts";
-import { installMockWebSocket } from "../test/mockWebSocket.ts";
+import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
 import { encodeUtf8Base64 } from "./fileText.ts";
 import { ServerDetailPage } from "./ServerDetailPage.tsx";
 import { ServerFilesTab, versionDate } from "./ServerFilesTab.tsx";
@@ -3387,33 +3387,9 @@ describe("Keyboard shortcuts with a modal open", () => {
     expect(screen.getByRole("menu")).toBeInTheDocument();
   });
 
-  it("Escape closes a dialog opened over the stop menu, not the menu", async () => {
-    // At rest but still assigned: the stop control shows beside the Files
-    // tab's shortcuts.
-    routeGet({
-      detail: server({ assigned_worker_id: "w1" }),
-      list: listing([{ name: "readme.txt", kind: "file" }]),
-    });
-    renderPage();
-    await openFiles();
-    await screen.findByText(/readme\.txt/);
-    fireEvent.click(
-      screen.getByRole("button", { name: `${t("serverDetail.stop")} ▾` }),
-    );
-    dropOverwrite();
-    const dialog = await screen.findByRole("dialog");
-    // The drop opens the prompt outside act, so the dialog shows before its
-    // effect has put it on the stack; it takes focus in that effect.
-    await waitFor(() => expect(dialog).toHaveFocus());
-
-    fireEvent.keyDown(dialog, { key: "Escape" });
-
-    // The prompt closes once its upload loop hears the cancel.
-    await waitFor(() =>
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
-    );
-    expect(screen.getByRole("menu")).toBeInTheDocument();
-  });
+  // The drop is held whenever the stop menu shows (#4003): Stop shows only
+  // while a Worker is assigned or under a running intent, and no write is
+  // made then. ServerDetailPage.test.tsx pins an Escape over the stop menu.
 });
 
 // ── Keyboard shortcuts with a page menu open (issue #3971) ───────────────────
@@ -3430,8 +3406,9 @@ describe.each(["context", "stop"])(
     async function openMenuOverSelection({ copyFirst = false } = {}) {
       routeGet({
         // At rest but still assigned: the stop control shows beside the
-        // listing.
-        detail: server({ assigned_worker_id: "w1" }),
+        // listing. The context menu needs no Worker, so its server is
+        // released and every shortcut would act.
+        detail: server({ assigned_worker_id: menu === "stop" ? "w1" : null }),
         list: listing([
           { name: "a.txt", kind: "file" },
           { name: "b.txt", kind: "file" },
@@ -3457,24 +3434,40 @@ describe.each(["context", "stop"])(
       return document.activeElement as HTMLElement;
     }
 
-    it.each(["Delete", "Backspace"])(
-      "%s opens no delete confirm",
-      async (key) => {
+    // Under the stop menu the server is never writable (#4003), so the hold
+    // already turns the write keys off; they pin the context menu alone.
+    if (menu === "context") {
+      it.each(["Delete", "Backspace"])(
+        "%s opens no delete confirm",
+        async (key) => {
+          const focused = await openMenuOverSelection();
+
+          expect(fireEvent.keyDown(focused, { key })).toBe(true);
+          expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+          expect(screen.getByRole("menu")).toBeInTheDocument();
+        },
+      );
+
+      it("F2 opens no rename dialog", async () => {
         const focused = await openMenuOverSelection();
 
-        expect(fireEvent.keyDown(focused, { key })).toBe(true);
+        expect(fireEvent.keyDown(focused, { key: "F2" })).toBe(true);
         expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
         expect(screen.getByRole("menu")).toBeInTheDocument();
-      },
-    );
+      });
 
-    it("F2 opens no rename dialog", async () => {
-      const focused = await openMenuOverSelection();
+      it("Ctrl+V pastes nothing", async () => {
+        const focused = await openMenuOverSelection({ copyFirst: true });
 
-      expect(fireEvent.keyDown(focused, { key: "F2" })).toBe(true);
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-      expect(screen.getByRole("menu")).toBeInTheDocument();
-    });
+        expect(fireEvent.keyDown(focused, { key: "v", ctrlKey: true })).toBe(
+          true,
+        );
+        // A paste over a.txt would first ask to overwrite it.
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+        expect(mockDownload.fetchFileBlob).not.toHaveBeenCalled();
+        expect(screen.getByRole("menu")).toBeInTheDocument();
+      });
+    }
 
     it("Ctrl+A selects nothing", async () => {
       const focused = await openMenuOverSelection();
@@ -3493,18 +3486,6 @@ describe.each(["context", "stop"])(
         true,
       );
       expect(screen.queryByText(t("files.copied"))).not.toBeInTheDocument();
-      expect(screen.getByRole("menu")).toBeInTheDocument();
-    });
-
-    it("Ctrl+V pastes nothing", async () => {
-      const focused = await openMenuOverSelection({ copyFirst: true });
-
-      expect(fireEvent.keyDown(focused, { key: "v", ctrlKey: true })).toBe(
-        true,
-      );
-      // A paste over a.txt would first ask to overwrite it.
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-      expect(mockDownload.fetchFileBlob).not.toHaveBeenCalled();
       expect(screen.getByRole("menu")).toBeInTheDocument();
     });
 
@@ -4583,5 +4564,183 @@ describe("ServerFilesTab directory downloads (minted grant, #2354)", () => {
       ),
     ).toBeInTheDocument();
     expect(clicks).toHaveLength(0);
+  });
+});
+
+// A stop holds its Worker until the final snapshot settles, and the API refuses
+// every write to the files until the release (409 server_assigned, #3998),
+// while it still serves the reads. The writes are held, with the reason, and
+// the downloads stay (#4003).
+describe("ServerFilesTab a stopped server its Worker still holds", () => {
+  const held = { assigned_worker_id: "worker-a" };
+
+  function routeHeld() {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.includes("/files/history")) {
+        return Promise.resolve({ path: "a.txt", versions: [VID1] });
+      }
+      if (path.includes("/files?path=") && !path.includes("list=")) {
+        return Promise.resolve({
+          path: "a.txt",
+          content_base64: encodeUtf8Base64("hi\n"),
+        });
+      }
+      if (path.includes("/files?path=")) {
+        return Promise.resolve(listing([{ name: "a.txt", kind: "file" }]));
+      }
+      return Promise.resolve(server(held));
+    });
+  }
+
+  async function openHeldFiles() {
+    routeHeld();
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+  }
+
+  async function editOpenFile() {
+    fireEvent.click(screen.getByText(/a\.txt/));
+    fireEvent.change(await screen.findByLabelText(t("files.editorLabel")), {
+      target: { value: "edited\n" },
+    });
+    return screen.getByRole("button", { name: t("files.save") });
+  }
+
+  function menuItemNames() {
+    return within(screen.getByRole("menu"))
+      .getAllByRole("menuitem")
+      .map((item) => item.textContent);
+  }
+
+  it("shows the reason, not the running notice", async () => {
+    await openHeldFiles();
+
+    expect(screen.getByText(t("common.serverAssigned"))).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("files.runningNotice")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers no write in the context menu, but keeps the download", async () => {
+    await openHeldFiles();
+
+    fireEvent.contextMenu(screen.getByText(/a\.txt/));
+    expect(menuItemNames()).toEqual([
+      t("files.contextMenu.open"),
+      t("files.contextMenu.download"),
+      t("files.contextMenu.copy"),
+    ]);
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    // Empty space offers only writes (upload, new folder): no menu at all.
+    fireEvent.contextMenu(document.querySelector(".file-list") as HTMLElement);
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("holds the bulk delete and move, but not the bulk download", async () => {
+    await openHeldFiles();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+    for (const name of [t("files.bulk.delete"), t("files.bulk.move")]) {
+      const button = screen.getByRole("button", { name });
+      expect(button).toBeDisabled();
+      expect(button).toHaveAttribute("title", t("common.serverAssigned"));
+    }
+    expect(
+      screen.getByRole("button", { name: t("files.bulk.download") }),
+    ).toBeEnabled();
+  });
+
+  it.each([
+    ["Delete", { key: "Delete" }],
+    ["F2", { key: "F2" }],
+    ["Ctrl+V", { key: "v", ctrlKey: true }],
+  ])("ignores %s on a selection", async (_name, init) => {
+    await openHeldFiles();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+    // Copy is a read: the clipboard fills, and only the paste is held.
+    fireEvent.keyDown(document, { key: "c", ctrlKey: true });
+    await screen.findByText(t("files.copied"));
+    fireEvent.keyDown(document, init);
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(mockDownload.fetchFileBlob).not.toHaveBeenCalled();
+  });
+
+  it("takes no drop", async () => {
+    await openHeldFiles();
+
+    fireEvent.drop(document.querySelector(".file-tree") as HTMLElement, {
+      dataTransfer: {
+        files: [new File(["new"], "a.txt")],
+        types: ["Files"],
+      },
+    });
+
+    // A drop taken shows its preparing line at once, then yields before it
+    // asks to overwrite a.txt.
+    expect(
+      screen.queryByText(t("files.upload.preparing")),
+    ).not.toBeInTheDocument();
+    await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(mockPostFormWithProgress).not.toHaveBeenCalled();
+  });
+
+  it("holds the editor's Save with the reason, but not the download", async () => {
+    await openHeldFiles();
+
+    const save = await editOpenFile();
+    expect(save).toBeDisabled();
+    expect(save).toHaveAccessibleDescription(t("common.serverAssigned"));
+    expect(
+      screen.getByRole("button", { name: t("files.download") }),
+    ).toBeEnabled();
+  });
+
+  it("holds the rollback confirm with the reason", async () => {
+    await openHeldFiles();
+
+    fireEvent.click(screen.getByText(/a\.txt/));
+    await screen.findByLabelText(t("files.editorLabel"));
+    fireEvent.click(screen.getByRole("button", { name: t("files.history") }));
+    await screen.findByText(versionDate(VID1).toLocaleString());
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.history.rollback") }),
+    );
+
+    const confirm = screen.getByRole("button", {
+      name: t("files.rollback.confirm"),
+    });
+    expect(confirm).toBeDisabled();
+    expect(confirm).toHaveAccessibleDescription(t("common.serverAssigned"));
+  });
+
+  it("frees the writes on the release frame", async () => {
+    await openHeldFiles();
+    const save = await editOpenFile();
+    expect(save).toBeDisabled();
+
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        JSON.stringify({
+          stream: "status",
+          ts: "t",
+          payload: { assigned_worker_id: null },
+        }),
+      );
+    });
+
+    // The frame alone frees them: every REST read still answers worker-a. The
+    // draft typed while held is kept for the save.
+    await waitFor(() => expect(save).toBeEnabled());
+    expect(
+      screen.queryByText(t("common.serverAssigned")),
+    ).not.toBeInTheDocument();
+    fireEvent.contextMenu(screen.getByRole("button", { name: "a.txt" }));
+    expect(menuItemNames()).toContain(t("files.contextMenu.rename"));
   });
 });

@@ -70,6 +70,13 @@ describe("fileOperationErrorPresentation", () => {
       { key: "files.error.serverBusy" },
     ],
     [
+      // A write the stop's Worker still holds the server for (#3998): waiting
+      // for the release is the remedy, not stopping the server (#4003).
+      "maps server_assigned to the release message",
+      new ApiError(409, { reason: "server_assigned" }),
+      { key: "common.serverAssigned" },
+    ],
+    [
       "maps an otherwise unclassified conflict",
       new ApiError(409, { reason: "destination_exists" }),
       { key: "files.error.conflict" },

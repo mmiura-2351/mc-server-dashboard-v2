@@ -46,14 +46,46 @@ export function isTransitional(state: ObservedState): boolean {
 }
 
 /**
- * Whether the server is settled at rest — neither running nor transitional.
- * Export, delete and the at-rest settings edits (name/game-port/non-cadence
- * config) gate on this; the API otherwise answers 409 server_unsettled /
- * server_not_stopped (WEBUI_SPEC.md 6.9).
+ * Whether the server is settled at rest: under a stopped intent (when
+ * `desired` is given), and neither running nor transitional. The API serves
+ * the at-rest copy's reads here (a file download), and otherwise answers 409
+ * `server_unsettled` / `server_not_stopped`. Being at rest is not enough to
+ * write that copy: a stop still holding its Worker refuses the write, so a
+ * write control gates on {@link atRestWriteRefusal} instead.
  */
 export function atRest(state: ObservedState, desired?: string): boolean {
   if (desired !== undefined && desired !== "stopped") return false;
   return state === "stopped" || state === "crashed" || state === "unknown";
+}
+
+/** Why a write to the server's at-rest data is refused now. */
+export type AtRestWriteRefusal = "not_at_rest" | "server_assigned";
+
+/**
+ * Why the API would refuse a write to the server's at-rest data, or `null`
+ * where it accepts one: the one rule the at-rest write controls gate on (the
+ * Files, Plugins and Backups restore tabs, the resource pack and the Settings
+ * save). It is the API's `Server.is_quiescent()` gate, in the order
+ * `not_quiescent_error` names it (issue #3998).
+ *
+ * - `not_at_rest`: running, transitional or under a running intent
+ *   ({@link atRest}). Each surface names its own remedy, stopping the server.
+ *   It comes first: a running server is always assigned, and waiting for the
+ *   release is not its remedy.
+ * - `server_assigned`: at rest, but a Worker is still `assigned`. The stop
+ *   holds it until the final snapshot settles, and that snapshot would publish
+ *   over the write (409 `server_assigned`). The controls show held, with the
+ *   reason, until the release frame frees them (issue #4003).
+ * - `null`: at rest and released. The write may be made.
+ */
+export function atRestWriteRefusal(
+  state: ObservedState,
+  desired: string,
+  assigned: boolean,
+): AtRestWriteRefusal | null {
+  if (!atRest(state, desired)) return "not_at_rest";
+  if (assigned) return "server_assigned";
+  return null;
 }
 
 /**

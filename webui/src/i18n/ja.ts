@@ -130,6 +130,8 @@ export const ja: Record<TranslationKey, string> = {
   "common.noFileChosen": "ファイルが選択されていません",
   "common.databaseUnavailable":
     "現在、ダッシュボードのデータベースを利用できません。しばらくしてから再度お試しください。",
+  "common.serverAssigned":
+    "サーバーはまだWorkerに割り当てられています。切り離されるまで待ってから、もう一度お試しください。",
 
   // Upload progress (issue #1207).
   "upload.label": "アップロード中",
