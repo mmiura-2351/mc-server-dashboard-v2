@@ -1216,6 +1216,66 @@ describe("DashboardPage filter and sort (#1123)", () => {
     expect(screen.queryByText("creative")).not.toBeInTheDocument();
   });
 
+  // Types "さば" into the search and returns the input, with a getter for the
+  // URL's `search` param.
+  async function typeSearch() {
+    mockApi.get.mockResolvedValue([server({ id: "s1", name: "survival" })]);
+    let search = "";
+    render(
+      <MemoryRouter initialEntries={[`/communities/${CID}`]}>
+        <QueryClientProvider
+          client={
+            new QueryClient({
+              defaultOptions: {
+                queries: { retry: false },
+                mutations: { retry: false },
+              },
+            })
+          }
+        >
+          <ToastProvider>
+            <Routes>
+              <Route path="/communities/:cid" element={<DashboardPage />} />
+            </Routes>
+            <LocationProbe onChange={(s) => (search = s)} />
+          </ToastProvider>
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+    await screen.findByText("survival");
+    const input = screen.getByPlaceholderText(t("dashboard.filter.search"));
+    fireEvent.change(input, { target: { value: "さば" } });
+    return {
+      input,
+      searchParam: () => new URLSearchParams(search).get("search"),
+    };
+  }
+
+  it("commits the search to the URL on Enter", async () => {
+    const { input, searchParam } = await typeSearch();
+
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(searchParam()).toBe("さば");
+  });
+
+  // An Enter that confirms an IME conversion is the IME's, so the half-typed
+  // search is not committed to the URL (#4012).
+  it.each([{ isComposing: true }, { keyCode: 229 }])(
+    "leaves a search Enter the IME is composing with to it (%o)",
+    async (composing) => {
+      const { input, searchParam } = await typeSearch();
+
+      const notPrevented = fireEvent.keyDown(input, {
+        key: "Enter",
+        ...composing,
+      });
+
+      expect(searchParam()).toBeNull();
+      expect(notPrevented).toBe(true);
+    },
+  );
+
   it("filters servers by state bucket selection", async () => {
     mockApi.get.mockResolvedValue([
       server({ id: "s1", name: "survival", observed_state: "running" }),

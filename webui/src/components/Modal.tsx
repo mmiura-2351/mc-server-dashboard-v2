@@ -241,6 +241,12 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
         setTimeout(() => {
           lastTab = null;
         });
+        // A Tab the IME is composing with is the IME's (#4012). It is still
+        // recorded above, so one the browser runs out of the dialog all the
+        // same is pulled back.
+        if (isComposing(event)) {
+          return;
+        }
         const active = document.activeElement;
         // From the page body the browser runs Tab: after a focused control is
         // removed it goes on from where that control was. If it lands

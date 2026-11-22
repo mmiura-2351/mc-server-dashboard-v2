@@ -168,6 +168,36 @@ describe("Modal", () => {
     expect(document.activeElement).toBe(last);
   });
 
+  // A Tab the IME is composing with, as one that picks a candidate, is the
+  // IME's, even at the trap's edge (#4012).
+  it.each([
+    ["Tab", { isComposing: true }, false, "Last"],
+    ["Tab", { keyCode: 229 }, false, "Last"],
+    ["Shift+Tab", { isComposing: true }, true, "First"],
+    ["Shift+Tab", { keyCode: 229 }, true, "First"],
+  ])(
+    "leaves a %s at the trap's edge the IME is composing with to it (%o)",
+    (_tab, composing, shiftKey, edge) => {
+      render(
+        <Modal open={true} title="Title" onClose={() => {}}>
+          <button type="button">First</button>
+          <button type="button">Last</button>
+        </Modal>,
+      );
+      const from = screen.getByRole("button", { name: edge });
+      from.focus();
+
+      const notPrevented = fireEvent.keyDown(from, {
+        key: "Tab",
+        shiftKey,
+        ...composing,
+      });
+
+      expect(document.activeElement).toBe(from);
+      expect(notPrevented).toBe(true);
+    },
+  );
+
   it("Escape closes only the topmost of stacked dialogs (Files-drawer shape)", () => {
     const onCloseOuter = vi.fn();
     const onCloseInner = vi.fn();
@@ -355,6 +385,27 @@ describe("Modal focus outside the dialog", () => {
 
     expect(document.activeElement).toBe(first());
   });
+
+  // The trap leaves a composing Tab to the IME, but still records it: should
+  // the browser run it out of the dialog all the same, it is pulled back
+  // (#4012).
+  it.each([{ isComposing: true }, { keyCode: 229 }])(
+    "pulls back a composing Tab at the edge that the browser runs out (%o)",
+    async (composing) => {
+      const behind = renderOverPage();
+      last().focus();
+
+      const notPrevented = fireEvent.keyDown(last(), {
+        key: "Tab",
+        ...composing,
+      });
+      behind.focus();
+      await settle();
+
+      expect(document.activeElement).toBe(first());
+      expect(notPrevented).toBe(true);
+    },
+  );
 
   // Focus moves into a dialog's own scroller without `preventScroll`; only
   // the page's scroll is put back.
