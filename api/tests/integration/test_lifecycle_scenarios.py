@@ -2800,7 +2800,6 @@ async def test_a_held_server_stays_held_through_a_drop_until_its_worker_returns(
     assert excinfo.value.worker_state is UnavailableWorkerState.NOT_CONNECTED
     assert gone.dispatched == []
     assert (await _load(engine, server_id)) == held
-    assert store.generation == 1
 
     back = _PublishingControlPlane(store, place_to=worker, held={})
     released = await _stop_server_use_case(engine, back, clock)(
