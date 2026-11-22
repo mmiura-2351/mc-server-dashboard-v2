@@ -132,6 +132,10 @@ export const ja: Record<TranslationKey, string> = {
     "現在、ダッシュボードのデータベースを利用できません。しばらくしてから再度お試しください。",
   "common.serverAssigned":
     "サーバーはまだWorkerに割り当てられています。切り離されるまで待ってから、もう一度お試しください。",
+  "common.serverHeld.busy":
+    "サーバーホストがこのサーバーの別の処理で使用中のため最終スナップショットを取れず、サーバーは切り離されないままです。最終スナップショットは自動で再試行されます。成功するまで待ってから、もう一度お試しください。",
+  "common.serverHeld.unavailable":
+    "サーバーホストが最終スナップショットを取れなかったため、サーバーは切り離されないままです。最終スナップショットは自動で再試行されます。成功するまで待ってから、もう一度お試しください。",
 
   // Upload progress (issue #1207).
   "upload.label": "アップロード中",
@@ -281,6 +285,8 @@ export const ja: Record<TranslationKey, string> = {
   // refused identically, and since issue #2475 the host converges the orphan on
   // its own, so the message says the work is already under way rather than asking
   // the operator to stop it again (issue #2476).
+  "dashboard.lifecycle.finalSnapshotRefused":
+    "サーバーホストが再び最終スナップショットを拒否したため、サーバーは切り離されないままです。最終スナップショットは自動で再試行されます。スナップショットなしで切り離すには、サーバーの画面で「保存せずに切り離す…」を使ってください。",
   "dashboard.lifecycle.failedStopOrphan":
     "前回の停止が完了していないため、このサーバーのプロセスがまだ稼働している可能性があります。システムが自動的に停止処理を進めているため、しばらく待ってから再試行してください。",
   // 503 service-unavailable reasons (issue #1092).
@@ -300,6 +306,8 @@ export const ja: Record<TranslationKey, string> = {
   // connected (issue #3820); nothing recovers the server on its own.
   "dashboard.lifecycle.stopWorkerOffline":
     "サーバーホストに接続できません。停止の指示は有効なままです。猶予時間内にホストが戻れば、そのホストで最終スナップショットを取って停止が完了します。ホストが戻ったあとでもう一度停止すれば、すぐに完了します。ホストがこのまま戻らない場合は、もう一度停止すると最終スナップショットを取らずにすぐ切り離せます。そのあと起動すると別のホストへ移せます。ただし、元のホストが確実に停止していると分かってから行ってください。そうでないと、同じワールドが2つのホストで同時に動く恐れがあります。",
+  "dashboard.lifecycle.stopHeldWorkerOffline":
+    "サーバーホストに接続できず、サーバーは切り離されないままです。ホストが最終スナップショットを拒否しているため、もう一度停止しても切り離されません。ホストが戻って最終スナップショットを取ったとき、ホストが戻らないまま再調整の待ち時間（既定で約11分）が過ぎたとき（スナップショットなし）、または停止の権限を持つ人が保存せずに切り離したときに切り離されます。",
   "dashboard.lifecycle.restartWorkerOffline":
     "サーバーホストに接続できないため、システムはこのサーバーを再起動できません。ホストが戻ったら、もう一度再起動してください。別のホストへ移す場合は、停止を2回行ってから起動してください。ただし、元のホストが確実に停止していると分かってから行ってください。そうでないと、同じワールドが2つのホストで同時に動く恐れがあります。",
   // Live-status degraded indicator: WS down, polling fallback (SPEC 6.2 / 7.2).
@@ -427,6 +435,20 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.forceStop.dialogBody":
     "強制停止はサーバープロセスを即座に終了します。グレースフルシャットダウンは行われず、未保存のデータ（チャンク、プレイヤーの進行状況）が失われる可能性があります。",
   "serverDetail.forceStop.confirm": "強制停止",
+  "serverDetail.held.busy":
+    "サーバーホストがこのサーバーの別の処理で使用中のため、最終スナップショットをまだ取れていません。最終スナップショットは自動で再試行されます。成功するまで、このサーバーの起動・編集・バックアップ・削除はできません。",
+  "serverDetail.held.unavailable":
+    "サーバーホストが最終スナップショットを取れませんでした。最終スナップショットは自動で再試行されます。成功するまで、このサーバーの起動・編集・バックアップ・削除はできません。",
+  "serverDetail.release.button": "保存せずに切り離す…",
+  "serverDetail.release.dialogTitle":
+    "最終スナップショットを取らずにこのサーバーを切り離しますか？",
+  "serverDetail.release.dialogBody":
+    "サーバーホストはこのサーバーの最新のワールドをまだ保存していません。いま切り離すと、前回のスナップショット以降の変更が失われる可能性があります。次にサーバーが別のホストで起動したとき、またはファイルが編集・復元された時点で、その変更は失われます。元のホストでサーバーのコピーがまだ動いている可能性があり、別のホストで起動すると同じワールドが2つ同時に動く恐れがあります。この操作は取り消せません。",
+  "serverDetail.release.confirm": "保存せずに切り離す",
+  "serverDetail.release.error.notHeld":
+    "このサーバーはもう最終スナップショット待ちで保留されていないため、何も切り離していません。その間に最終スナップショットが成功した可能性があります。",
+  "serverDetail.release.error.inFlight":
+    "このサーバーの停止または最終スナップショットがまだ進行中のため、切り離していません。しばらく待ってから、もう一度お試しください。",
   "serverDetail.restart": "再起動",
   "serverDetail.export": "エクスポート",
   "serverDetail.delete": "削除",
@@ -1280,6 +1302,8 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.audit.op.server:stop": "サーバー停止",
   "communitySettings.audit.op.server:restart": "サーバー再起動",
   "communitySettings.audit.op.server:command": "コンソールコマンド送信",
+  "communitySettings.audit.op.server:release_without_snapshot":
+    "最終スナップショットなしでサーバーを切り離し",
   "communitySettings.audit.op.server:export": "サーバーエクスポート",
   "communitySettings.audit.op.server:import": "サーバーインポート",
   "communitySettings.audit.op.backup:create": "バックアップ作成",

@@ -290,6 +290,74 @@ describe("useCommunityEvents", () => {
     ]);
   });
 
+  // The dashboard's held Start tooltip follows the refusal live (#4057).
+  it("patches the cached server's final_snapshot_refusal from a refusal frame and the release (#4057)", () => {
+    const held = {
+      ...serverRow("s1", "stopped", "stopped"),
+      assigned_worker_id: "w1",
+    };
+    const { queryClient } = setup([{ ...held, final_snapshot_refusal: null }]);
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        JSON.stringify({
+          stream: "status",
+          ts: "t",
+          payload: { final_snapshot_refusal: "busy" },
+          server_id: "s1",
+        }),
+      );
+    });
+    expect(queryClient.getQueryData(serversKey(CID))).toEqual([
+      { ...held, final_snapshot_refusal: "busy" },
+    ]);
+    act(() => {
+      MockWebSocket.last().message(
+        JSON.stringify({
+          stream: "status",
+          ts: "t",
+          payload: { assigned_worker_id: null, final_snapshot_refusal: null },
+          server_id: "s1",
+        }),
+      );
+    });
+    expect(queryClient.getQueryData(serversKey(CID))).toEqual([
+      { ...held, assigned_worker_id: null, final_snapshot_refusal: null },
+    ]);
+  });
+
+  it("patches every cached server's final_snapshot_refusal from a snapshot (#4057)", () => {
+    const held = {
+      ...serverRow("s1", "stopped", "stopped"),
+      assigned_worker_id: "w1",
+    };
+    const { queryClient } = setup([{ ...held, final_snapshot_refusal: null }]);
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        JSON.stringify({
+          stream: "snapshot",
+          ts: "t",
+          payload: {
+            servers: [
+              {
+                server_id: "s1",
+                state: "stopped",
+                desired_state: "stopped",
+                assigned_worker_id: "w1",
+                final_snapshot_refusal: "unavailable",
+              },
+            ],
+          },
+          server_id: null,
+        }),
+      );
+    });
+    expect(queryClient.getQueryData(serversKey(CID))).toEqual([
+      { ...held, final_snapshot_refusal: "unavailable" },
+    ]);
+  });
+
   it("patches every cached server's assigned_worker_id from a snapshot (#3818)", () => {
     const { queryClient } = setup([
       { ...serverRow("s1", "stopped", "stopped"), assigned_worker_id: "w1" },
@@ -657,6 +725,7 @@ type Row = ReturnType<typeof serverRow> & {
   crash_reason?: string | null;
   crash_detail?: string | null;
   crash_not_restarted?: boolean;
+  final_snapshot_refusal?: string | null;
 };
 
 function LiveProbe({ queryFn }: { queryFn: QueryFunction<Row[]> }) {
@@ -884,6 +953,28 @@ describe("useCommunityEvents with REST reads in flight (#3213)", () => {
     expect(cached()).toEqual([
       { ...serverRow("s1", "stopped", "stopped"), assigned_worker_id: null },
     ]);
+  });
+
+  it("keeps a refusal frame that arrives before the cold list load lands (#4057)", async () => {
+    const held = {
+      ...serverRow("s1", "stopped", "stopped"),
+      assigned_worker_id: "w1",
+    };
+    const { respond, cached } = setupDeferred();
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        JSON.stringify({
+          stream: "status",
+          ts: "t",
+          payload: { final_snapshot_refusal: "busy" },
+          server_id: "s1",
+        }),
+      );
+    });
+    // The cold read captured the row before the refusal.
+    await respond([{ ...held, final_snapshot_refusal: null }]);
+    expect(cached()).toEqual([{ ...held, final_snapshot_refusal: "busy" }]);
   });
 
   it("orders the observed state and the intent against a read separately (#3428)", async () => {

@@ -913,6 +913,13 @@ body.col-resizing {
 .crash-detail-label {
   font-weight: 600;
 }
+/* A stop's Worker refused the final snapshot and holds the server (#4057). */
+.held-notice {
+  font-size: 12px;
+  color: var(--amber);
+  margin-top: calc(-1 * var(--space-2));
+  margin-bottom: var(--space-2);
+}
 .install-log-view {
   margin: 4px 0 0;
   color: var(--text);

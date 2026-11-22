@@ -11,9 +11,10 @@
  * dispatch failure `command_failed` (issue #2420), `failed_stop_orphan` —
  * a Worker that could not confirm an earlier stop, so the server's process is
  * probably still running (issue #2466) — `server_properties_unreadable`,
- * a `server.properties` the Worker refuses to read (issue #3347) — and
+ * a `server.properties` the Worker refuses to read (issue #3347) —
  * `command_expired`, a command the busy Worker did not get to in time (issue
- * #3305).
+ * #3305) — and `final_snapshot_refused`, a held server's final snapshot that
+ * its Worker refused again (issue #4056).
  *
  * Three reasons keep the state-changed treatment: `invalid_transition`,
  * `transition_conflict` and `server_not_running` each mean the server really
@@ -50,6 +51,7 @@
 
 import { ApiError } from "../api/client.ts";
 import type { TranslationKey } from "../i18n/index.ts";
+import type { FinalSnapshotRefusal } from "./serverState.ts";
 
 // The lifecycle verb the failed request asked for. Lives here because the
 // message for some reasons depends on it (see VERB_SPECIFIC_409_MESSAGE); both
@@ -135,6 +137,13 @@ export type LifecycleAction = "start" | "stop" | "restart";
 // stop that stopPending also covers would only collect another BUSY on a
 // retry.
 //
+// `final_snapshot_refused` is a stop of a server held by a refused final
+// snapshot (issue #4056): the stop retried the snapshot and the Worker refused
+// it BUSY or UNAVAILABLE again. Only a stop reaches it, and nothing moved: the
+// server stays held, the API keeps retrying on its own, and the release
+// without the snapshot is the operator's way out, which the message names
+// (issue #4057).
+//
 // The refetch is deliberately kept (issue #2420): it is not a side effect of
 // this mapping — every lifecycle mutation invalidates in `onSettled` regardless
 // of outcome (useLifecycleMutation.ts) — and for the stop and
@@ -151,6 +160,7 @@ const SPECIFIC_409_MESSAGE: Record<string, TranslationKey> = {
   server_properties_unreadable:
     "dashboard.lifecycle.serverPropertiesUnreadable",
   command_expired: "dashboard.lifecycle.commandExpired",
+  final_snapshot_refused: "dashboard.lifecycle.finalSnapshotRefused",
 };
 
 // Reasons whose honest message depends on the verb, consulted before
@@ -387,6 +397,27 @@ const WORKER_NOT_CONNECTED_503_MESSAGE: Record<
   },
 };
 
+// Consulted before WORKER_NOT_CONNECTED_503_MESSAGE when the caller's server is
+// held by a refused final snapshot (issue #4111). The API keeps such a server
+// held through a stop while its Worker is gone: the stop releases nothing, so
+// "stop again to release it now" is wrong for it. It is released by the
+// Worker's return with the snapshot, by the reconciler's full grace without
+// it, or by the release without the snapshot, and the message names those
+// three (issue #4057).
+//
+// It keys on the caller's held state, not on the response. The API's 503 for
+// a held stop carries a `detail`, but a retry of the held server's snapshot
+// whose session ends answers a bare `not_connected` 503 and keeps the refusal,
+// so the same server is just as held after it.
+const HELD_WORKER_NOT_CONNECTED_503_MESSAGE: Record<
+  string,
+  Partial<Record<LifecycleAction, TranslationKey>>
+> = {
+  worker_unavailable: {
+    stop: "dashboard.lifecycle.stopHeldWorkerOffline",
+  },
+};
+
 // Look up the verb-specific override for a reason, if the caller supplied a verb
 // and the table has an entry for that verb. Shared by the 409 and 503 paths so
 // both mechanisms behave identically: a hit wins, a miss falls through to the
@@ -407,9 +438,15 @@ export function isEulaNotAccepted(error: unknown): boolean {
   );
 }
 
+/**
+ * The toast for a failed lifecycle request. `refusal` is the final-snapshot
+ * refusal the caller's server is held for (`finalSnapshotRefusal`), when the
+ * caller knows it: a held server's offline stop is worded apart (issue #4057).
+ */
 export function lifecycleErrorMessage(
   error: unknown,
   action?: LifecycleAction,
+  refusal?: FinalSnapshotRefusal | null,
 ): TranslationKey {
   if (error instanceof ApiError && error.status === 409) {
     if (error.reason !== undefined) {
@@ -429,13 +466,22 @@ export function lifecycleErrorMessage(
   }
   if (error instanceof ApiError && error.status === 503) {
     if (error.reason !== undefined) {
-      const offline =
-        error.workerState === "not_connected"
+      const held =
+        refusal != null
           ? verbSpecificMessage(
-              WORKER_NOT_CONNECTED_503_MESSAGE,
+              HELD_WORKER_NOT_CONNECTED_503_MESSAGE,
               error.reason,
               action,
             )
+          : undefined;
+      const offline =
+        error.workerState === "not_connected"
+          ? (held ??
+            verbSpecificMessage(
+              WORKER_NOT_CONNECTED_503_MESSAGE,
+              error.reason,
+              action,
+            ))
           : undefined;
       const byVerb =
         offline ??
@@ -449,4 +495,28 @@ export function lifecycleErrorMessage(
     }
   }
   return "dashboard.actionFailed";
+}
+
+// The 409s of the release of a held server without its final snapshot (issue
+// #4055). Neither is the lifecycle race the state-changed toast names:
+// `invalid_transition` says no refusal holds the server any more (its snapshot
+// may have succeeded since, or someone else released it), and
+// `transition_conflict` that a stop or a final snapshot of it is still in
+// flight, which the release must not cut short (issue #4057).
+const RELEASE_409_MESSAGE: Record<string, TranslationKey> = {
+  invalid_transition: "serverDetail.release.error.notHeld",
+  transition_conflict: "serverDetail.release.error.inFlight",
+};
+
+/** The toast for a failed release without the final snapshot. */
+export function releaseErrorMessage(error: unknown): TranslationKey {
+  if (
+    error instanceof ApiError &&
+    error.status === 409 &&
+    error.reason !== undefined &&
+    error.reason in RELEASE_409_MESSAGE
+  ) {
+    return RELEASE_409_MESSAGE[error.reason];
+  }
+  return lifecycleErrorMessage(error);
 }

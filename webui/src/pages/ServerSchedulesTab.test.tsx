@@ -89,6 +89,7 @@ function server() {
     crash_reason: null,
     crash_detail: null,
     crash_not_restarted: false,
+    final_snapshot_refusal: null,
     creation_incomplete: false,
     config: {},
     join_hostname: null,

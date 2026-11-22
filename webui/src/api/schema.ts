@@ -4403,7 +4403,7 @@ export interface components {
             /** Desired State */
             desired_state: string;
             /** Final Snapshot Refusal */
-            final_snapshot_refusal?: string | null;
+            final_snapshot_refusal: string | null;
             /** Game Port */
             game_port: number | null;
             /** Id */

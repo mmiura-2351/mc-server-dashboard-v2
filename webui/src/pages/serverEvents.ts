@@ -26,16 +26,19 @@ export type Stream = "status" | "log" | "metrics";
 /**
  * A parsed status frame. It sets the server state fields it carries: an
  * observed transition carries `state` + optional crash detail, a change of the
- * server's intent carries `desiredState` (#3428), and a placement or release
- * carries `assignedWorkerId`, `null` once released (#3818). `reason` names a
- * crash the Worker classified (e.g. `forge_install_failed`, issue #1093); it is
- * empty for an unclassified crash and for every other state.
+ * server's intent carries `desiredState` (#3428), a placement or release
+ * carries `assignedWorkerId`, `null` once released (#3818), and a refusal of
+ * the stop's final snapshot carries `finalSnapshotRefusal`, which a release
+ * clears to `null` (#4054). `reason` names a crash the Worker classified (e.g.
+ * `forge_install_failed`, issue #1093); it is empty for an unclassified crash
+ * and for every other state.
  */
 export interface StatusFrame {
   kind: "status";
   state?: string;
   desiredState?: string;
   assignedWorkerId?: string | null;
+  finalSnapshotRefusal?: string | null;
   detail: string;
   reason: string;
 }
@@ -70,8 +73,9 @@ export interface Crash {
  * dropped status frames (#1795):
  * the server's persisted observed state and, when the API reports them, its
  * desired state (#3428), assigned Worker (#3818), last crash and whether the
- * reconciler leaves that crash alone (#3281). The live `detail` of any other
- * state is not stored, so it has no counterpart.
+ * reconciler leaves that crash alone (#3281), and the final-snapshot refusal
+ * (#4054). The live `detail` of any other state is not stored, so it has no
+ * counterpart.
  */
 export interface SnapshotFrame {
   kind: "snapshot";
@@ -80,6 +84,7 @@ export interface SnapshotFrame {
   assignedWorkerId?: string | null;
   crash?: Crash;
   crashNotRestarted?: boolean;
+  finalSnapshotRefusal?: string | null;
 }
 
 /** A gap marker: the client fell behind and missed events (best-effort). */
@@ -135,6 +140,23 @@ export function assignmentOf(payload: object): string | null | undefined {
 }
 
 /**
+ * The `final_snapshot_refusal` a status or snapshot payload carries: why the
+ * Worker a stop still holds refused its final snapshot, `null` for none, or
+ * `undefined` when the payload does not carry it (or carries something that is
+ * neither).
+ */
+export function refusalOf(payload: object): string | null | undefined {
+  if (!("final_snapshot_refusal" in payload)) {
+    return undefined;
+  }
+  const { final_snapshot_refusal } = payload;
+  return final_snapshot_refusal === null ||
+    typeof final_snapshot_refusal === "string"
+    ? final_snapshot_refusal
+    : undefined;
+}
+
+/**
  * The last crash a snapshot payload carries, or `undefined` when it does not
  * carry both fields as a string or `null`.
  */
@@ -179,10 +201,12 @@ export function parseServerFrame(raw: string): ServerFrame | null {
       reason?: unknown;
     };
     const assignedWorkerId = assignmentOf(payload);
+    const finalSnapshotRefusal = refusalOf(payload);
     if (
       typeof state !== "string" &&
       typeof desired_state !== "string" &&
-      assignedWorkerId === undefined
+      assignedWorkerId === undefined &&
+      finalSnapshotRefusal === undefined
     ) {
       return null;
     }
@@ -191,6 +215,7 @@ export function parseServerFrame(raw: string): ServerFrame | null {
       ...(typeof state === "string" && { state }),
       ...(typeof desired_state === "string" && { desiredState: desired_state }),
       ...(assignedWorkerId !== undefined && { assignedWorkerId }),
+      ...(finalSnapshotRefusal !== undefined && { finalSnapshotRefusal }),
       detail: typeof detail === "string" ? detail : "",
       reason: typeof reason === "string" ? reason : "",
     };
@@ -204,6 +229,7 @@ export function parseServerFrame(raw: string): ServerFrame | null {
       return null;
     }
     const assignedWorkerId = assignmentOf(payload);
+    const finalSnapshotRefusal = refusalOf(payload);
     const crash = crashOf(payload);
     const { crash_not_restarted } = payload as {
       crash_not_restarted?: unknown;
@@ -217,6 +243,7 @@ export function parseServerFrame(raw: string): ServerFrame | null {
       ...(typeof crash_not_restarted === "boolean" && {
         crashNotRestarted: crash_not_restarted,
       }),
+      ...(finalSnapshotRefusal !== undefined && { finalSnapshotRefusal }),
     };
   }
   if (stream === "log") {

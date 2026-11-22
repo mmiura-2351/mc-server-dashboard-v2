@@ -891,6 +891,35 @@ describe("ServerPluginsTab a stopped server its Worker still holds", () => {
     ).not.toBeInTheDocument();
   });
 
+  // A refusal hold has no bound, so the notice names the refusal (#4057).
+  it("names the refusal a held server is held for", async () => {
+    mockGets({ plugins: [plugin()], validation: EMPTY_VALIDATION });
+    render(
+      <MemoryRouter>
+        <QueryClientProvider client={new QueryClient()}>
+          <ToastProvider>
+            <ServerPluginsTab
+              server={server({
+                ...held,
+                final_snapshot_refusal: "unavailable",
+              })}
+              communityId={CID}
+              can={allow}
+            />
+          </ToastProvider>
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("Sodium");
+    expect(
+      screen.getByText(t("common.serverHeld.unavailable")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("common.serverAssigned")),
+    ).not.toBeInTheDocument();
+  });
+
   describe("on the detail page", () => {
     let restoreWs: () => void;
     beforeEach(() => {

@@ -3388,8 +3388,9 @@ describe("Keyboard shortcuts with a modal open", () => {
   });
 
   // The drop is held whenever the stop menu shows (#4003): Stop shows only
-  // while a Worker is assigned or under a running intent, and no write is
-  // made then. ServerDetailPage.test.tsx pins an Escape over the stop menu.
+  // while a Worker is assigned or under a running intent, and no at-rest write
+  // is offered then. ServerDetailPage.test.tsx pins an Escape over the stop
+  // menu.
 });
 
 // ── Keyboard shortcuts with a page menu open (issue #3971) ───────────────────
@@ -3405,9 +3406,9 @@ describe.each(["context", "stop"])(
     // where the context menu leaves it.
     async function openMenuOverSelection({ copyFirst = false } = {}) {
       routeGet({
-        // At rest but still assigned: the stop control shows beside the
-        // listing. The context menu needs no Worker, so its server is
-        // released and every shortcut would act.
+        // The stop menu's server is at rest but still assigned, so the stop
+        // control shows beside the listing. The context menu needs no
+        // Worker, so its server is released and every shortcut would act.
         detail: server({ assigned_worker_id: menu === "stop" ? "w1" : null }),
         list: listing([
           { name: "a.txt", kind: "file" },
@@ -3434,8 +3435,8 @@ describe.each(["context", "stop"])(
       return document.activeElement as HTMLElement;
     }
 
-    // Under the stop menu the server is never writable (#4003), so the hold
-    // already turns the write keys off; they pin the context menu alone.
+    // Under the stop menu the server offers no at-rest write (#4003), so the
+    // hold already turns the write keys off; they pin the context menu alone.
     if (menu === "context") {
       it.each(["Delete", "Backspace"])(
         "%s opens no delete confirm",
@@ -4574,7 +4575,7 @@ describe("ServerFilesTab directory downloads (minted grant, #2354)", () => {
 describe("ServerFilesTab a stopped server its Worker still holds", () => {
   const held = { assigned_worker_id: "worker-a" };
 
-  function routeHeld() {
+  function routeHeld(srv: Record<string, unknown> = held) {
     mockApi.get.mockImplementation((path: string) => {
       if (path.includes("/files/history")) {
         return Promise.resolve({ path: "a.txt", versions: [VID1] });
@@ -4588,12 +4589,12 @@ describe("ServerFilesTab a stopped server its Worker still holds", () => {
       if (path.includes("/files?path=")) {
         return Promise.resolve(listing([{ name: "a.txt", kind: "file" }]));
       }
-      return Promise.resolve(server(held));
+      return Promise.resolve(server(srv));
     });
   }
 
-  async function openHeldFiles() {
-    routeHeld();
+  async function openHeldFiles(srv: Record<string, unknown> = held) {
+    routeHeld(srv);
     renderPage();
     await openFiles();
     await screen.findByText(/a\.txt/);
@@ -4716,6 +4717,32 @@ describe("ServerFilesTab a stopped server its Worker still holds", () => {
     });
     expect(confirm).toBeDisabled();
     expect(confirm).toHaveAccessibleDescription(t("common.serverAssigned"));
+  });
+
+  // A hold the Worker's refusal of the final snapshot keeps has no bound, so
+  // every held write names the refusal (#4057).
+  it("words every held write's reason by the refusal", async () => {
+    await openHeldFiles({ ...held, final_snapshot_refusal: "busy" });
+    const reason = t("common.serverHeld.busy");
+
+    expect(screen.getByText(reason)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+    expect(
+      screen.getByRole("button", { name: t("files.bulk.delete") }),
+    ).toHaveAttribute("title", reason);
+    const save = await editOpenFile();
+    expect(save).toHaveAccessibleDescription(reason);
+    fireEvent.click(screen.getByRole("button", { name: t("files.history") }));
+    await screen.findByText(versionDate(VID1).toLocaleString());
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.history.rollback") }),
+    );
+    expect(
+      screen.getByRole("button", { name: t("files.rollback.confirm") }),
+    ).toHaveAccessibleDescription(reason);
+    expect(
+      screen.queryByText(t("common.serverAssigned")),
+    ).not.toBeInTheDocument();
   });
 
   it("frees the writes on the release frame", async () => {

@@ -55,7 +55,7 @@ import { useToast } from "../components/Toast.tsx";
 import { UploadProgress } from "../components/UploadProgress.tsx";
 import { useUploadProgress } from "../components/useUploadProgress.ts";
 import { humanizeBytes } from "../format.ts";
-import { t } from "../i18n/index.ts";
+import { type TranslationKey, t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 import { classifyQueryResult } from "../queryState.ts";
@@ -71,7 +71,12 @@ import {
   fileReadErrorPresentation,
   fileSaveErrorPresentation,
 } from "./serverFilesErrorPresentation.ts";
-import { atRestWriteRefusal, normalizeState } from "./serverState.ts";
+import {
+  atRestWriteRefusal,
+  finalSnapshotRefusal,
+  normalizeState,
+  serverAssignedKey,
+} from "./serverState.ts";
 import { useFileBrowserParams } from "./urlState.ts";
 import { type NavState, useNavHistory } from "./useNavHistory.ts";
 
@@ -316,6 +321,10 @@ export function ServerFilesTab({
   // refuses every write until the release (409 server_assigned, #3998), while
   // it still serves the reads: the writes are held, the downloads stay.
   const held = writeRefusal === "server_assigned";
+  // Named by the Worker's refusal of the final snapshot, if any (#4057).
+  const heldReason = serverAssignedKey(
+    finalSnapshotRefusal(server.final_snapshot_refusal),
+  );
 
   // URL-driven file browser state: `?dir=` and `?file=` query params sync with
   // the browser history so back/forward restore the prior view (#1484).
@@ -1245,7 +1254,7 @@ export function ServerFilesTab({
       {notAtRest && (
         <div className="notice info">{t("files.runningNotice")}</div>
       )}
-      {held && <div className="notice info">{t("common.serverAssigned")}</div>}
+      {held && <div className="notice info">{t(heldReason)}</div>}
       {contentDirNotice && (
         <ContentDirNotice
           serverType={server.server_type}
@@ -1265,6 +1274,7 @@ export function ServerFilesTab({
         maxBulkDownloadBytes={maxBulkDownloadBytes}
         running={notAtRest}
         held={held}
+        heldReason={heldReason}
         onChanged={refetchList}
         onError={onError}
         selected={selected}
@@ -1434,6 +1444,7 @@ export function ServerFilesTab({
               can={can}
               running={notAtRest}
               held={held}
+              heldReason={heldReason}
               fileSize={
                 listing.data?.entries.find(
                   (e) => joinPath(dir, e.name) === openFile,
@@ -2161,10 +2172,12 @@ function Listing({
 /**
  * Whether FileContextMenu would show any item for `entry` (`null` is empty
  * space); keep in step with its item conditions. A readable entry always has
- * Open; every other item is at-rest only (download and the edits) or needs a
- * readable file (Copy). So a special row or empty space with no edit to offer
- * (a running server, or no file:edit) would be an empty frame, and the menu is
- * not opened at all (issue #3396).
+ * Open; every other item is at-rest only (the download), needs the server at
+ * rest and released (the edits: the caller passes `canEdit` false while a
+ * stop's Worker still holds it, #4003) or needs a readable file (Copy). So a
+ * special row or empty space with no edit to offer (a running or held server,
+ * or no file:edit) would be an empty frame, and the menu is not opened at all
+ * (issue #3396).
  */
 function contextMenuHasItems(
   entry: DirEntry | null,
@@ -2325,6 +2338,7 @@ function Viewer({
   can,
   running,
   held,
+  heldReason,
   fileSize,
   onClose,
   onError,
@@ -2339,6 +2353,8 @@ function Viewer({
   running: boolean;
   /** At rest, but the stop's Worker still holds the server: Save is held. */
   held: boolean;
+  /** Why it is held, shown beside a held control. */
+  heldReason: TranslationKey;
   fileSize?: number;
   onClose: () => void;
   onError: (error: unknown) => void;
@@ -2503,6 +2519,7 @@ function Viewer({
           mcVersion={mcVersion}
           canRollback={can("file:rollback", { serverId })}
           held={held}
+          heldReason={heldReason}
           onClose={() => setHistoryOpen(false)}
           onRolledBack={() => {
             queryClient.invalidateQueries({ queryKey: contentKey });
@@ -2518,7 +2535,7 @@ function Viewer({
           )}
           {held && canEdit && (
             <p className="field-hint" id={heldId}>
-              {t("common.serverAssigned")}
+              {t(heldReason)}
             </p>
           )}
           <textarea
@@ -2553,6 +2570,7 @@ function HistoryDrawer({
   mcVersion,
   canRollback,
   held,
+  heldReason,
   onClose,
   onRolledBack,
   onError,
@@ -2564,6 +2582,8 @@ function HistoryDrawer({
   canRollback: boolean;
   /** At rest, but the stop's Worker still holds the server: no rollback. */
   held: boolean;
+  /** Why it is held, shown beside the held confirm. */
+  heldReason: TranslationKey;
   onClose: () => void;
   onRolledBack: () => void;
   onError: (error: unknown) => void;
@@ -2695,7 +2715,7 @@ function HistoryDrawer({
           </p>
           {held && (
             <p className="field-hint" id={heldId}>
-              {t("common.serverAssigned")}
+              {t(heldReason)}
             </p>
           )}
         </Modal>
@@ -2757,6 +2777,7 @@ function Toolbar({
   maxBulkDownloadBytes,
   running,
   held,
+  heldReason,
   onChanged,
   onError,
   selected,
@@ -2774,6 +2795,8 @@ function Toolbar({
   running: boolean;
   /** At rest, but the stop's Worker still holds the server: no bulk edit. */
   held: boolean;
+  /** Why it is held, the held bulk edits' tooltip. */
+  heldReason: TranslationKey;
   onChanged: () => void;
   onError: (error: unknown) => void;
   selected: Set<string>;
@@ -3051,7 +3074,7 @@ function Toolbar({
   const atRestTooltip = running
     ? t("files.error.serverMustBeStopped")
     : undefined;
-  const editTooltip = held ? t("common.serverAssigned") : atRestTooltip;
+  const editTooltip = held ? t(heldReason) : atRestTooltip;
 
   return (
     <>

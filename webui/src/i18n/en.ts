@@ -129,6 +129,13 @@ export const en = {
   // (#4003). One key on every surface, so a hold can be worded by its cause.
   "common.serverAssigned":
     "The server is still assigned to a Worker. Wait for it to be released, then try again.",
+  // The same hold once the Worker refused the final snapshot BUSY or
+  // UNAVAILABLE (#4056): the server stays held, with no bound, until a retry
+  // of the snapshot succeeds (#4057).
+  "common.serverHeld.busy":
+    "The server's host is still busy with it and has not taken its final save, so the server stays held. The save is retried automatically; wait for it to succeed, then try again.",
+  "common.serverHeld.unavailable":
+    "The server's host could not take its final save, so the server stays held. The save is retried automatically; wait for it to succeed, then try again.",
 
   // Upload progress (issue #1207). `{loaded}`/`{total}` are humanized byte
   // sizes; `{percent}` is an integer; `{seconds}` is the elapsed seconds.
@@ -299,6 +306,12 @@ export const en = {
   // converges the orphan itself (probing the process, retrying the stop while it
   // is alive, retiring the record once it is confirmed gone), so the message names
   // the condition and says the work is already under way (issue #2476).
+  // 409 final_snapshot_refused on stop (#4056): a stop of a server held by a
+  // refused final snapshot retried it, and the Worker refused it again. The
+  // server stays held and the API keeps retrying; the release without the
+  // snapshot is the way out (#4057).
+  "dashboard.lifecycle.finalSnapshotRefused":
+    "The server's host refused the final save again, so the server stays held. The save is retried automatically. To free the server without it, use “Release without saving…” on the server's page.",
   "dashboard.lifecycle.failedStopOrphan":
     "The server's previous stop did not finish, so its process may still be running. The system is shutting it down automatically; wait a moment and try again.",
   // 503 service-unavailable reasons (issue #1092): post-restart scenarios where
@@ -340,6 +353,11 @@ export const en = {
   // and the precondition itself: not every reader has the repository docs.
   "dashboard.lifecycle.stopWorkerOffline":
     "The server host is not reachable. The stop still stands: if the host comes back in time, the stop completes there with a final snapshot, and stopping again once it is back does that at once. If the host is down for good, stop the server again to release it now, without that snapshot, then start it to move it to another host. Do this only once you know the old host is down; otherwise the same world may run on two hosts.",
+  // The same 503 for a stop of a server held by a refused final snapshot
+  // (#4111): the stop releases nothing, so "stop again to release" is wrong
+  // there. The copy names what does release it instead (#4057).
+  "dashboard.lifecycle.stopHeldWorkerOffline":
+    "The server host is not reachable, and the server stays held: the host refused its final save, so stopping again releases nothing. It is released when the host comes back and takes the save, without the save once the host has been away for the full reconcile wait (about 11 minutes by default), or when someone allowed to stop it releases it without saving.",
   "dashboard.lifecycle.restartWorkerOffline":
     "The server host is not reachable, so the system cannot restart the server. Restart it again once the host is back. To move it to another host instead, stop it, stop it again, then start it. Do this only once you know the old host is down; otherwise the same world may run on two hosts.",
   // Live-status degraded indicator: WS down, polling fallback (SPEC 6.2 / 7.2).
@@ -480,6 +498,28 @@ export const en = {
   "serverDetail.forceStop.dialogBody":
     "Force stop kills the server process immediately without a graceful shutdown. Unsaved data (chunks, player progress) may be lost.",
   "serverDetail.forceStop.confirm": "Force Stop",
+  // A stop's Worker refused the final snapshot BUSY or UNAVAILABLE and holds
+  // the server until a retry succeeds (#4056): the notice in place of the
+  // release wait above, by refusal (#4057).
+  "serverDetail.held.busy":
+    "The server's host is still busy with this server, so it has not taken the final save. The save is retried automatically. Until it succeeds, the server cannot be started, edited, backed up or deleted.",
+  "serverDetail.held.unavailable":
+    "The server's host could not take the final save. The save is retried automatically. Until it succeeds, the server cannot be started, edited, backed up or deleted.",
+  // The release of a held server without its final snapshot (#4055, #4057).
+  // Its own dialog, never the force-stop one: it names what the release gives
+  // up (WEBUI_SPEC.md 2.3).
+  "serverDetail.release.button": "Release without saving…",
+  "serverDetail.release.dialogTitle":
+    "Release this server without its final save?",
+  "serverDetail.release.dialogBody":
+    "The server's host has not saved this server's latest world. If you release it now, changes since the last snapshot can be lost: they are gone if the server next starts on another host, or as soon as its files are edited or restored. A copy of the server may still be running on that host, so starting it elsewhere could run the same world twice. This cannot be undone.",
+  "serverDetail.release.confirm": "Release without saving",
+  // 409 invalid_transition: no refusal holds the server any more.
+  "serverDetail.release.error.notHeld":
+    "The server is no longer held for a refused final save, so nothing was released. Its final save may have succeeded in the meantime.",
+  // 409 transition_conflict: a stop or a final snapshot of it is in flight.
+  "serverDetail.release.error.inFlight":
+    "A stop or a final save of this server is still in progress, so nothing was released. Wait a moment and try again.",
   "serverDetail.restart": "Restart",
   "serverDetail.export": "Export",
   "serverDetail.delete": "Delete",
@@ -538,7 +578,8 @@ export const en = {
   "serverDetail.danger.deleteDesc":
     "Permanently removes the server, its data and backups.",
   "serverDetail.danger.deleteButton": "Delete…",
-  // Delete held while a Worker is assigned, and the 409 server_assigned (#3852).
+  // Delete held while a Worker is assigned (#3852). The 409 server_assigned
+  // toasts common.serverAssigned (#4003).
   "serverDetail.danger.deleteAwaitsRelease":
     "Stop the server and wait for it to be released before deleting it.",
   "serverDetail.delete.dialogTitle": "Delete server",
@@ -1386,6 +1427,8 @@ export const en = {
   "communitySettings.audit.op.server:stop": "Stop server",
   "communitySettings.audit.op.server:restart": "Restart server",
   "communitySettings.audit.op.server:command": "Send console command",
+  "communitySettings.audit.op.server:release_without_snapshot":
+    "Release server without final save",
   "communitySettings.audit.op.server:export": "Export server",
   "communitySettings.audit.op.server:import": "Import server",
   "communitySettings.audit.op.backup:create": "Create backup",

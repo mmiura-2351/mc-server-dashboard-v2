@@ -45,7 +45,12 @@ import {
   backupRestoreErrorPresentation,
 } from "./serverBackupsErrorPresentation.ts";
 import { serverKey } from "./serverKey.ts";
-import { atRestWriteRefusal, normalizeState } from "./serverState.ts";
+import {
+  atRestWriteRefusal,
+  finalSnapshotRefusal,
+  normalizeState,
+  serverAssignedKey,
+} from "./serverState.ts";
 import { serversKey } from "./useCommunityEvents.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
@@ -113,7 +118,7 @@ export function ServerBackupsTab({
   const held =
     atRestWriteRefusal(
       normalizeState(server.observed_state),
-      server.desired_state,
+      normalizeState(server.desired_state),
       server.assigned_worker_id !== null,
     ) === "server_assigned";
 
@@ -984,7 +989,11 @@ function RestoreDialog({
           )}
           {held && (
             <p className="field-hint" id={heldId}>
-              {t("common.serverAssigned")}
+              {t(
+                serverAssignedKey(
+                  finalSnapshotRefusal(server.final_snapshot_refusal),
+                ),
+              )}
             </p>
           )}
         </>

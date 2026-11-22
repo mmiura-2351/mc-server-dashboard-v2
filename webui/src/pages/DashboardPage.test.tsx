@@ -67,6 +67,7 @@ function server(overrides: Record<string, unknown> = {}) {
     crash_reason: null,
     crash_detail: null,
     crash_not_restarted: false,
+    final_snapshot_refusal: null,
     config: {},
     join_hostname: null,
     bedrock_address: null,
@@ -399,6 +400,59 @@ describe("DashboardPage lifecycle actions", () => {
       );
     },
   );
+
+  // A stop's Worker refused the final snapshot and holds the server, with no
+  // bound (#4056): Start's reason says so instead of the release wait (#4057).
+  it.each(["busy", "unavailable"] as const)(
+    "names a %s refusal as the held Start's reason (#4057)",
+    async (refusal) => {
+      mockApi.get.mockResolvedValue([
+        server({
+          observed_state: "stopped",
+          desired_state: "stopped",
+          assigned_worker_id: "worker-a",
+          final_snapshot_refusal: refusal,
+        }),
+      ]);
+      renderPage();
+
+      await screen.findByText("survival");
+      const start = startButton("stopped");
+      expect(start).toBeDisabled();
+      expect(start).toHaveAccessibleDescription(
+        t(`serverDetail.held.${refusal}`),
+      );
+    },
+  );
+
+  // Its stop while the Worker is gone releases nothing (#4111), so the toast
+  // does not tell it to stop again to release it now (#4057).
+  it("words a held server's offline stop apart from an undelivered one", async () => {
+    mockApi.get.mockResolvedValue([
+      server({
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: "worker-a",
+        final_snapshot_refusal: "busy",
+      }),
+    ]);
+    mockApi.post.mockRejectedValue(
+      new ApiError(503, {
+        reason: "worker_unavailable",
+        worker_state: "not_connected",
+      }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(screen.getByRole("button", { name: t("dashboard.stop") }));
+
+    expect(
+      await screen.findByText(
+        aboutServer("survival", t("dashboard.lifecycle.stopHeldWorkerOffline")),
+      ),
+    ).toBeInTheDocument();
+  });
 
   it("routes a 403 through the permission glue, not a generic toast", async () => {
     mockApi.get.mockResolvedValue([server({ observed_state: "running" })]);

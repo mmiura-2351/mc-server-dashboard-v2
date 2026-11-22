@@ -4,7 +4,10 @@ import { describe, expect, it } from "vitest";
 import { ApiError } from "../api/client.ts";
 import { en } from "../i18n/en.ts";
 import { ja } from "../i18n/ja.ts";
-import { lifecycleErrorMessage } from "./lifecycleErrors.ts";
+import {
+  lifecycleErrorMessage,
+  releaseErrorMessage,
+} from "./lifecycleErrors.ts";
 
 describe("lifecycleErrorMessage", () => {
   it("maps a 409 port_conflict to its specific message", () => {
@@ -469,5 +472,136 @@ describe("lifecycleErrorMessage", () => {
   it("falls back to the generic message for a 503 with no reason", () => {
     const error = new ApiError(503, undefined);
     expect(lifecycleErrorMessage(error)).toBe("dashboard.actionFailed");
+  });
+
+  // A stop of a held server retried its final snapshot and the Worker
+  // refused it again (#4056): no race, so not the state-changed toast.
+  it.each([undefined, "stop"] as const)(
+    "maps a 409 final_snapshot_refused to its message (action %s)",
+    (action) => {
+      const error = new ApiError(409, { reason: "final_snapshot_refused" });
+      expect(lifecycleErrorMessage(error, action, "busy")).toBe(
+        "dashboard.lifecycle.finalSnapshotRefused",
+      );
+    },
+  );
+
+  // A stop of a server held by a refused final snapshot whose Worker is not
+  // connected releases nothing (#4111), so "stop again to release it now" is
+  // wrong for it (#4057). A stop that was never delivered keeps that copy.
+  describe("a held server's offline stop", () => {
+    const offline = new ApiError(503, {
+      reason: "worker_unavailable",
+      worker_state: "not_connected",
+    });
+
+    it.each(["busy", "unavailable"] as const)(
+      "maps it to the held-offline message when the server is held (%s)",
+      (refusal) => {
+        expect(lifecycleErrorMessage(offline, "stop", refusal)).toBe(
+          "dashboard.lifecycle.stopHeldWorkerOffline",
+        );
+      },
+    );
+
+    // The 503 the API answers a held stop carries a `detail`, but a retry
+    // whose session ends answers a bare one and keeps the refusal, so the
+    // caller's held state decides, not the body.
+    it("keys on the held state, not on the detail member", () => {
+      const bare = new ApiError(503, {
+        reason: "worker_unavailable",
+        worker_state: "not_connected",
+      });
+      const detailed = new ApiError(503, {
+        reason: "worker_unavailable",
+        worker_state: "not_connected",
+        detail: "The server's Worker refused its final snapshot …",
+      });
+      expect(lifecycleErrorMessage(bare, "stop", "busy")).toBe(
+        "dashboard.lifecycle.stopHeldWorkerOffline",
+      );
+      expect(lifecycleErrorMessage(detailed, "stop", null)).toBe(
+        "dashboard.lifecycle.stopWorkerOffline",
+      );
+    });
+
+    it("keeps the offline-stop message for a server no refusal holds", () => {
+      expect(lifecycleErrorMessage(offline, "stop", null)).toBe(
+        "dashboard.lifecycle.stopWorkerOffline",
+      );
+      expect(lifecycleErrorMessage(offline, "stop")).toBe(
+        "dashboard.lifecycle.stopWorkerOffline",
+      );
+    });
+
+    it("keeps the unconfirmed message for a held server's no_answer", () => {
+      const noAnswer = new ApiError(503, {
+        reason: "worker_unavailable",
+        worker_state: "no_answer",
+      });
+      expect(lifecycleErrorMessage(noAnswer, "stop", "busy")).toBe(
+        "dashboard.lifecycle.stopUnconfirmed",
+      );
+    });
+
+    // The exits the API's detail names, pinned in both locales: the Worker's
+    // return with the snapshot, the full grace (without it), and the release
+    // without the snapshot. And that a second stop releases nothing.
+    it.each([
+      ["en", /stopping again releases nothing/],
+      ["en", /when the host comes back and takes the save/],
+      [
+        "en",
+        /without the save once the host has been away for the full reconcile wait/,
+      ],
+      ["en", /when someone allowed to stop it releases it without saving/],
+      ["ja", /もう一度停止しても切り離されません/],
+      ["ja", /ホストが戻って最終スナップショットを取ったとき/],
+      [
+        "ja",
+        /再調整の待ち時間（既定で約11分）が過ぎたとき（スナップショットなし）/,
+      ],
+      ["ja", /停止の権限を持つ人が保存せずに切り離したとき/],
+    ] as const)("%s states the exit %s", (locale, claim) => {
+      expect(
+        dictionaries[locale]["dashboard.lifecycle.stopHeldWorkerOffline"],
+      ).toMatch(claim);
+    });
+
+    it.each(["en", "ja"] as const)(
+      "%s never tells a held server to stop again to release it",
+      (locale) => {
+        expect(
+          dictionaries[locale]["dashboard.lifecycle.stopHeldWorkerOffline"],
+        ).not.toMatch(/release it now|すぐ切り離せます/);
+      },
+    );
+  });
+});
+
+// The release of a held server without its final snapshot (#4055) answers
+// 409 invalid_transition when no refusal holds the server and 409
+// transition_conflict while a stop or a final snapshot of it is in flight.
+// Neither is the lifecycle race the state-changed toast names (#4057).
+describe("releaseErrorMessage", () => {
+  it.each([
+    ["invalid_transition", "serverDetail.release.error.notHeld"],
+    ["transition_conflict", "serverDetail.release.error.inFlight"],
+  ] as const)("maps a 409 %s to its message", (reason, key) => {
+    expect(releaseErrorMessage(new ApiError(409, { reason }))).toBe(key);
+  });
+
+  it("falls back to the lifecycle mapping for anything else", () => {
+    expect(
+      releaseErrorMessage(
+        new ApiError(503, { reason: "database_unavailable" }),
+      ),
+    ).toBe("common.databaseUnavailable");
+    expect(releaseErrorMessage(new ApiError(409, undefined))).toBe(
+      "dashboard.stateChanged",
+    );
+    expect(releaseErrorMessage(new Error("boom"))).toBe(
+      "dashboard.actionFailed",
+    );
   });
 });

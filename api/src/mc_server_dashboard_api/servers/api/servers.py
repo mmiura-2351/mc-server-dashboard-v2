@@ -375,8 +375,9 @@ class ServerResponse(BaseModel):
     crash_not_restarted: bool
     # Why the assigned Worker refused the stop's final snapshot (issue #4054):
     # ``busy`` / ``unavailable`` while a stop holds its Worker for that reason,
-    # ``None`` otherwise.
-    final_snapshot_refusal: str | None = None
+    # ``None`` otherwise. Required, so a client reads ``None`` as "not held"
+    # rather than "not reported" (issue #4057).
+    final_snapshot_refusal: str | None
     # Whether the server's create seed or import has yet to finish (issue
     # #4065): ``True`` while the creation runs, and for good once it failed or
     # was interrupted, when a start is refused ``creation_incomplete``.
