@@ -224,7 +224,7 @@ adapter on the other side of the wire may fulfil it (e.g. the API's
 | `WorkerDrainStore` | Durable drain intent: which Worker ids are drained, seeded into `WorkerRegistry` at startup so drain survives an API restart (FR-WRK-5) | DB-backed adapter (`worker_drain` table) |
 | `AssignedServerStopper` | Mark every server a drained Worker holds `desired=stopped`; the reconciler then drives the stops (FR-WRK-5) | servers-backed adapter over the servers stop use case |
 | `ServerStateSink` | Write control-plane observations (status reports, Worker disconnect/re-register) back into server state (FR-SRV-4, FR-WRK-4) | servers-backed adapter |
-| `LateSnapshotResultSink` | Release a stop's held assignment when a timed-out final snapshot's result arrives late (FR-DATA-4) | servers-backed adapter |
+| `LateSnapshotResultSink` | Release a stop's held assignment when a timed-out final snapshot's result arrives late, or keep it held when that result is a `BUSY` / `UNAVAILABLE` refusal (FR-DATA-4) | servers-backed adapter |
 | `ServerRouteResolver` | Resolve a relay join's slug to the server's routing facts (RELAY.md Sections 4 and 6) | servers-backed adapter |
 | `SessionSink` | Persist relay-reported game sessions (RELAY.md Sections 6 and 8) | servers-backed adapter (`game_session` table) |
 | `VersionCatalog` / JAR source | List MC versions/types, resolve & fetch the JAR (FR-VER-1, FR-VER-2) | external-manifest client with retry + cache fallback |
@@ -269,7 +269,7 @@ tracks no instance of (a hydrate, a stopped server's snapshot, the reclaim of a
 deleted server's scratch), it asks the driver's `LeftoverGuard` whether such a
 container may be running (issue #3672). While one may, the hydrate and the
 snapshot are refused as unavailable (`UNAVAILABLE`, issue #3678; the
-reconciler backs off a start or hydrate it sent that answered so) and the
+reconciler backs off a start, hydrate or final snapshot it sent that answered so) and the
 reclaim keeps the scratch. The hydrate, a stop's final snapshot and the
 reclaim first have the driver end the containers it recorded, as the server's
 next start would; a periodic or on-demand snapshot ends nothing (issue #4053).

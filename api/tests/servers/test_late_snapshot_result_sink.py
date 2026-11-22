@@ -23,6 +23,7 @@ from typing import NoReturn, cast
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from mc_server_dashboard_api.fleet.domain.control_plane import CommandResultCode
 from mc_server_dashboard_api.servers.adapters import (
     late_snapshot_result_sink as sink_module,
 )
@@ -39,6 +40,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
+    FinalSnapshotRefusal,
     ObservedState,
     ServerId,
     ServerName,
@@ -95,7 +97,7 @@ async def test_clear_logs_on_non_uuid_server_id(
         await _sink().clear_held_assignment_on_late_snapshot(
             server_id="server-1",
             worker_id=_UUID,
-            succeeded=False,
+            code=CommandResultCode.TRANSFER_FAILED,
             message="transfer_failed",
         )
     assert any(record.levelno == logging.ERROR for record in caplog.records)
@@ -108,7 +110,7 @@ async def test_clear_logs_on_non_uuid_worker_id(
         await _sink().clear_held_assignment_on_late_snapshot(
             server_id=_UUID,
             worker_id="worker-1",
-            succeeded=True,
+            code=CommandResultCode.OK,
             message=None,
         )
     assert any(record.levelno == logging.ERROR for record in caplog.records)
@@ -140,7 +142,7 @@ async def test_clear_carries_the_worker_message_into_the_release_warning(
         await _sink().clear_held_assignment_on_late_snapshot(
             server_id=str(server_id),
             worker_id=str(worker_id),
-            succeeded=False,
+            code=CommandResultCode.TRANSFER_FAILED,
             message=detail,
         )
 
@@ -173,8 +175,41 @@ async def test_a_release_that_fails_to_be_written_is_recorded_for_the_reconciler
         await _sink(unrecorded).clear_held_assignment_on_late_snapshot(
             server_id=str(server_id),
             worker_id=str(worker_id),
-            succeeded=True,
+            code=CommandResultCode.OK,
             message=None,
         )
 
     assert unrecorded.recorded_at(ServerId(server_id)) == _NOW
+
+
+@pytest.mark.parametrize(
+    ("code", "refusal"),
+    [
+        (CommandResultCode.BUSY, FinalSnapshotRefusal.BUSY),
+        (CommandResultCode.UNAVAILABLE, FinalSnapshotRefusal.UNAVAILABLE),
+    ],
+)
+async def test_a_late_refusal_reaches_the_use_case_and_holds_the_row(
+    monkeypatch: pytest.MonkeyPatch,
+    code: CommandResultCode,
+    refusal: FinalSnapshotRefusal,
+) -> None:
+    # Issue #3697: the result's code crosses the seam, so a late BUSY or
+    # UNAVAILABLE keeps the row assigned and records the refusal.
+    server_id, worker_id = uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_held_server(server_id, worker_id))
+    monkeypatch.setattr(
+        sink_module, "SqlAlchemyUnitOfWork", lambda _factory, _events: uow
+    )
+
+    await _sink().clear_held_assignment_on_late_snapshot(
+        server_id=str(server_id),
+        worker_id=str(worker_id),
+        code=code,
+        message="a leftover container may still run",
+    )
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.assigned_worker_id == WorkerId(worker_id)
+    assert stored.final_snapshot_refusal is refusal

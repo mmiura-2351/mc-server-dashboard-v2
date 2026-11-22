@@ -1,5 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { MemoryRouter, useNavigate } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
@@ -488,5 +494,41 @@ describe("AdminUsersPage", () => {
     expect(
       await screen.findByText(t("admin.users.error.generic")),
     ).toBeInTheDocument();
+  });
+
+  // Password managers offer their generator on a create-user form's
+  // new-password field and save the result against its username field (#4094).
+  it("marks the create-user username and named new-password fields for password managers", async () => {
+    renderPage();
+    await screen.findByText("alice");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: t("admin.users.create") }),
+    );
+
+    expect(
+      screen.getByLabelText(t("admin.users.usernameLabel")),
+    ).toHaveAttribute("autocomplete", "username");
+    const password = screen.getByLabelText(t("admin.users.passwordLabel"));
+    expect(password).toHaveAttribute("name", "new-password");
+    expect(password).toHaveAttribute("autocomplete", "new-password");
+  });
+
+  it("keeps the create-user password's name and autocomplete when the show/hide toggle reveals it", async () => {
+    renderPage();
+    await screen.findByText("alice");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: t("admin.users.create") }),
+    );
+    const input = screen.getByLabelText(t("admin.users.passwordLabel"));
+    fireEvent.click(
+      within(input.parentElement as HTMLElement).getByRole("button"),
+    );
+
+    const revealed = screen.getByLabelText(t("admin.users.passwordLabel"));
+    expect(revealed).toHaveAttribute("type", "text");
+    expect(revealed).toHaveAttribute("name", "new-password");
+    expect(revealed).toHaveAttribute("autocomplete", "new-password");
   });
 });

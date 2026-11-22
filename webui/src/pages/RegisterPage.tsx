@@ -196,6 +196,7 @@ export function RegisterPage() {
           <label htmlFor="register-password">{t("auth.fieldPassword")}</label>
           <PasswordInput
             id="register-password"
+            name="new-password"
             autoComplete="new-password"
             placeholder={t("register.passwordPlaceholder")}
             value={password}
@@ -215,6 +216,7 @@ export function RegisterPage() {
           </label>
           <PasswordInput
             id="register-confirm"
+            name="confirm-password"
             autoComplete="new-password"
             value={confirm}
             onChange={(e) => setConfirm(e.target.value)}
