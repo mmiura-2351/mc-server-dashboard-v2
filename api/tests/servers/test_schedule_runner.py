@@ -27,7 +27,10 @@ from mc_server_dashboard_api.audit.domain.operations import (
 from mc_server_dashboard_api.servers.adapters.cronsim_next_run_calculator import (
     CronsimNextRunCalculator,
 )
-from mc_server_dashboard_api.servers.adapters.schedule_loop import run_schedule_loop
+from mc_server_dashboard_api.servers.adapters.schedule_loop import (
+    drain_schedule_loop,
+    run_schedule_loop,
+)
 from mc_server_dashboard_api.servers.application.backups import (
     CreateBackup,
     PruneScheduledBackups,
@@ -4627,23 +4630,30 @@ async def test_schedule_edited_after_the_poll_is_not_dispatched(
 
 # --- an API shutdown during a scheduled backup (issue #4109) -----------------
 #
-# The lifespan shutdown cancels the schedule task. A backup writes its archive
-# before its row (issue #4086), so a cancellation leaves no row at any point, and
-# CreateBackup deletes an archive it wrote while its row's COMMIT is unsent.
+# The lifespan shutdown stops the schedule loop taking ticks and gives the tick
+# in flight up to the drain to finish. A backup that finishes in time is
+# recorded as usual. One the drain cancels leaves no row at any point, since its
+# archive is written before its row (issue #4086), and CreateBackup deletes an
+# archive it wrote while its row's COMMIT is unsent.
+
+# Far longer than any test here takes, so a drain of it never runs out.
+_LONG_DRAIN = 3600.0
 
 
 class _HangingArchiveStore(FakeBackupArchiveStore):
-    """Hangs at ``point``: before its archive write, or after it, reading the size."""
+    """Waits for ``release`` at ``point``: before its archive write, or after it,
+    reading the size."""
 
     def __init__(self, point: str) -> None:
         super().__init__()
         self._point = point
         self.entered = asyncio.Event()
+        self.release = asyncio.Event()
 
     async def _hang(self, point: str) -> None:
         if point == self._point:
             self.entered.set()
-            await asyncio.Event().wait()
+            await self.release.wait()
 
     async def create_from_current(
         self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
@@ -4704,18 +4714,45 @@ def _backup_hanging_at(point: str) -> _HangingBackup:
     return _HangingBackup(env, store, schedule, entered)
 
 
+def _start_loop(env: _Env) -> tuple[asyncio.Task[None], asyncio.Event]:
+    stopping = asyncio.Event()
+    loop = asyncio.create_task(
+        run_schedule_loop(env.runner, tick_seconds=0.01, stopping=stopping)
+    )
+    return loop, stopping
+
+
+async def test_a_shutdown_during_a_backup_the_drain_outlasts_records_it() -> None:
+    backup = _backup_hanging_at("write")
+    assert isinstance(backup.store, _HangingArchiveStore)
+    loop, stopping = _start_loop(backup.env)
+    await backup.entered.wait()
+
+    shutdown = asyncio.create_task(
+        drain_schedule_loop(loop, stopping, drain_seconds=_LONG_DRAIN)
+    )
+    await asyncio.sleep(0.05)
+    backup.store.release.set()
+    async with asyncio.timeout(5):
+        await shutdown
+
+    (row,) = backup.env.uow.backups.by_id.values()
+    assert backup.store.archives == {row.storage_ref}
+    assert _runs(backup.env, backup.schedule) == [ScheduleRunOutcome.SUCCESS]
+
+
 @pytest.mark.parametrize("point", ["write", "size", "insert"])
-async def test_a_schedule_task_cancelled_mid_backup_leaves_no_row_and_no_archive(
+async def test_a_shutdown_whose_drain_runs_out_mid_backup_leaves_no_row_or_archive(
     point: str,
 ) -> None:
     backup = _backup_hanging_at(point)
-    loop = asyncio.create_task(run_schedule_loop(backup.env.runner, tick_seconds=0.01))
+    loop, stopping = _start_loop(backup.env)
     await backup.entered.wait()
 
-    loop.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await loop
+    async with asyncio.timeout(5):
+        await drain_schedule_loop(loop, stopping, drain_seconds=0.01)
 
+    assert loop.cancelled()
     assert backup.env.uow.backups.by_id == {}
     assert backup.store.archives == set()
     assert _runs(backup.env, backup.schedule) == []

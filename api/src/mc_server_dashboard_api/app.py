@@ -161,7 +161,10 @@ from mc_server_dashboard_api.servers.adapters.resource_pack_gc_loop import (
 from mc_server_dashboard_api.servers.adapters.resource_pack_store import (
     ObjectResourcePackStore,
 )
-from mc_server_dashboard_api.servers.adapters.schedule_loop import run_schedule_loop
+from mc_server_dashboard_api.servers.adapters.schedule_loop import (
+    drain_schedule_loop,
+    run_schedule_loop,
+)
 from mc_server_dashboard_api.servers.adapters.server_route_resolver import (
     ServersServerRouteResolver,
 )
@@ -1036,6 +1039,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         worker_sessions: WorkerSessionServicer | None = None
         snapshot_task: asyncio.Task[None] | None = None
         schedule_task: asyncio.Task[None] | None = None
+        schedule_stopping = asyncio.Event()
         reconciler_task: asyncio.Task[None] | None = None
         jar_gc_task: asyncio.Task[None] | None = None
         plugin_cache_gc_task: asyncio.Task[None] | None = None
@@ -1297,6 +1301,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 run_schedule_loop(
                     schedule_runner,
                     tick_seconds=settings.schedule.tick_seconds,
+                    stopping=schedule_stopping,
                 )
             )
             logging.getLogger(__name__).info("schedule runner started")
@@ -1518,7 +1523,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
-            # Stopped first: scrapes must stop before the engine and registry
+            # Drained first (issue #4109): the schedule loop takes no further
+            # tick, and the tick in flight, a scheduled backup for one, gets the
+            # drain to finish while the engine, the storage and the Worker
+            # sessions it uses are still up. One still running after the drain
+            # is cancelled.
+            if schedule_task is not None:
+                await drain_schedule_loop(
+                    schedule_task,
+                    schedule_stopping,
+                    drain_seconds=settings.schedule.shutdown_drain_seconds,
+                )
+            # Stopped next: scrapes must stop before the engine and registry
             # they read are torn down below.
             if metrics_listener is not None:
                 await metrics_listener.stop()
@@ -1549,10 +1565,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 reconciler_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await reconciler_task
-            if schedule_task is not None:
-                schedule_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await schedule_task
             if snapshot_task is not None:
                 snapshot_task.cancel()
                 with suppress(asyncio.CancelledError):

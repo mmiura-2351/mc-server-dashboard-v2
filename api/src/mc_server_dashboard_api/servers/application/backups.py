@@ -51,6 +51,7 @@ on Storage is idempotent, so the archive delete is safe to retry.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import hashlib
 import io
@@ -182,6 +183,16 @@ _PROPERTIES_REL_PATH = "server.properties"
 # PAX long name compresses to almost nothing, so an unbounded echo would amplify a
 # tiny upload into a huge 422 body.
 _MAX_ECHOED_NAME_CHARS = 256
+
+# How long a backup that failed or was cancelled before its row's COMMIT spends
+# deleting its archive (issue #4109). A store that does not answer holds the
+# backup, and an API shutdown that cancelled it, no longer than this.
+_DISCARD_TIMEOUT_SECONDS = 30.0
+
+# Archive deletes still running after their backup stopped waiting (issue
+# #4109): the strong reference keeps a delete alive to its end once a later
+# cancellation has stopped the wait.
+_DISCARDS: set[asyncio.Future[None]] = set()
 
 
 async def _load(
@@ -318,15 +329,42 @@ async def _discard_archive(
     archive reclaim deletes it after its grace (issue #4106). It runs without a
     lifecycle-lock check: the ref is new, so nothing else can be using the
     archive.
+
+    The failure can be a cancellation, such as an API shutdown's (issue #4109).
+    So the delete runs as its own task, shielded: a later cancellation stops only
+    the wait, and the delete goes on. It is bounded by
+    :data:`_DISCARD_TIMEOUT_SECONDS`, and one that runs out is logged like a
+    delete that failed.
     """
 
-    try:
-        await backup_store.delete(
+    discard = asyncio.ensure_future(
+        _delete_unrecorded_archive(
+            backup_store,
             community_id=community_id,
             server_id=server_id,
             storage_ref=storage_ref,
         )
-    except Exception:
+    )
+    _DISCARDS.add(discard)
+    discard.add_done_callback(_DISCARDS.discard)
+    await asyncio.shield(discard)
+
+
+async def _delete_unrecorded_archive(
+    backup_store: BackupArchiveStore,
+    *,
+    community_id: CommunityId,
+    server_id: ServerId,
+    storage_ref: str,
+) -> None:
+    try:
+        async with asyncio.timeout(_DISCARD_TIMEOUT_SECONDS):
+            await backup_store.delete(
+                community_id=community_id,
+                server_id=server_id,
+                storage_ref=storage_ref,
+            )
+    except Exception:  # a delete that ran out of time included
         _LOG.warning(
             "could not delete the archive of a backup whose row was not recorded",
             exc_info=True,

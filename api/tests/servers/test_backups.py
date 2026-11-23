@@ -2089,6 +2089,79 @@ async def test_a_create_cancelled_after_its_archive_deletes_it() -> None:
     assert archive.archives == set()
 
 
+# The delete of a cancelled create's archive is shielded and bounded (issue
+# #4109): a later cancellation stops only the wait, and a store that does not
+# answer holds the create, and the shutdown that cancelled it, no longer than
+# the bound.
+
+
+class _DeleteWaits(_Hangs):
+    """Hangs at the size read, and its archive delete waits for ``release``."""
+
+    def __init__(self) -> None:
+        super().__init__("size")
+        self.deleting = asyncio.Event()
+        self.release = asyncio.Event()
+        self.done = asyncio.Event()
+
+    async def delete(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> None:
+        self.deleting.set()
+        await self.release.wait()
+        await super().delete(
+            community_id=community_id, server_id=server_id, storage_ref=storage_ref
+        )
+        self.done.set()
+
+
+def _scheduled_create(
+    archive: FakeBackupArchiveStore, server: Server
+) -> asyncio.Task[Backup]:
+    create = _make_create(_outage_uow(server), FakeControlPlane(), archive)
+    return asyncio.create_task(
+        create(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            source=BackupSource.SCHEDULED,
+        )
+    )
+
+
+async def test_a_create_cancelled_again_while_deleting_its_archive_deletes_it() -> None:
+    archive = _DeleteWaits()
+    create = _scheduled_create(archive, _at_rest())
+    await archive.entered.wait()
+    create.cancel()
+    await archive.deleting.wait()
+
+    create.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await create
+    archive.release.set()
+    async with asyncio.timeout(5):
+        await archive.done.wait()
+
+    assert archive.archives == set()
+
+
+async def test_a_create_whose_archive_delete_never_answers_ends_at_the_bound(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(backups_module, "_DISCARD_TIMEOUT_SECONDS", 0.01)
+    archive = _DeleteWaits()
+    create = _scheduled_create(archive, _at_rest())
+    await archive.entered.wait()
+
+    create.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        async with asyncio.timeout(5):
+            await create
+
+    (record,) = [r for r in caplog.records if r.name == backups_module.__name__]
+    assert record.levelno == logging.WARNING
+
+
 async def test_create_whose_row_cannot_be_recorded_deletes_its_archive() -> None:
     server = _at_rest()
     uow = _outage_uow(server)
