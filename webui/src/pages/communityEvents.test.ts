@@ -70,6 +70,7 @@ function snapshotFrame(
     crash_reason?: string | null;
     crash_detail?: string | null;
     crash_not_restarted?: boolean;
+    final_snapshot_refusal?: string | null;
   }[],
 ) {
   return JSON.stringify({
@@ -221,6 +222,63 @@ describe("parseCommunityFrame", () => {
           assignedWorkerId: "w1",
         },
         { serverId: "s2", state: "stopped", assignedWorkerId: null },
+      ],
+    });
+  });
+
+  // A refusal of the stop's final snapshot is published on its own (#4054),
+  // so a frame carrying only it is not malformed (#4057).
+  it("parses a status frame that carries only the final-snapshot refusal (#4057)", () => {
+    const refusalFrame = (payload: Record<string, unknown>) =>
+      JSON.stringify({ stream: "status", ts: "t", payload, server_id: "s1" });
+    expect(
+      parseCommunityFrame(refusalFrame({ final_snapshot_refusal: "busy" })),
+    ).toEqual({
+      kind: "status",
+      serverId: "s1",
+      finalSnapshotRefusal: "busy",
+    });
+    expect(
+      parseCommunityFrame(
+        refusalFrame({
+          assigned_worker_id: null,
+          final_snapshot_refusal: null,
+        }),
+      ),
+    ).toEqual({
+      kind: "status",
+      serverId: "s1",
+      assignedWorkerId: null,
+      finalSnapshotRefusal: null,
+    });
+    expect(
+      parseCommunityFrame(refusalFrame({ final_snapshot_refusal: 7 })),
+    ).toBeNull();
+  });
+
+  it("parses each snapshot entry's final-snapshot refusal (#4057)", () => {
+    expect(
+      parseCommunityFrame(
+        snapshotFrame([
+          {
+            server_id: "s1",
+            state: "stopped",
+            final_snapshot_refusal: "unavailable",
+          },
+          { server_id: "s2", state: "stopped", final_snapshot_refusal: null },
+          { server_id: "s3", state: "running" },
+        ]),
+      ),
+    ).toEqual({
+      kind: "snapshot",
+      servers: [
+        {
+          serverId: "s1",
+          state: "stopped",
+          finalSnapshotRefusal: "unavailable",
+        },
+        { serverId: "s2", state: "stopped", finalSnapshotRefusal: null },
+        { serverId: "s3", state: "running" },
       ],
     });
   });

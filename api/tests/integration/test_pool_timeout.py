@@ -166,7 +166,7 @@ async def test_a_report_whose_retries_wait_out_the_pool_stays_held(
     )
     h = _Harness(
         InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
-        FakeClock(_T0),
+        world.fleet_clock(),
         state_sink=sink,
         database_ping=FakeDatabasePing(reachable=True),
     )

@@ -18,6 +18,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from sqlalchemy import delete, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -337,8 +338,12 @@ class SqlAlchemyScheduleRunRepository(ScheduleRunRepository):
         self._session = session
 
     async def add(self, run: ScheduleRun) -> None:
-        self._session.add(
-            ScheduleRunModel(
+        # Executed rather than staged, so a run already recorded under this id
+        # is left as it is instead of failing the COMMIT on the primary key
+        # (issue #4141).
+        stmt = (
+            pg_insert(ScheduleRunModel)
+            .values(
                 id=run.id.value,
                 schedule_id=run.schedule_id.value,
                 started_at=run.started_at,
@@ -346,7 +351,9 @@ class SqlAlchemyScheduleRunRepository(ScheduleRunRepository):
                 outcome=run.outcome.value,
                 detail=run.detail,
             )
+            .on_conflict_do_nothing(index_elements=[ScheduleRunModel.id])
         )
+        await self._session.execute(stmt)
 
     async def list_for_schedule(self, schedule_id: ScheduleId) -> list[ScheduleRun]:
         stmt = (

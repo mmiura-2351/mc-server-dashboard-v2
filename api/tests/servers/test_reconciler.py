@@ -14,6 +14,7 @@ import asyncio
 import datetime as dt
 import logging
 import uuid
+from collections.abc import Callable
 
 import pytest
 
@@ -58,6 +59,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
+    FinalSnapshotRefusedError,
     InvalidLifecycleTransitionError,
 )
 from mc_server_dashboard_api.servers.domain.store_generation import (
@@ -67,6 +69,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     CrashReason,
     DesiredState,
+    FinalSnapshotRefusal,
     ObservedState,
     ServerId,
     ServerName,
@@ -78,6 +81,7 @@ from tests.fleet.fakes import FakeClock as FleetFakeClock
 from tests.fleet.fakes import make_worker
 from tests.servers.contract_table import worker_status
 from tests.servers.fakes import (
+    DatabaseOutageError,
     FakeClock,
     FakeControlPlane,
     FakeFileStore,
@@ -86,6 +90,7 @@ from tests.servers.fakes import (
     FakeStoreGenerationReader,
     FakeUnitOfWork,
     PlacementSequenceControlPlane,
+    RefusalWriteFailsRepository,
     session_ends_as_step_a_exits,
 )
 
@@ -101,6 +106,9 @@ _REFUSED_GRACE = 5
 # The restart budget (issue #3209): ABOVE the full grace so a test can pin a
 # divergence age between them and prove the budget, not a grace, held the start back.
 _RESTART_BUDGET = 120
+# How long a Worker reads not connected before the tick marks its servers
+# unknown itself (issue #4130).
+_HEARTBEAT_TIMEOUT = 30
 _PAST_GRACE = _NOW - dt.timedelta(seconds=_GRACE + 1)
 # This process's control-plane listener started well before every other instant
 # here, unless a test says otherwise (issue #3916).
@@ -209,6 +217,7 @@ def _reconciler(
         held_start_grace_seconds=_HELD_GRACE,
         refused_stop_grace_seconds=_REFUSED_GRACE,
         restart_timeout_seconds=_RESTART_BUDGET,
+        heartbeat_timeout_seconds=_HEARTBEAT_TIMEOUT,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
         listener_started_at=listener_started_at,
@@ -1672,6 +1681,65 @@ async def test_an_unavailable_final_snapshot_refusal_backs_off() -> None:
     await reconciler.tick()
     assert [k for k, _, _ in cp.dispatched] == ["snapshot", "snapshot"]
     assert uow.servers.by_id[server.id].assigned_worker_id is None
+
+
+@pytest.mark.parametrize(
+    ("code", "refusal"),
+    [
+        (CommandStatus.BUSY, FinalSnapshotRefusal.BUSY),
+        (CommandStatus.UNAVAILABLE, FinalSnapshotRefusal.UNAVAILABLE),
+    ],
+    ids=["busy", "unavailable"],
+)
+async def test_a_refused_retry_whose_refusal_write_fails_is_still_a_refusal(
+    code: CommandStatus,
+    refusal: FinalSnapshotRefusal,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #4103: a held row whose refusal was not written, and recorded for
+    # the short grace, as a refused stop whose write failed leaves it. The
+    # retry's write fails too. The attempt is still the refusal it is, BUSY not
+    # counted and UNAVAILABLE counted, not a failed action that backs off. The
+    # row stays held, and the next refused retry records the refusal.
+    repo = RefusalWriteFailsRepository(DatabaseOutageError("database unreachable"))
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.STOPPED,
+        worker=_WORKER,
+        observed_at=_NOW,
+        updated_at=_NOW,
+    )
+    repo.seed(server)
+    unrecorded = UnrecordedStops()
+    unrecorded.record(server.id, at=_NOW)
+    clock = FakeClock(_NOW)
+    cp = _RefusedSnapshots([code, code])
+    reconciler = _reconciler(
+        FakeUnitOfWork(servers=repo), cp, clock, unrecorded_stops=unrecorded
+    )
+
+    _at(_REFUSED_GRACE + 1, clock)
+    with caplog.at_level(logging.WARNING):
+        await reconciler.tick()
+
+    assert [k for k, _, _ in cp.dispatched] == ["snapshot"]
+    assert repo.refusal_writes == 1
+    assert not [r for r in caplog.records if "backing off" in r.getMessage()]
+    if code is CommandStatus.BUSY:
+        assert server.id not in reconciler._attempts
+    else:
+        assert reconciler._attempts[server.id].failures == 1
+    stored = repo.by_id[server.id]
+    assert stored.assigned_worker_id == _WORKER
+    assert stored.final_snapshot_refusal is None
+
+    # Past the short grace and the backoff's base of 30 s.
+    _at(_REFUSED_GRACE + 1 + 31, clock)
+    await reconciler.tick()
+    assert [k for k, _, _ in cp.dispatched] == ["snapshot", "snapshot"]
+    stored = repo.by_id[server.id]
+    assert stored.assigned_worker_id == _WORKER
+    assert stored.final_snapshot_refusal is refusal
 
 
 async def test_a_refusal_is_superseded_by_a_drop_of_its_worker() -> None:
@@ -3281,6 +3349,7 @@ def _concurrent_reconciler(
         held_start_grace_seconds=_HELD_GRACE,
         refused_stop_grace_seconds=_REFUSED_GRACE,
         restart_timeout_seconds=_RESTART_BUDGET,
+        heartbeat_timeout_seconds=_HEARTBEAT_TIMEOUT,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
         listener_started_at=_STARTED_LONG_AGO,
@@ -3401,6 +3470,7 @@ async def test_failure_in_one_action_does_not_poison_others() -> None:
         held_start_grace_seconds=_HELD_GRACE,
         refused_stop_grace_seconds=_REFUSED_GRACE,
         restart_timeout_seconds=_RESTART_BUDGET,
+        heartbeat_timeout_seconds=_HEARTBEAT_TIMEOUT,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
         listener_started_at=_STARTED_LONG_AGO,
@@ -3945,6 +4015,7 @@ async def test_a_worker_back_within_a_grace_of_its_drop_is_owed_its_row(
     # Back on a new session, past the failure's backoff.
     cp._connected[_WORKER] = True
     del cp.offline_since[_WORKER]
+    del cp.session_ended_at[_WORKER]
     clock.set(_NOW + dt.timedelta(seconds=_GRACE - 1))
     await reconciler.tick()
 
@@ -4107,10 +4178,12 @@ async def test_a_record_made_since_the_drop_keeps_the_short_grace(
 # --- a finished stop's failed write is stamped as it begins (issue #3981) ---
 #
 # The record of a finished stop whose write failed carries the instant the
-# write began, by which time the Worker had answered, not the instant it
-# raised. A Worker that drops while the write fails is then newer than the
-# record, so its row waits the full grace from the drop: the stop's final
-# snapshot was never sent, and the Worker may be back with the working set.
+# Worker's answer was read (issue #4117), or, for an outcome that carries none
+# as here, the instant the write began, by which time the Worker had answered,
+# not the instant it raised. A Worker that drops while the write fails is then
+# newer than the record, so its row waits the full grace from the drop: the
+# stop's final snapshot was never sent, and the Worker may be back with the
+# working set.
 
 
 class _SlowFailingWrite(FakeServerRepository):
@@ -4310,3 +4383,495 @@ async def test_worker_reported_unknown_unassigned_is_at_rest_not_wedged() -> Non
     assert cp.dispatched == []
     assert await uow.servers.list_reconcilable() == []
     assert uow.servers.by_id[server.id].is_at_rest()
+
+
+# --- a gone Worker's servers its teardown did not mark (issue #4130) -------
+
+_GONE = WorkerId(uuid.uuid4())
+
+
+def _observed(uow: FakeUnitOfWork, server: Server) -> tuple[ObservedState, object]:
+    row = uow.servers.by_id[server.id]
+    return row.observed_state, row.observed_at
+
+
+def _running_on(worker: WorkerId) -> Server:
+    return _server(
+        desired=DesiredState.RUNNING, observed=ObservedState.RUNNING, worker=worker
+    )
+
+
+def _registry_reconciler(
+    uow: FakeUnitOfWork, registry: InMemoryWorkerRegistry, clock: FakeClock
+) -> RunReconcilerTick:
+    cp = FleetControlPlaneAdapter(registry=registry, control_plane=_CapturingFleet())
+    return _reconciler(uow, cp, clock)
+
+
+def _registry_at_now() -> InMemoryWorkerRegistry:
+    return InMemoryWorkerRegistry(
+        clock=FleetFakeClock(_NOW),
+        heartbeat_timeout=dt.timedelta(seconds=_HEARTBEAT_TIMEOUT),
+    )
+
+
+async def test_a_gone_workers_servers_are_marked_at_its_sessions_end() -> None:
+    # Through the real registry: the teardown marked the session's end, and
+    # the write is stamped with it, as the teardown's own would have been.
+    registry = _registry_at_now()
+    session = registry.register(make_worker(worker_id=str(_GONE.value), at=_NOW))
+    registry.mark_disconnected(FleetWorkerId(str(_GONE.value)), session)
+    uow = FakeUnitOfWork()
+    server = _running_on(_GONE)
+    uow.servers.seed(server)
+    clock = FakeClock(_NOW + dt.timedelta(seconds=_HEARTBEAT_TIMEOUT))
+
+    await _registry_reconciler(uow, registry, clock).tick()
+
+    assert _observed(uow, server) == (ObservedState.UNKNOWN, _NOW)
+
+
+def _live(registry: InMemoryWorkerRegistry) -> None:
+    registry.register(make_worker(worker_id=str(_GONE.value), at=_NOW))
+
+
+def _back_after_a_drop(registry: InMemoryWorkerRegistry) -> None:
+    old = registry.register(make_worker(worker_id=str(_GONE.value), at=_NOW))
+    registry.mark_disconnected(FleetWorkerId(str(_GONE.value)), old)
+    registry.register(make_worker(worker_id=str(_GONE.value), at=_NOW))
+
+
+def _lapsed(registry: InMemoryWorkerRegistry) -> None:
+    # Its heartbeats lapsed after the server's last report, and the watchdog
+    # has not ended its session yet.
+    at = _NOW - dt.timedelta(seconds=_HEARTBEAT_TIMEOUT + 1)
+    registry.register(make_worker(worker_id=str(_GONE.value), at=at))
+
+
+def _never_registered(registry: InMemoryWorkerRegistry) -> None:
+    # As at the first tick, before any Worker has registered with this
+    # process: the startup reset has already run over these rows.
+    pass
+
+
+@pytest.mark.parametrize(
+    "worker",
+    [_live, _back_after_a_drop, _lapsed, _never_registered],
+    ids=["live", "back-after-a-drop", "lapsed", "never-registered"],
+)
+async def test_a_worker_with_no_ended_session_keeps_its_servers(
+    worker: Callable[[InMemoryWorkerRegistry], None],
+) -> None:
+    registry = _registry_at_now()
+    worker(registry)
+    uow = FakeUnitOfWork()
+    server = _running_on(_GONE)
+    uow.servers.seed(server)
+
+    await _registry_reconciler(
+        uow, registry, FakeClock(_NOW + dt.timedelta(hours=1))
+    ).tick()
+
+    assert _observed(uow, server) == (ObservedState.RUNNING, _PAST_GRACE)
+
+
+async def test_a_gone_workers_servers_are_marked_once_the_grace_has_passed() -> None:
+    uow = FakeUnitOfWork()
+    server = _running_on(_GONE)
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    cp.end_session(_GONE, at=_NOW)
+    clock = FakeClock(_NOW + dt.timedelta(seconds=_HEARTBEAT_TIMEOUT - 1))
+    reconciler = _reconciler(uow, cp, clock)
+
+    await reconciler.tick()
+    assert _observed(uow, server) == (ObservedState.RUNNING, _PAST_GRACE)
+
+    clock.set(_NOW + dt.timedelta(seconds=_HEARTBEAT_TIMEOUT))
+    await reconciler.tick()
+    assert _observed(uow, server) == (ObservedState.UNKNOWN, _NOW)
+
+
+async def test_a_gone_workers_servers_already_unknown_are_left_alone(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The teardown's write landed, after the session's end: nothing is left
+    # to mark, so no tick writes or logs a mark again, and a stopped intent's
+    # release still comes a full grace after that write.
+    landed = _PAST_GRACE
+    uow = FakeUnitOfWork()
+    stopped = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.UNKNOWN,
+        worker=_GONE,
+        observed_at=landed,
+    )
+    running = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.UNKNOWN,
+        worker=_GONE,
+        observed_at=landed,
+    )
+    uow.servers.seed(stopped)
+    uow.servers.seed(running)
+    cp = FakeControlPlane()
+    cp.end_session(_GONE, at=landed - dt.timedelta(microseconds=1))
+
+    with caplog.at_level(logging.INFO, logger="mc_server_dashboard_api"):
+        await _reconciler(uow, cp, FakeClock(_NOW)).tick()
+
+    assert uow.servers.by_id[stopped.id].assigned_worker_id is None
+    assert _observed(uow, running) == (ObservedState.UNKNOWN, landed)
+    assert [r for r in caplog.records if "marked them unknown" in r.getMessage()] == []
+
+
+class _SelectionMarksRepository(FakeServerRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.selected = False
+
+    async def workers_with_trusted_observed_state(self) -> set[WorkerId]:
+        self.selected = True
+        return await super().workers_with_trusted_observed_state()
+
+
+class _ReportsAfterSelection(FakeUnitOfWork):
+    """Runs ``report`` as the first unit of work after the selection opens."""
+
+    servers: _SelectionMarksRepository
+
+    def __init__(self, report: Callable[[], None]) -> None:
+        super().__init__(servers=_SelectionMarksRepository())
+        self._report: Callable[[], None] | None = report
+
+    async def __aenter__(self) -> _ReportsAfterSelection:
+        if self.servers.selected and self._report is not None:
+            report, self._report = self._report, None
+            report()
+        return self
+
+
+async def test_a_report_committed_while_the_mark_waits_is_kept() -> None:
+    # The Worker's next session reports while the write waits on the
+    # database. That report is newer than the session's end the write is
+    # stamped with, and survives it.
+    clock = FakeClock(_NOW)
+    reported_at = _NOW + dt.timedelta(seconds=1)
+
+    def report() -> None:
+        row = uow.servers.by_id[server.id]
+        row.observed_state = ObservedState.RUNNING
+        row.observed_at = reported_at
+        clock.set(_NOW + dt.timedelta(seconds=2))
+
+    uow = _ReportsAfterSelection(report)
+    server = _server(
+        desired=DesiredState.RUNNING, observed=ObservedState.STARTING, worker=_GONE
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    cp.end_session(_GONE, at=_NOW - dt.timedelta(seconds=_HEARTBEAT_TIMEOUT))
+
+    await _reconciler(uow, cp, clock).tick()
+
+    assert _observed(uow, server) == (ObservedState.RUNNING, reported_at)
+
+
+class _MarkFailsRepository(FakeServerRepository):
+    async def mark_worker_servers_unknown(
+        self, worker_id: WorkerId, observed_at: dt.datetime
+    ) -> None:
+        raise RuntimeError("the database is down")
+
+
+async def test_a_failed_mark_is_logged_and_the_tick_goes_on(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    uow = FakeUnitOfWork(servers=_MarkFailsRepository())
+    gone = _running_on(_GONE)
+    crashed = _server(
+        desired=DesiredState.RUNNING, observed=ObservedState.CRASHED, worker=_WORKER
+    )
+    uow.servers.seed(gone)
+    uow.servers.seed(crashed)
+    cp = FakeControlPlane()
+    cp.end_session(_GONE, at=_NOW - dt.timedelta(seconds=_HEARTBEAT_TIMEOUT))
+
+    with caplog.at_level(logging.WARNING, logger="mc_server_dashboard_api"):
+        await _reconciler(uow, cp, FakeClock(_NOW)).tick()
+
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+    assert [
+        record.levelno
+        for record in caplog.records
+        if str(_GONE.value) in record.getMessage()
+    ] == [logging.WARNING]
+
+
+# --- a record carries the instant its answer was read (issues #4117, #4118) --
+#
+# A refused stop, and a finished stop whose write failed, are recorded for the
+# reconciler with the instant the API read the Worker's answer that settled
+# them, as the observed state converged from that answer is stamped. A Worker
+# report is stamped as it is read, so a report read after the answer supersedes
+# the record, and one read before it does not, however long the answer waited
+# to be handled.
+
+_STOP_READ = _NOW - dt.timedelta(seconds=2)
+_SNAPSHOT_READ = _NOW - dt.timedelta(seconds=1)
+
+
+def _read_at(status: CommandStatus, at: dt.datetime) -> CommandOutcome:
+    return CommandOutcome(status=status, message="answered", answered_at=at)
+
+
+# Each place a record is made, by the one path that reaches it: the row's
+# (desired, observed), the Worker's answers, the write that fails, what the call
+# raises, and the instant the record must carry.
+_RECORDS = {
+    # The stop that set the intent, and the reconciler's re-sent stop, refused.
+    "stop-refused": (
+        DesiredState.RUNNING,
+        ObservedState.RUNNING,
+        {"stop": _read_at(CommandStatus.INTERNAL, _STOP_READ)},
+        None,
+        CommandDispatchError,
+        _STOP_READ,
+    ),
+    "redispatch-stop-refused": (
+        DesiredState.STOPPED,
+        ObservedState.RUNNING,
+        {"stop": _read_at(CommandStatus.INTERNAL, _STOP_READ)},
+        None,
+        CommandDispatchError,
+        _STOP_READ,
+    ),
+    # A confirmed stop, or one answered that no instance remains, whose observed
+    # write fails.
+    "stopped-write": (
+        DesiredState.RUNNING,
+        ObservedState.RUNNING,
+        {"stop": _read_at(CommandStatus.OK, _STOP_READ)},
+        "record_observed_state",
+        ConnectionRefusedError,
+        _STOP_READ,
+    ),
+    "not-found-write": (
+        DesiredState.RUNNING,
+        ObservedState.RUNNING,
+        {"stop": _read_at(CommandStatus.SERVER_NOT_FOUND, _STOP_READ)},
+        "record_observed_state",
+        ConnectionRefusedError,
+        _STOP_READ,
+    ),
+    # Either release after the final snapshot fails: it follows the snapshot's
+    # answer, not the stop's.
+    "stopped-release": (
+        DesiredState.RUNNING,
+        ObservedState.RUNNING,
+        {
+            "stop": _read_at(CommandStatus.OK, _STOP_READ),
+            "snapshot": _read_at(CommandStatus.OK, _SNAPSHOT_READ),
+        },
+        "clear_assignment_after_final_snapshot",
+        ConnectionRefusedError,
+        _SNAPSHOT_READ,
+    ),
+    "not-found-release": (
+        DesiredState.RUNNING,
+        ObservedState.RUNNING,
+        {
+            "stop": _read_at(CommandStatus.SERVER_NOT_FOUND, _STOP_READ),
+            "snapshot": _read_at(CommandStatus.OK, _SNAPSHOT_READ),
+        },
+        "clear_assignment_after_final_snapshot",
+        ConnectionRefusedError,
+        _SNAPSHOT_READ,
+    ),
+    # The stale-stop arm: its release after the snapshot fails, or the Worker
+    # refuses the snapshot.
+    "stale-release": (
+        DesiredState.STOPPED,
+        ObservedState.STOPPED,
+        {"snapshot": _read_at(CommandStatus.OK, _SNAPSHOT_READ)},
+        "clear_stale_assignment",
+        ConnectionRefusedError,
+        _SNAPSHOT_READ,
+    ),
+    "snapshot-refused": (
+        DesiredState.STOPPED,
+        ObservedState.STOPPED,
+        {"snapshot": _read_at(CommandStatus.BUSY, _SNAPSHOT_READ)},
+        None,
+        FinalSnapshotRefusedError,
+        _SNAPSHOT_READ,
+    ),
+    # The late result of an abandoned final snapshot: a refusal, or a release
+    # whose write fails.
+    "late-refused": (
+        DesiredState.STOPPED,
+        ObservedState.STOPPED,
+        {"late": _read_at(CommandStatus.BUSY, _SNAPSHOT_READ)},
+        None,
+        None,
+        _SNAPSHOT_READ,
+    ),
+    "late-release": (
+        DesiredState.STOPPED,
+        ObservedState.STOPPED,
+        {"late": _read_at(CommandStatus.OK, _SNAPSHOT_READ)},
+        "get_by_id",
+        ConnectionRefusedError,
+        _SNAPSHOT_READ,
+    ),
+}
+
+
+async def _make_record(entry: str, stop: StopServer, server: Server) -> None:
+    c, s = server.community_id, server.id
+    if entry.startswith("late"):
+        late = stop.control_plane
+        assert isinstance(late, _LateResult)
+        await stop.clear_assignment_after_late_snapshot(
+            server_id=s, worker_id=_WORKER, outcome=late.result
+        )
+    elif entry.startswith("stale") or entry == "snapshot-refused":
+        await stop.clear_stale_assignment(
+            community_id=c, server_id=s, worker_connected=True
+        )
+    elif entry.startswith("redispatch"):
+        await stop.redispatch_stop(community_id=c, server_id=s)
+    else:
+        await stop(community_id=c, server_id=s)
+
+
+class _LateResult(FakeControlPlane):
+    """Carries the late result a test hands the late-snapshot release."""
+
+    def __init__(self, outcomes: dict[str, CommandOutcome]) -> None:
+        self.result = outcomes.pop("late", CommandOutcome(status=CommandStatus.OK))
+        super().__init__(outcomes=outcomes)
+
+
+@pytest.mark.parametrize("entry", list(_RECORDS))
+async def test_a_record_carries_the_instant_its_answer_was_read(entry: str) -> None:
+    desired, observed, answers, failing_write, raised, read_at = _RECORDS[entry]
+    repo = _OutageServerRepository()
+    server = _server(
+        desired=desired, observed=observed, worker=_WORKER, observed_at=None
+    )
+    repo.seed(server)
+    repo.down = set() if failing_write is None else {failing_write}
+    refusals = StopDispatchRefusals()
+    unrecorded = UnrecordedStops()
+    stop = StopServer(
+        uow=FakeUnitOfWork(servers=repo),
+        control_plane=_LateResult(dict(answers)),
+        clock=FakeClock(_NOW),
+        stop_refusals=refusals,
+        unrecorded_stops=unrecorded,
+    )
+
+    if raised is None:
+        await _make_record(entry, stop, server)
+    else:
+        with pytest.raises(raised):
+            await _make_record(entry, stop, server)
+
+    recorded = (
+        refusals.refused_at(server.id)
+        if entry.endswith("stop-refused")
+        else unrecorded.recorded_at(server.id)
+    )
+    assert recorded == read_at
+
+
+class _StopAnswerWaits(FakeControlPlane):
+    """Refuses the stop, its answer read at ``answered_at`` and handled at
+    ``handled_at``. Meanwhile a ``running`` report of the server, read at
+    ``reported_at``, is written, as the servicer writes a report queued ahead of
+    the answer or behind it before the stop's caller resumes."""
+
+    def __init__(
+        self,
+        repo: FakeServerRepository,
+        clock: FakeClock,
+        *,
+        answered_at: dt.datetime,
+        reported_at: dt.datetime,
+        handled_at: dt.datetime,
+    ) -> None:
+        super().__init__(
+            outcomes={"stop": _read_at(CommandStatus.INTERNAL, answered_at)}
+        )
+        self._repo = repo
+        self._clock = clock
+        self._reported_at = reported_at
+        self._handled_at = handled_at
+
+    async def stop(
+        self, *, worker_id: WorkerId, server_id: ServerId, force: bool = False
+    ) -> CommandOutcome:
+        outcome = await super().stop(
+            worker_id=worker_id, server_id=server_id, force=force
+        )
+        await self._repo.record_observed_state(
+            server_id,
+            ObservedState.RUNNING,
+            self._reported_at,
+            expected_worker=worker_id,
+        )
+        self._clock.set(self._handled_at)
+        return outcome
+
+
+@pytest.mark.parametrize(
+    ("report", "replayed"),
+    [("before-the-answer", ["stop", "snapshot"]), ("after-the-answer", [])],
+)
+async def test_a_report_read_after_a_refusal_supersedes_it_however_late_it_is_handled(
+    report: str, replayed: list[str]
+) -> None:
+    # The operator's stop commits its intent, and the Worker refuses it. Its
+    # answer waits a while behind a slow write before the stop resumes to
+    # record the refusal, and a report of the server is written meanwhile. One
+    # read after the answer is newer than the refusal: what happened since is
+    # unknown again, so the replay waits the full grace. One read before it is
+    # older, and the replay takes the short grace. The report's write lands
+    # before the refusal is recorded either way.
+    committed = _NOW
+    answered = committed + dt.timedelta(seconds=2)
+    reported = answered + dt.timedelta(seconds=-1 if report.startswith("before") else 1)
+    handled = answered + dt.timedelta(seconds=2)
+    uow = FakeUnitOfWork()
+    long_running = committed - dt.timedelta(seconds=3600)
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.RUNNING,
+        worker=_WORKER,
+        observed_at=long_running,
+        updated_at=long_running,
+    )
+    uow.servers.seed(server)
+    refusals = StopDispatchRefusals()
+    clock = FakeClock(committed)
+    refusing = _StopAnswerWaits(
+        uow.servers,
+        clock,
+        answered_at=answered,
+        reported_at=reported,
+        handled_at=handled,
+    )
+    with pytest.raises(CommandDispatchError):
+        await StopServer(
+            uow=uow, control_plane=refusing, clock=clock, stop_refusals=refusals
+        )(community_id=server.community_id, server_id=server.id)
+    stored = uow.servers.by_id[server.id]
+    assert (stored.updated_at, stored.observed_at) == (committed, reported)
+
+    cp = FakeControlPlane()
+    clock.set(handled + dt.timedelta(seconds=_REFUSED_GRACE + 1))
+    assert clock.now() - reported < dt.timedelta(seconds=_GRACE)
+    await _reconciler(uow, cp, clock, stop_refusals=refusals).tick()
+
+    assert [k for k, _, _ in cp.dispatched] == replayed

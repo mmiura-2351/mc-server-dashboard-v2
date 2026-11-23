@@ -112,6 +112,21 @@ class UnavailableWorkerState(enum.Enum):
     NO_ANSWER = "no_answer"
 
 
+class HeldServerWorkerNotConnectedError(WorkerUnavailableError):
+    """A stop of a server held by a refused final snapshot found its Worker gone.
+
+    The server is ``desired=stopped`` and still assigned, with the refusal
+    recorded (``final_snapshot_refusal``), so the snapshot it is held for is
+    still owed (issue #4111). Without its Worker the stop can neither retry it
+    nor release the server without it, so it changes nothing. The release
+    comes from the Worker's return, the disconnected-Worker grace, or the
+    explicit release without the snapshot, which the edge names in the 503.
+    """
+
+    def __init__(self, *args: object) -> None:
+        super().__init__(*args, worker_state=UnavailableWorkerState.NOT_CONNECTED)
+
+
 class CommandStatus(enum.Enum):
     """The outcome class of a dispatched command (mirrors the wire result code)."""
 
@@ -223,6 +238,13 @@ class CommandOutcome:
     # have": the Worker says it on a hydrate's TRANSFER_FAILED only, and an older
     # Worker never does.
     swap_began: bool | None = None
+    # The instant the API read the Worker's answer, before any await, as it
+    # stamps a Worker's report (issues #4117, #4118). The observed state a
+    # lifecycle operation converges from the answer is stamped with it, so a
+    # report read after the answer wins over the convergence and one read before
+    # it loses, whichever is written first. ``None`` for an outcome no Worker
+    # sent.
+    answered_at: dt.datetime | None = None
 
     @property
     def success(self) -> bool:
@@ -280,6 +302,19 @@ class ControlPlane(abc.ABC):
         ``None`` while the Worker is connected, and for a Worker that has not
         registered with this process. The reconciler releases a disconnected
         Worker's server no sooner than a grace after it.
+        """
+
+    @abc.abstractmethod
+    def worker_session_ended_at(self, *, worker_id: WorkerId) -> dt.datetime | None:
+        """The instant ``worker_id``'s current session ended (issue #4130).
+
+        Set as the session's teardown, or the refusal of its registration,
+        marks the Worker disconnected, which comes after every report of that
+        session. ``None`` while that session is current, a Worker whose
+        heartbeats have lapsed included, and for a Worker that has not
+        registered with this process. The reconciler marks the servers of a
+        Worker whose session ended a grace ago ``unknown``, stamped with this
+        instant, in case the teardown's own write did not land.
         """
 
     @abc.abstractmethod

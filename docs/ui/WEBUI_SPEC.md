@@ -105,7 +105,7 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | GET / HEAD | `…/{sid}/export` | ZIP export (download). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB export straight to disk, or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried. The response declares `Cache-Control: no-store` under every credential. `HEAD` is the metadata probe: the same gate and the same headers with no body — including no `Content-Length`, since the zip is built incrementally and the `GET` declares none either — and it neither builds the zip nor records a `server:export` audit event. |
 | POST | `…/{sid}/export/download-grant` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `file:read` gate as the export, and the same pre-flight — a running server is 409 `server_unsettled` and no grant is issued; `auth.token.download_grant_ttl_seconds`, 30 s by default (AUTH_API.md Section 3). |
 | GET / PATCH / DELETE | `…/{sid}` | Read / update (name, config, game_port) / delete. Every PATCH edit needs `server:update`. A `name` that is blank or carries a control character, a line or paragraph separator or a lone surrogate is a `422` (`invalid_server_name`), with nothing changed (#3957, #3988). The check is on the name sent, even when it equals the stored one. The Settings tab sends the name only when it changed (#3988), so a server stored with such a name before the rule still saves its other settings; a rename onto a name another server of the community holds is a `409` (`server_name_exists`), shown as its own toast. Reads return a stored name as it is. `backup_interval_hours` is not a config key; a PATCH carrying it is `422` (`retired_config_key`; DATABASE.md Section 7) — backup cadence is a `backup` schedule. A `config` breaking the blob's bounds is a `422` naming the rule it broke, the same four reasons create answers with — `config_invalid_shape` / `config_null_value` / `config_lone_surrogate` / `config_too_large` (rules and limits: DATABASE.md Section 7). A `game_port` change against a server whose `server.properties` is missing is a `409` (`server_properties_missing`): the rewrite preserves the file's other keys, so it refuses rather than republish one without `rcon.password`. A DELETE needs the server at rest (`409 server_not_stopped` otherwise) and no Worker assigned: a stop holds its Worker until the final snapshot settles and the server is released, which can wait for the reconciler, and a delete before then is a `409` (`server_assigned`) whose `detail` says what holds the server and when to try again. A DELETE that waited out the lifecycle lock's acquire budget behind another lifecycle operation is the `409 server_busy` instead, which a retry in a moment clears. |
-| POST | `…/{sid}/start` · `/stop?force=` · `/restart` | Lifecycle. Stop supports force. A stop of a server already `desired=stopped` but still assigned to a Worker (a drained server still running, a stop left half-done) is accepted and converges it at once, as the reconciler would after its grace window; with no Worker assigned it is `409 invalid_transition`, and while another stop of that server is still converging it is `409 transition_conflict`. A stop of a server `desired=running` with no Worker assigned yet withdraws the start intent and dispatches nothing. A stop whose final snapshot the Worker refuses `BUSY` or `UNAVAILABLE` still answers `200`, with the server stopped, still assigned and `final_snapshot_refusal` set; the API retries the snapshot on its own, and a stop of such a server retries it at once and is `409 final_snapshot_refused` when the Worker refuses it again (#4056). A start of a server whose create seed or import did not finish (`creation_incomplete`, DATABASE.md Section 7) is `409 creation_incomplete`, with nothing written or dispatched: its working set is only what was written, and no retry clears it, so the remedy is to delete the server and create or import it again. A `503 worker_unavailable` from any of the three carries a `worker_state` member, `not_connected` or `no_answer`, when the API knows why the Worker gave no answer ([AUTH_API.md](../app/AUTH_API.md) Section 2); Section 7.4 says how the UI uses it. |
+| POST | `…/{sid}/start` · `/stop?force=` · `/restart` | Lifecycle. Stop supports force. A stop of a server already `desired=stopped` but still assigned to a Worker (a drained server still running, a stop left half-done) is accepted and converges it at once, as the reconciler would after its grace window; with no Worker assigned it is `409 invalid_transition`, and while another stop of that server is still converging it is `409 transition_conflict`. A stop of a server `desired=running` with no Worker assigned yet withdraws the start intent and dispatches nothing. A stop whose final snapshot the Worker refuses `BUSY` or `UNAVAILABLE` still answers `200`, with the server stopped, still assigned and `final_snapshot_refusal` set; the API retries the snapshot on its own, and a stop of such a server retries it at once and is `409 final_snapshot_refused` when the Worker refuses it again (#4056). While that Worker is not connected, the stop releases nothing and is `503 worker_unavailable` with `worker_state: "not_connected"` and a `detail` naming what releases the server: the Worker's return, the reconciler's full grace, or the release without the snapshot below (#4111). A start of a server whose create seed or import did not finish (`creation_incomplete`, DATABASE.md Section 7) is `409 creation_incomplete`, with nothing written or dispatched: its working set is only what was written, and no retry clears it, so the remedy is to delete the server and create or import it again. A `503 worker_unavailable` from any of the three carries a `worker_state` member, `not_connected` or `no_answer`, when the API knows why the Worker gave no answer ([AUTH_API.md](../app/AUTH_API.md) Section 2); Section 7.4 says how the UI uses it. |
 | POST | `…/{sid}/release-without-snapshot` | Release a server whose Worker refused its stop's final snapshot (`final_snapshot_refusal` set) without that snapshot (#4055). Needs `server:stop`; no body; answers the server, unassigned and with `final_snapshot_refusal: null`. It sends the Worker nothing and cannot be undone; what it gives up is in "A stopped server a Worker still holds", below. It is `409 invalid_transition` unless the server is `desired=stopped`, at rest (`stopped`, `crashed` or `unknown`), still assigned to a Worker and holds a refusal: a server held for any other reason waits for its snapshot. It is `409 transition_conflict`, with nothing changed, while a stop of the server is still converging or its final snapshot is still in flight, or when a Worker report lands as it releases. Recorded as `server:release_without_snapshot`, `success` or `denied`. |
 | POST | `…/{sid}/command` | RCON line → `{output}`. `line` is at most 1,446 UTF-8 bytes (`422`; "Console lines" below). |
 | GET | `…/{sid}/files?path=&list=` | Read file (base64) or list directory (entries + `truncated`). |
@@ -125,7 +125,7 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | POST | `…/{sid}/backups/{bid}/download-grant` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `backup:read` gate as the download; `auth.token.download_grant_ttl_seconds`, 30 s by default (AUTH_API.md Section 3). |
 | POST | `…/{sid}/backups/{bid}/restore[?force=true]` | **Server must be stopped.** `?force=true` overrides the quarantine gate. |
 | DELETE | `…/{sid}/backups/{bid}` | Delete. |
-| PUT / DELETE | `…/{sid}/backups/retention` | Set / clear the scheduled-backup retention policy: `{keep_last}` (≥ 1) XOR `{daily, weekly, monthly}` (each ≥ 0, one > 0); an invalid shape is 422 `invalid_retention_policy`. Gated by `backup:schedule`. Applies only to `source=scheduled` backups — manual/uploaded rows are never auto-deleted. Scheduled backups whose `health` is `healthy`, `unknown` or `unreadable` are chosen as keepers first: a `quarantined` one keeps a keep-N slot only when too few non-quarantined ones are left to fill the N, and a tier bucket only when the bucket holds no non-quarantined backup. Setting prunes immediately; thereafter each successful scheduled backup run prunes (each deletion audited as `backup:delete`, no actor). Policy readable as `backup_retention` on the server read; null while unconfigured. |
+| PUT / DELETE | `…/{sid}/backups/retention` | Set / clear the scheduled-backup retention policy: `{keep_last}` (≥ 1) XOR `{daily, weekly, monthly}` (each ≥ 0, one > 0); an invalid shape is 422 `invalid_retention_policy`. Gated by `backup:schedule`. Applies only to `source=scheduled` backups — manual/uploaded rows are never auto-deleted. Scheduled backups are chosen as keepers in three ranks: first those whose `size_bytes` is recorded and whose `health` is `healthy`, `unknown` or `unreadable`, then a `quarantined` one whose `size_bytes` is recorded, then one whose `size_bytes` is null, whatever its `health`. A backup keeps a keep-N slot only when too few backups of the ranks above it are left to fill the N, and a tier bucket only when the bucket holds none of them. Setting prunes immediately; thereafter each successful scheduled backup run prunes (each deletion audited as `backup:delete`, no actor). Policy readable as `backup_retention` on the server read; null while unconfigured. |
 | GET | `…/{sid}/groups` | Groups attached to this server. |
 | GET / POST | `/communities/{cid}/groups` | Player groups (`kind`: `op` \| `whitelist`). |
 | GET / PATCH / DELETE | `…/groups/{gid}` | Read / rename / delete. |
@@ -148,9 +148,11 @@ retry succeeds or someone allowed to stop it releases it without the snapshot
 itself, for up to `reconciler.grace_seconds`, and then records a `skipped` run
 with the detail `server_assigned` (CONFIGURATION.md Section 5.14). The server
 read's `final_snapshot_refusal` says when the Worker has refused that final
-snapshot (`busy` / `unavailable`) rather than not answered yet (#4054). The API
-retries a refused snapshot on its own, with no bound (CONFIGURATION.md Section
-5.6), so such a hold lasts until a retry succeeds or the release below.
+snapshot (`busy` / `unavailable`) rather than not answered it yet (#4054). A
+retry of it left unanswered keeps the refusal, since the snapshot is still owed
+(#4111). The API retries a refused snapshot on its own, with no bound
+(CONFIGURATION.md Section 5.6), so such a hold lasts until a retry succeeds or
+the release below.
 While a refusal is recorded, a holder of `server:stop` can release the
 server without the snapshot (`…/release-without-snapshot`, above; #4055).
 Its confirmation must say the three things the release gives up:
@@ -164,13 +166,14 @@ Its confirmation must say the three things the release gives up:
 - it cannot be undone.
 
 The confirmation is its own dialog, never the force-stop one and never an
-entry of the Stop menu. Its draft wording, to be settled with the UI (#4057):
-title "Release this server without its final save?"; body "The server's host
-has not saved this server's latest world. If you release it now, changes
-since the last snapshot can be lost: they are gone if the server next starts
-on another host, or as soon as its files are edited or restored. A copy of
-the server may still be running on that host. This cannot be undone.";
-confirm (danger) "Release without saving"; cancel has the default focus.
+entry of the Stop menu (Section 6.4; #4057): title "Release this server
+without its final save?"; body "The server's host has not saved this
+server's latest world. If you release it now, changes since the last
+snapshot can be lost: they are gone if the server next starts on another
+host, or as soon as its files are edited or restored. A copy of the server
+may still be running on that host, so starting it elsewhere could run the
+same world twice. This cannot be undone."; confirm (danger) "Release without
+saving"; Cancel has the default focus.
 
 **Request body limits.** Every route reads at most a fixed amount of request
 body and answers a larger one **413**, by `Content-Length` before reading
@@ -465,12 +468,21 @@ released, for the same reason.
 Every change of a server's final-snapshot refusal while a stop still holds its
 Worker publishes a `status` frame `{final_snapshot_refusal}` too, after the
 write that made it commits: `busy` or `unavailable` when that Worker refused
-the stop's final snapshot, `null` when a later attempt was not refused (#4054).
-The same refusal recorded again publishes nothing.
+the stop's final snapshot (#4054). A retry left unanswered changes nothing and
+publishes nothing (#4111); the refusal is cleared only by the release, whose
+frame carries the `null`. The same refusal recorded again publishes nothing,
+except from the held retry of a late final-snapshot result, which publishes it
+even when it finds it recorded, as it does the release (#4104). So does the
+next refused retry after a write of the refusal whose commit failed, since that
+commit may have landed unpublished. An API restart in between loses that, and a
+reload shows the refusal (#4152).
 
 A client applies each `status` frame by setting the fields it carries, so
 another tab's dashboard offers the actions of the current intent without a
-reload (#3428), and gates Start and Stop on the current assignment (#3818).
+reload (#3428), gates Start and Stop on the current assignment (#3818), and
+shows a held server's notice and release by the current refusal (#4057). A
+frame that carries only `final_snapshot_refusal` is one of these, not a
+malformed frame.
 
 Ordering: the subscription is registered before the snapshot is read, so every
 status transition published from then on reaches the subscriber's buffer.
@@ -838,7 +850,43 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   (`409 server_assigned`). While a Worker is assigned, Delete shows disabled
   with "Stop the server and wait for it to be released before deleting it."
   beside it, and the release frame frees it. A `409 server_assigned` that a
-  stale cache let through toasts the same words.
+  stale cache let through toasts the message the at-rest writes below show
+  for that reason (7.4).
+- The at-rest writes (the Files writes, the plugin and resource-pack changes,
+  a backup restore and the Settings save) need the server at rest and
+  released, for the same reason: the API refuses them until the release
+  (`409 server_assigned`, Section 2.3 "A stopped server a Worker still
+  holds"). So while a server at rest still has a Worker assigned, each shows
+  disabled with "The server is still assigned to a Worker. Wait for it to be
+  released, then try again." beside it, until the release frame frees it
+  (#4003). A server not at rest keeps each surface's own stop-the-server
+  rule; a running server is always assigned, and waiting for a release is not
+  its remedy. One rule in `serverState.ts`, `atRestWriteRefusal`, decides it
+  for every surface.
+- A server whose Worker refused the stop's final snapshot
+  (`final_snapshot_refusal` `busy` or `unavailable`, Section 2.3 "A stopped
+  server a Worker still holds") is held with no bound, until a retry of the
+  snapshot succeeds or someone releases it without it (#4056). The header then
+  shows a held notice to every reader, in place of Start's release wait:
+  "The server's host could not take the final save." for `unavailable`, "The
+  server's host is still busy with this server, so it has not taken the final
+  save." for `busy`, each followed by "The save is retried automatically. Until
+  it succeeds, the server cannot be started, edited, backed up or deleted."
+  Start names the notice as its reason (on a dashboard card, as the button's
+  tooltip). The at-rest writes and Delete name the refusal in place of the
+  neutral release reason, for example "The server's host could not take its
+  final save, so the server stays held. The save is retried automatically;
+  wait for it to succeed, then try again." Stop stays offered, and retries
+  the snapshot at once. A holder of `server:stop` also gets **Release without
+  saving…**, a button of its own beside Stop and never an entry of its menu,
+  offered exactly while the API accepts the release: at rest under a stopped
+  intent, still assigned, with a refusal recorded. It opens its own
+  confirmation (Section 2.3), never the force-stop one, with Cancel focused,
+  and its confirm posts `…/release-without-snapshot`. A release that succeeds
+  holds the controls until the settle refetch answers, as a lifecycle request
+  does. The notice, the reasons and the release follow the server read, the
+  snapshot and the `{final_snapshot_refusal}` status frame, and the release
+  frame clears them all (Section 2.6) (#4057).
 - Metrics strip: CPU / memory / players from the `metrics` stream (sparkline,
   last N samples, client-side only).
 - Log tail: last ~200 lines, link to Console tab.
@@ -859,10 +907,23 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 - Text files open in an editor (save = versioned write); binary → download
   only. Path breadcrumbs; upload (w/ "extract ZIP" toggle), mkdir, rename,
   delete; search box (`files/search`).
-- History drawer per file: version list → rollback with confirm.
+- History drawer per file: version list → rollback with confirm. A rollback
+  republishes the at-rest copy, so while the server is not at rest (running,
+  transitional or under a running intent) the confirm shows disabled with
+  "Stop the server before rolling back a file". A `409 server_not_stopped`
+  that races past it toasts the same words, not the upload and folder ones
+  (#4147).
 - Edits against a running server show "live working set — may need restart"
   notice (Section 6.9 semantics). Creating a new file works while running too
   (create-through to the live working set).
+- While a server at rest still has a Worker assigned (6.4), the tab shows the
+  release reason in place of that notice, and every write is held: the
+  editor's Save and the rollback confirm show disabled with the reason, the
+  bulk delete and move are disabled with it as their tooltip, and the context
+  menu, the drop zone and the Delete / F2 / paste keys offer no edit. The
+  reads stay: browsing, opening, the downloads, Copy and the history. A
+  draft typed while held is kept for the save once the release frame frees
+  it.
 - File-API failure reasons (see `CONTROL_PLANE.md` Section 7.2 for the
   authoritative catalog). The client switches on the `reason` field; the set is
   additive — handle unknown reasons gracefully.
@@ -892,7 +953,9 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 - Table: created_at, source (`manual` / `scheduled` / `event` / `uploaded`), size, health (`healthy` / `quarantined` / `unreadable` / `unknown`), creator;
   actions: download, restore, delete.
 - Restore: blocked with explanation while running (offer "stop now then
-  restore" two-step); typed-confirm dialog. A `quarantined` backup requires a
+  restore" two-step); typed-confirm dialog. While the stopped server still
+  has a Worker assigned (6.4), the dialog's confirm shows disabled with the
+  release reason until the release frame frees it. A `quarantined` backup requires a
   second force-acknowledge confirmation before the `?force=true` restore is
   issued. An `unreadable` backup (its archive could not be read back from
   storage) cannot be restored at all: its restore action is disabled with a
@@ -938,6 +1001,13 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   keep; tiered, only when its day, week or month has no backup not marked
   Damaged. The keep-all hint does not mention Damaged backups, since nothing
   is pruned.
+- Keep-all warning (#4084): while the server has no retention policy
+  (`backup_retention` null) and at least one enabled `backup` schedule (from
+  the `…/{sid}/schedules` list), a warning above the retention editor says
+  scheduled backups accumulate without bound; for `backup:schedule` holders it
+  points at the editor below. A disabled backup schedule takes no backups and
+  any policy bounds them, so neither warns. The schedule list needs
+  `schedule:read`, so a member without it gets no warning on this tab.
 
 ### 6.8 Server detail — Players
 - Attached groups (`GET …/{sid}/groups`) with kind badges; attach/detach
@@ -946,6 +1016,15 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 ### 6.9 Server detail — Settings
 - Rename, game-port edit (with availability check), `config` key/value
   editor; execution backend displayed read-only (immutable post-create).
+  While a server at rest still has a Worker assigned (6.4), Save and the
+  resource pack's Assign / Change / Remove show disabled with the release
+  reason. Save is not held while the server runs: a safe-keys-only edit
+  passes then, and the API answers any other edit `409 server_not_stopped`.
+  While held, Save is held for a safe-keys-only edit too, which the API
+  would accept. It stays coarse under a refusal hold (6.4), though that hold
+  can last long: a held server cannot start, so a safe edit gains nothing
+  before the release, and a copy of the API's safe-key list in the client
+  would drift from it (#4057).
 - Danger zone: delete server (typed confirm; held while a Worker is assigned,
   6.4), export ZIP.
 
@@ -971,7 +1050,8 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 
 ### 6.11 Account
 - Profile (username/email) edit, password change (current + new + confirm),
-  logout, delete account (typed confirm + password).
+  logout, delete account (typed confirm + password). Enter in the delete
+  dialog's password field confirms, as its button does, once both are filled.
 
 ### 6.12 Admin area
 - **Overview**: worker count by status, total servers running, global backup
@@ -1006,6 +1086,36 @@ numbers): the UI for the general scheduler.
   inline field errors via their typed 422 reasons (`invalid_cron`,
   `invalid_cadence`, `invalid_timezone`, `invalid_schedule_name`,
   `invalid_payload`) and the 409 duplicate name (`schedule_name_exists`).
+- Retention step (create only, #4084): a `backup` action on a server with no
+  retention policy adds a retention select, keep-last-N prefilled with 7
+  (editable; a whole number ≥ 1, checked before anything is sent) or keep all,
+  with a hint for the choice made. Keep-last-N prunes the server's existing
+  scheduled backups beyond N as soon as it is set, so the step counts them
+  from the backups list (`backup:read`), read since the dialog opened: a list
+  cached by the Backups tab counts only once read again, and a read that
+  fails makes the count unknown again. When some would be deleted it says
+  how many, and Create waits for an acknowledgement checkbox, asked again
+  when the count or N changes. While the list loads, a counting line
+  replaces the count; without `backup:read`, or when the list fails, a
+  generic line says it could not be counted. Either way the checkbox is
+  still required; with nothing to prune there is none. The line describes
+  the checkbox and is a polite live region (`role="status"`), so a count
+  that arrives and unticks the box is announced.
+- Once the schedule is created, the step reads the server again and leaves a
+  policy set since (from another session) in place, and the success toast
+  says so; otherwise keep-last-N `PUT`s `{keep_last}` to
+  `…/{sid}/backups/retention`. Keep all sends nothing.
+  After any retention attempt the server, the backups list and its statistics
+  are refetched, so the keep-all warning follows what the server holds, even
+  after a write reported as failed that had landed. A failed retention write
+  does not undo the schedule: the dialog closes on it and an error toast says
+  the policy was not set (a 403 also refreshes the capabilities, 7.3).
+  Creating a backup schedule already needs `backup:schedule`, the endpoint's
+  permission. Editing, and a server that has a policy, show no step.
+- Keep-all warning: the Backups tab's warning (6.7) also shows above this
+  table, under the same condition; for a member with `backup:read` and
+  `backup:schedule` it links to the Backups tab, where the retention editor
+  is.
 - Delete: confirm dialog (run history cascades away with the schedule).
 - Run history: per-schedule dialog, newest first — outcome badge
   (`success`/`failure`/`skipped`/`unknown`), sanitized detail, started/finished
@@ -1065,8 +1175,9 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   inline note links to Floodgate setup.
 - Server-state gating: reads render anytime, but **every mutation requires the
   server at rest** (`desired_state` stopped and `observed_state` one of
-  stopped / crashed / unknown). While not at rest a
-  notice shows and all install / enable / disable / update / remove / side /
+  stopped / crashed / unknown) **and released** (no Worker assigned, 6.4).
+  While not at rest, or at rest with a Worker still assigned, a notice names
+  which, and all install / enable / disable / update / remove / side /
   resolve controls are disabled; a server-busy API reason (e.g.
   `server_not_stopped`) surfaces as an error toast.
 - Permission gating (7.3): the tab body needs `plugin:read` (a member without it
@@ -1365,9 +1476,13 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   server must be stopped, on every surface that can receive it;
   `worker_busy` / `server_busy` say another operation on the server is still
   running and the request was refused without being applied, so the operator
-  retries in a moment; `server_assigned` on a delete says to stop the server
-  and wait for it to be released before deleting it, since the hold can outlast
-  a retry (6.4); the sanitized start/restart-failure categories
+  retries in a moment; `server_assigned` on the Files, Backups, Plugins and
+  Settings tabs (the resource pack and a delete included, 6.4) says the
+  server is still assigned to a Worker and to wait for it to be released
+  before trying again, since the hold can outlast a retry (on the Settings
+  tab, whose export is not held, it names the refusal a refusal-held server
+  is held for, 6.4); the sanitized
+  start/restart-failure categories
   `port_conflict` / `image_missing` name the cause the Worker classified, and
   `server_properties_unreadable` says the server's `server.properties` is not a
   regular file or is too large and must be restored (Section 2, "A refused
@@ -1399,9 +1514,20 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   converging it automatically, which it does; asking the operator to stop the
   server again would be redundant. It stays verb-agnostic for that reason: the
   sentence is about the server's state, not about what the refused verb would
-  have done.
+  have done;
+  `final_snapshot_refused`, a stop of a server held by a refused final
+  snapshot whose Worker refused it again (#4056), says the server stays held,
+  the save is retried automatically and "Release without saving…" frees it
+  without the save (6.4).
   The refetch is unconditional on every lifecycle mutation regardless of the
   toast, so a moved server still shows up.
+- The release without the snapshot (6.4) names its two 409s rather than
+  taking the state-changed toast, since neither is a race: `invalid_transition`
+  says the server is no longer held for a refused final save, which may have
+  succeeded since, so nothing was released; `transition_conflict` says a stop
+  or a final save of the server is still in progress, so nothing was released
+  and the operator tries again in a moment. Like the lifecycle toasts, they
+  name the server.
 - On **stop** and **restart** those messages are replaced by verb-specific ones —
   `command_failed` and `worker_busy` on stop, `command_failed` and
   `server_not_running` on restart (`worker_busy` on restart applied nothing, and
@@ -1459,7 +1585,19 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   reachable" also fits a Worker already back on a new session, which the
   same 503 can name. A host back after the release keeps its instance, and
   nothing stops it. A second stop while the host is down releases the server
-  at once, without that snapshot, and a start then moves it to another host. The restart message says the system cannot restart the server
+  at once, without that snapshot, and a start then moves it to another host. A
+  server held by a refused final snapshot is the exception: the second stop
+  answers the same 503 and releases nothing (#4111), so its stop gets a
+  message of its own (#4057). It says the host is not reachable and the
+  stop released nothing, and it names what does release the server: the
+  host's return with the save, the full reconcile wait without it (about 11
+  minutes by default), and the release without saving. The client picks it
+  when it holds a refusal for the server or when the 503 carries a `detail`,
+  which of the lifecycle 503s only the API's answer to a held stop does: a
+  client that has yet to see the refusal still gets the `detail`, and a retry
+  of the held server's snapshot whose session ends answers a bare 503 and
+  keeps the refusal. The
+  restart message says the system cannot restart the server
   and the restart is not sent again, so the operator restarts it once the host
   is back, or moves it: stop, stop again, start. Both say to move it only once
   the old host is known to be down: the release stops nothing there, and

@@ -4,7 +4,9 @@ Issue #4050: a Worker's registration rebuilds its assignments from the database
 before the API acks it, and that read was bounded only by the driver's statement
 bound, 60 s by default, past the 30 s the Worker waits for the ack. The servicer
 now ends the registration with ``UNAVAILABLE`` at its own deadline, which the
-Worker retries with backoff.
+Worker retries with backoff. Issue #4091: the teardown of a refused registration
+writes its mark-unknown under the same deadline, so the write does not hold a
+pool connection for the driver's bounds on every retry.
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set; skipped otherwise (TESTING.md
 Section 5). The real sink reads through a proxy that holds back what the server
@@ -187,3 +189,105 @@ async def test_a_stalled_registration_is_refused_in_time_and_the_next_succeeds(
     assert refused_outbound is None
     assert ack.WhichOneof("payload") == "register_ack"
     assert [candidate.load for candidate in candidates] == [1]
+
+
+class _SilencingProxy(_StallingProxy):
+    """A stalling proxy that answers a connection opened while ``answering`` is
+    clear: only the connections already open are held back, as connections a
+    network drop left silent would be."""
+
+    async def serve(
+        self, client: asyncio.StreamReader, to_client: asyncio.StreamWriter
+    ) -> None:
+        if self.answering.is_set():
+            await super().serve(client, to_client)
+            return
+        upstream, to_upstream = await asyncio.open_connection(*self._target)
+        self.writers += [to_client, to_upstream]
+        # Neither direction is the held one.
+        await asyncio.gather(
+            self._pump(client, to_upstream, to_client=False),
+            self._pump(upstream, to_client, to_client=False),
+        )
+
+
+class _RefusedTeardownSink(FakeServerStateSink):
+    """Never answers the registration's rebuild, so the registration is refused
+    at its deadline, and writes the teardown's mark-unknown through the real
+    sink."""
+
+    def __init__(self, real: ServersServerStateSink) -> None:
+        super().__init__()
+        self._real = real
+        self.marking = asyncio.Event()
+
+    async def running_assignment_ids(self, *, worker_id: str) -> dict[str, int]:
+        await asyncio.Event().wait()
+        return await super().running_assignment_ids(worker_id=worker_id)
+
+    async def mark_worker_servers_unknown(self, *, worker_id: str) -> None:
+        self.marking.set()
+        await self._real.mark_worker_servers_unknown(worker_id=worker_id)
+
+
+async def test_a_refused_registrations_stalled_teardown_write_frees_its_connection(
+    world: _World,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Issue #4091: the teardown of a refused registration held its pool
+    # connection for the driver's bounds while its mark-unknown waited on a
+    # silent connection. On a pool of one, a request behind that write is served
+    # only once the write lets its connection go.
+    monkeypatch.setattr(
+        grpc_server, "_REGISTRATION_DATABASE_TIMEOUT_SECONDS", _DEADLINE_SECONDS
+    )
+    assert _DB_URL is not None
+    server = await world.server("survival", worker=uuid.UUID(_WORKER_ID))
+    target = make_url(_DB_URL)
+    assert target.host is not None and target.port is not None
+    proxy = _SilencingProxy(target.host, target.port)
+    listener = await asyncio.start_server(proxy.serve, "127.0.0.1", 0)
+    url = target.set(host="127.0.0.1", port=listener.sockets[0].getsockname()[1])
+    engine = create_engine(
+        url.render_as_string(hide_password=False),
+        pool_size=1,
+        max_overflow=0,
+        connect_timeout=_DRIVER_BOUND_SECONDS,
+        statement_timeout=_DRIVER_BOUND_SECONDS,
+    )
+    real = ServersServerStateSink(
+        create_session_factory(engine), clock=world.clock, real_time_events=world.bus
+    )
+    sink = _RefusedTeardownSink(real)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        stub = await h.start()
+        # Pool the one connection and silence it, so the teardown's write meets
+        # the stall on it.
+        await real.running_assignment_ids(worker_id=_WORKER_ID)
+        proxy.answering.clear()
+
+        refused = stub.Session(metadata=_auth(_CREDENTIAL))
+        await refused.write(_register_message())
+        code = await asyncio.wait_for(refused.code(), timeout=_ANSWER_GUARD_SECONDS)
+        await asyncio.wait_for(sink.marking.wait(), timeout=_ANSWER_GUARD_SECONDS)
+        served = await asyncio.wait_for(
+            real.running_assignment_ids(worker_id=_WORKER_ID),
+            timeout=_ANSWER_GUARD_SECONDS,
+        )
+    finally:
+        proxy.answering.set()
+        await h.stop()
+        if h.servicer is not None:
+            await h.servicer.drain_teardowns()
+        await engine.dispose()
+        listener.close()
+        for writer in proxy.writers:
+            writer.close()
+
+    assert code is grpc.StatusCode.UNAVAILABLE
+    assert list(served) == [str(server.id.value)]

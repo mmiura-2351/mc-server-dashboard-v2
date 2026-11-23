@@ -75,6 +75,9 @@ from mc_server_dashboard_api.servers.application.startup_reset import (
 from mc_server_dashboard_api.servers.application.stop_convergence import (
     StopConvergenceGuard,
 )
+from mc_server_dashboard_api.servers.application.unannounced_refusals import (
+    UnannouncedRefusals,
+)
 from mc_server_dashboard_api.servers.application.unrecorded_stops import (
     UnrecordedStops,
 )
@@ -95,6 +98,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     WorkerId,
     bound_status_detail,
 )
+from tests.fleet.fakes import FakeClock as FleetFakeClock
 from tests.integration.migrate import downgrade_base, upgrade_head
 from tests.integration.test_lifecycle_scenarios import (
     _AdvancingClock,
@@ -102,7 +106,6 @@ from tests.integration.test_lifecycle_scenarios import (
     _seed_community,
 )
 from tests.servers.fakes import (
-    FakeClock,
     FakeControlPlane,
     FakeFileStore,
     FakeJarProvisioner,
@@ -207,7 +210,10 @@ class _World:
 
     async def report_from(self, server: Server, worker_id: str, state: str) -> bool:
         return await self.sink().record_observed_state(
-            server_id=str(server.id.value), worker_id=worker_id, state=state
+            server_id=str(server.id.value),
+            worker_id=worker_id,
+            state=state,
+            observed_at=self.clock.now(),
         )
 
     async def observed(self, server: Server) -> ObservedState:
@@ -225,6 +231,17 @@ class _World:
         self.journal.clear()
         return self.bus.subscribe_all(streams=_STATUS)
 
+    def fleet_clock(self) -> FleetFakeClock:
+        """The world's clock, for the control plane's servicer and registry.
+
+        The servicer stamps each Worker report as it reads it (issue #4118),
+        the registry a session's end (issue #4130), and the guard compares both
+        with the sink's own stamps, so they read one clock, as they read the
+        wall clock in production.
+        """
+
+        return _WorldFleetClock(self)
+
     def assert_published_after_commit(self) -> None:
         """No status event was published over an uncommitted state write.
 
@@ -241,6 +258,17 @@ class _World:
                 assert last_db_activity == "commit", self.journal
             else:
                 last_db_activity = entry
+
+
+class _WorldFleetClock(FleetFakeClock):
+    """Reads the world's clock; ``set`` has no effect."""
+
+    def __init__(self, world: _World) -> None:
+        super().__init__(_NOW)
+        self._world = world
+
+    def now(self) -> dt.datetime:
+        return self._world.clock.now()
 
 
 @pytest.fixture
@@ -339,6 +367,7 @@ async def test_worker_report_publishes_its_frame_after_commit(world: _World) -> 
         detail="boom",
         reason="forge_install_failed",
         emitted_at=emitted,
+        observed_at=world.clock.now(),
     )
 
     assert applied
@@ -372,16 +401,14 @@ async def test_worker_report_dropped_by_the_monotonic_guard_publishes_nothing(
 ) -> None:
     worker = uuid.uuid4()
     server = await world.server("survival", worker=worker, reported="running")
-    # A frozen clock stamps the next report no later than the row's observed_at.
-    stale = ServersServerStateSink(
-        create_session_factory(world.engine),
-        clock=FakeClock(_NOW),
-        real_time_events=world.bus,
-    )
     watching = world.watch(server)
 
-    applied = await stale.record_observed_state(
-        server_id=str(server.id.value), worker_id=str(worker), state="stopped"
+    # Read at the world's first instant: no later than the row's observed_at.
+    applied = await world.sink().record_observed_state(
+        server_id=str(server.id.value),
+        worker_id=str(worker),
+        state="stopped",
+        observed_at=_NOW,
     )
 
     assert not applied
@@ -408,6 +435,7 @@ async def test_worker_report_repeating_the_state_publishes_only_what_is_new(
         worker_id=str(worker),
         state="unknown",
         detail="cannot confirm",
+        observed_at=world.clock.now(),
     )
 
     assert [event.payload for event in await _received(watching)] == [
@@ -443,6 +471,7 @@ async def test_worker_crash_report_stores_the_crash_its_frame_carries(
         state="crashed",
         detail=detail,
         reason="forge_install_out_of_memory",
+        observed_at=world.clock.now(),
     )
 
     assert await _crash(world, server) == (
@@ -471,6 +500,7 @@ async def test_non_owning_worker_report_neither_stores_nor_clears_a_crash(
         state="crashed",
         detail="not this server's crash",
         reason="forge_install_java_incompatible",
+        observed_at=world.clock.now(),
     )
     assert await _crash(world, server) == (None, None)
 
@@ -480,6 +510,7 @@ async def test_non_owning_worker_report_neither_stores_nor_clears_a_crash(
         state="crashed",
         detail="java.lang.UnsupportedClassVersionError",
         reason="forge_install_java_incompatible",
+        observed_at=world.clock.now(),
     )
     assert not await world.report_from(server, stranger, "running")
     assert await _crash(world, server) == (
@@ -502,6 +533,7 @@ async def test_operator_restart_of_a_crash_clears_it_once_the_worker_reports_sta
         state="crashed",
         detail="installer ran out of memory",
         reason="forge_install_out_of_memory",
+        observed_at=world.clock.now(),
     )
     await world.stop_server(
         FakeControlPlane(
@@ -1066,6 +1098,7 @@ async def test_late_final_snapshot_release_publishes_the_release(
         clock=world.clock,
         stop_convergence=StopConvergenceGuard(),
         unrecorded_stops=UnrecordedStops(),
+        unannounced_refusals=UnannouncedRefusals(),
         real_time_events=world.bus,
     )
     watching = world.watch(server)
@@ -1075,6 +1108,7 @@ async def test_late_final_snapshot_release_publishes_the_release(
         worker_id=str(worker),
         code=CommandResultCode.OK,
         message=None,
+        received_at=world.clock.now(),
     )
 
     assert [event.payload for event in await _received(watching)] == [_RELEASED]
@@ -1157,22 +1191,20 @@ async def test_stale_release_guarded_off_a_newer_report_publishes_nothing(
 async def test_final_snapshot_refusal_publishes_its_frame_after_commit(
     world: _World,
 ) -> None:
-    """A refusal set on a stop holding its Worker, then cleared while it holds."""
+    """A refusal set on a stop holding its Worker."""
 
     worker = uuid.uuid4()
     server = await _wedged_stop(world, worker, "stopped")
     watching = world.watch(server)
 
-    for refusal in (FinalSnapshotRefusal.UNAVAILABLE, None):
-        async with world.uow() as uow:
-            assert await uow.servers.set_final_snapshot_refusal(
-                server.id, WorkerId(worker), refusal
-            )
-            await uow.commit()
+    async with world.uow() as uow:
+        assert await uow.servers.set_final_snapshot_refusal(
+            server.id, WorkerId(worker), FinalSnapshotRefusal.UNAVAILABLE
+        )
+        await uow.commit()
 
     assert [event.payload for event in await _received(watching)] == [
         {"final_snapshot_refusal": "unavailable"},
-        {"final_snapshot_refusal": None},
     ]
     world.assert_published_after_commit()
 
@@ -1331,7 +1363,10 @@ async def test_state_sink_without_the_bus_refuses_to_commit_an_observed_write(
 
     with pytest.raises(StatusEventsNotWiredError):
         await unwired.record_observed_state(
-            server_id=str(server.id.value), worker_id=str(worker), state="running"
+            server_id=str(server.id.value),
+            worker_id=str(worker),
+            state="running",
+            observed_at=world.clock.now(),
         )
     with pytest.raises(StatusEventsNotWiredError):
         await unwired.mark_worker_servers_unknown(worker_id=str(worker))
@@ -1412,7 +1447,10 @@ async def test_publish_order_follows_commit_completion_not_commit_order(
 
     report = asyncio.create_task(
         slow_report.record_observed_state(
-            server_id=str(server.id.value), worker_id=str(worker), state="running"
+            server_id=str(server.id.value),
+            worker_id=str(worker),
+            state="running",
+            observed_at=world.clock.now(),
         )
     )
     await committed.wait()

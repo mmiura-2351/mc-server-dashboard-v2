@@ -14,6 +14,7 @@ BackupNotFoundError).
 
 from __future__ import annotations
 
+import datetime as dt
 import errno
 import os
 import tarfile
@@ -28,7 +29,10 @@ from mc_server_dashboard_api.archive_member import GzipReader
 from mc_server_dashboard_api.servers.adapters.backup_store import (
     StorageBackupStoreAdapter,
 )
-from mc_server_dashboard_api.servers.domain.backup_store import SnapshotScan
+from mc_server_dashboard_api.servers.domain.backup_store import (
+    SnapshotScan,
+    StoredArchive,
+)
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
@@ -48,7 +52,11 @@ from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveUnreadableError,
     ObjectStoreUnavailableError,
 )
-from mc_server_dashboard_api.storage.domain.port import ByteStream, ExclusionFence
+from mc_server_dashboard_api.storage.domain.port import (
+    BackupEntry,
+    ByteStream,
+    ExclusionFence,
+)
 from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
 )
@@ -423,6 +431,49 @@ async def test_list_archive_refs_storage_backend_failure_translates_to_unavailab
 
     with pytest.raises(BackupStorageUnavailableError):
         await adapter.list_archive_refs(community_id=community, server_id=server)
+
+
+_STORED_AT = dt.datetime(2026, 11, 22, 12, 0, tzinfo=dt.UTC)
+
+
+class _ListedEntriesStorage(FsStorage):
+    """An ``FsStorage`` whose backup entries are fixed, or fail to list."""
+
+    unavailable = False
+
+    async def list_backup_entries(
+        self, community_id: StorageCommunityId, server_id: StorageServerId
+    ) -> list[BackupEntry]:
+        if self.unavailable:
+            raise ObjectStoreUnavailableError("object store list failed")
+        return [BackupEntry(key=BackupKey("a" * 32), modified_at=_STORED_AT)]
+
+
+async def test_list_archives_gives_each_ref_with_its_store_time(
+    tmp_path: Path,
+) -> None:
+    """The row-less archive reclaim (issue #4106) gets the store's time per ref."""
+
+    adapter = StorageBackupStoreAdapter(
+        storage=_ListedEntriesStorage(tmp_path, version_retention=10)
+    )
+    community, server = _scope()
+
+    assert await adapter.list_archives(community_id=community, server_id=server) == [
+        StoredArchive(storage_ref="a" * 32, modified_at=_STORED_AT)
+    ]
+
+
+async def test_list_archives_storage_backend_failure_translates_to_unavailable(
+    tmp_path: Path,
+) -> None:
+    storage = _ListedEntriesStorage(tmp_path, version_retention=10)
+    storage.unavailable = True
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+
+    with pytest.raises(BackupStorageUnavailableError):
+        await adapter.list_archives(community_id=community, server_id=server)
 
 
 async def _put_backup(

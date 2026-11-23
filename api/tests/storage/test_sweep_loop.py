@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock
 
 import pytest
@@ -24,7 +25,9 @@ async def test_wires_an_async_sweep_to_periodic_runner(
     monkeypatch.setattr(sweep_loop, "run_periodic", runner)
     monkeypatch.setattr(asyncio, "to_thread", to_thread)
 
-    await sweep_loop.run_storage_sweep_loop(sweep, tick_seconds=17)
+    await sweep_loop.run_storage_sweep_loop(
+        sweep, reclaim_rowless_archives=AsyncMock(), tick_seconds=17
+    )
 
     runner.assert_awaited_once()
     call = runner.await_args
@@ -55,7 +58,9 @@ async def test_wires_a_sync_sweep_through_a_thread(
     monkeypatch.setattr(sweep_loop, "run_periodic", runner)
     monkeypatch.setattr(asyncio, "to_thread", to_thread_spy)
 
-    await sweep_loop.run_storage_sweep_loop(sweep, tick_seconds=17)
+    await sweep_loop.run_storage_sweep_loop(
+        sweep, reclaim_rowless_archives=AsyncMock(), tick_seconds=17
+    )
 
     runner.assert_awaited_once()
     call = runner.await_args
@@ -66,3 +71,53 @@ async def test_wires_a_sync_sweep_through_a_thread(
     await callback()
     assert runs == 1
     to_thread_spy.assert_awaited_once_with(sweep)
+
+
+async def test_each_pass_reclaims_rowless_archives_after_the_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The row-less backup archive reclaim (issue #4106) runs on the sweep's
+    cadence, after the sweep."""
+
+    order: list[str] = []
+
+    async def sweep() -> None:
+        order.append("sweep")
+
+    async def reclaim() -> None:
+        order.append("reclaim")
+
+    runner = AsyncMock()
+    monkeypatch.setattr(sweep_loop, "run_periodic", runner)
+
+    await sweep_loop.run_storage_sweep_loop(
+        sweep, reclaim_rowless_archives=reclaim, tick_seconds=17
+    )
+    call = runner.await_args
+    assert call is not None
+    await call.args[0]()
+
+    assert order == ["sweep", "reclaim"]
+
+
+async def test_a_failed_sweep_is_logged_and_the_reclaim_still_runs(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    reclaimed = AsyncMock()
+
+    async def sweep() -> None:
+        raise OSError("sweep failed")
+
+    runner = AsyncMock()
+    monkeypatch.setattr(sweep_loop, "run_periodic", runner)
+
+    await sweep_loop.run_storage_sweep_loop(
+        sweep, reclaim_rowless_archives=reclaimed, tick_seconds=17
+    )
+    call = runner.await_args
+    assert call is not None
+    with caplog.at_level(logging.ERROR, logger=sweep_loop.__name__):
+        await call.args[0]()
+
+    reclaimed.assert_awaited_once()
+    assert any("storage sweep pass failed" in r.getMessage() for r in caplog.records)

@@ -169,7 +169,12 @@ class ScheduleRunRepository(abc.ABC):
 
     @abc.abstractmethod
     async def add(self, run: ScheduleRun) -> None:
-        """Stage a new run row for persistence within the current transaction."""
+        """Add a run row within the current transaction, once per run id.
+
+        A run already recorded under ``run.id`` is left as it is: the runner
+        records a run again when its earlier record raised, which a COMMIT
+        that applied but was answered as failed does too (issue #4141).
+        """
 
     @abc.abstractmethod
     async def list_for_schedule(self, schedule_id: ScheduleId) -> list[ScheduleRun]:
