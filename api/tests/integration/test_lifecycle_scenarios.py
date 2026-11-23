@@ -88,6 +88,9 @@ from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
 from mc_server_dashboard_api.servers.application.stop_intents import (
     StopIntentCounter,
 )
+from mc_server_dashboard_api.servers.application.unannounced_refusals import (
+    UnannouncedRefusals,
+)
 from mc_server_dashboard_api.servers.application.unrecorded_stops import (
     UnrecordedStops,
 )
@@ -95,6 +98,7 @@ from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
     CommandStatus,
+    UnavailableWorkerState,
     WorkerUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
@@ -378,6 +382,7 @@ async def _reconciler_tick(
         held_start_grace_seconds=held_start_grace_seconds,
         refused_stop_grace_seconds=refused_stop_grace_seconds,
         restart_timeout_seconds=restart_timeout_seconds,
+        heartbeat_timeout_seconds=30,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
         listener_started_at=_STARTED_LONG_AGO,
@@ -434,7 +439,10 @@ async def test_crash_then_stop_then_start_again_succeeds(engine: AsyncEngine) ->
     # Under desired=running this is a divergence the reconciler owns; the sink must
     # keep the assignment (no unassign), so the row stays (running, crashed, worker).
     await _sink(engine, clock).record_observed_state(
-        server_id=str(server_id.value), worker_id=str(first_worker), state="crashed"
+        server_id=str(server_id.value),
+        worker_id=str(first_worker),
+        state="crashed",
+        observed_at=clock.now(),
     )
     crashed = await _load(engine, server_id)
     assert crashed is not None
@@ -505,7 +513,10 @@ async def test_crash_then_stop_then_write_eula_at_rest_then_start(
     # It reports crashed via the real sink; under desired=running the assignment
     # sticks (the reconciler's divergence), matching chain 1.
     await _sink(engine, clock).record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker), state="crashed"
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state="crashed",
+        observed_at=clock.now(),
     )
 
     # The operator stops the crashed server (no live instance -> SERVER_NOT_FOUND),
@@ -595,7 +606,10 @@ async def test_lost_stop_outcome_then_worker_reports_stopped_then_reconciler_cle
     # observed=stopped but must KEEP the assignment (issue #847 bug 1): unassigning
     # here would race a live final-snapshot window in the normal stop flow.
     await _sink(engine, clock).record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker), state="stopped"
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state="stopped",
+        observed_at=clock.now(),
     )
     converged = await _load(engine, server_id)
     assert converged is not None
@@ -672,7 +686,10 @@ async def test_stop_cancelled_mid_snapshot_holds_then_reconciler_clears(
     # The owning worker's terminal StatusChange(stopped) arrives via the real sink;
     # it must KEEP the assignment (the sink no longer unassigns, bug 1).
     await _sink(engine, clock).record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker), state="stopped"
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state="stopped",
+        observed_at=clock.now(),
     )
     converged = await _load(engine, server_id)
     assert converged is not None
@@ -929,7 +946,10 @@ async def test_worker_boot_stopped_report_converges_a_mid_stop_unknown_row(
     )
 
     applied = await sink.record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker), state="stopped"
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state="stopped",
+        observed_at=clock.now(),
     )
     assert applied is True
     reported = await _load(engine, server_id)
@@ -976,7 +996,10 @@ async def test_failed_stop_then_process_crashes_wedge_recovered_by_reconciler(
         engine, FakeControlPlane(place_to=WorkerId(worker)), clock
     )(community_id=community, server_id=server_id)
     await _sink(engine, clock).record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker), state="running"
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state="running",
+        observed_at=clock.now(),
     )
 
     # The operator stops; the dispatch fails. StopServer deliberately does NOT
@@ -991,7 +1014,10 @@ async def test_failed_stop_then_process_crashes_wedge_recovered_by_reconciler(
     # Before the grace window elapses the process dies on its own; the owning
     # worker's StatusChange(crashed) lands through the real sink.
     await _sink(engine, clock).record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker), state="crashed"
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state="crashed",
+        observed_at=clock.now(),
     )
     wedged = await _load(engine, server_id)
     assert wedged is not None
@@ -1056,7 +1082,10 @@ async def test_crash_then_operator_stop_snapshots_and_leaves_the_same_shape(
     # The process dies on its own; the owning worker reports it through the REAL
     # sink, which keeps the assignment under desired=running.
     await _sink(engine, clock).record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker), state="crashed"
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state="crashed",
+        observed_at=clock.now(),
     )
 
     stop_cp = FakeControlPlane(
@@ -1106,7 +1135,10 @@ async def test_crash_under_running_intent_is_restarted_by_the_reconciler(
         engine, FakeControlPlane(place_to=WorkerId(worker)), clock
     )(community_id=community, server_id=server_id)
     await _sink(engine, clock).record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker), state="crashed"
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state="crashed",
+        observed_at=clock.now(),
     )
 
     with pytest.raises(InvalidLifecycleTransitionError):
@@ -1124,7 +1156,10 @@ async def test_crash_under_running_intent_is_restarted_by_the_reconciler(
         ("start", WorkerId(worker), server_id),
     ]
     await _sink(engine, clock).record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker), state="running"
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state="running",
+        observed_at=clock.now(),
     )
     healed = await _load(engine, server_id)
     assert healed is not None
@@ -1156,7 +1191,10 @@ async def test_stop_after_crash_and_scratch_gc_leaves_stopped_crashed(
         engine, FakeControlPlane(place_to=WorkerId(worker)), clock
     )(community_id=community, server_id=server_id)
     await _sink(engine, clock).record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker), state="crashed"
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state="crashed",
+        observed_at=clock.now(),
     )
 
     stop_cp = FakeControlPlane(
@@ -1208,7 +1246,10 @@ async def test_worker_restart_that_swept_the_orphan_is_restarted_by_the_reconcil
     )(community_id=community, server_id=server_id)
     sink = _sink(engine, clock)
     await sink.record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker), state="running"
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state="running",
+        observed_at=clock.now(),
     )
     await sink.mark_worker_servers_unknown(worker_id=str(worker))
 
@@ -1220,7 +1261,10 @@ async def test_worker_restart_that_swept_the_orphan_is_restarted_by_the_reconcil
     assert [kind for kind, _, _ in reconcile_cp.dispatched] == ["hydrate", "start"]
     assert {wid for _, wid, _ in reconcile_cp.dispatched} == {WorkerId(worker)}
     await sink.record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker), state="running"
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state="running",
+        observed_at=clock.now(),
     )
     healed = await _load(engine, server_id)
     assert healed is not None
@@ -1266,6 +1310,7 @@ async def test_crash_survives_a_worker_disconnect_and_reconnect(
         state="crashed",
         detail="the installer failed",
         reason=reason,
+        observed_at=clock.now(),
     )
     crashed = await _load(engine, server_id)
     assert crashed is not None
@@ -1308,7 +1353,10 @@ async def test_crash_survives_a_worker_disconnect_and_reconnect(
         ("start", WorkerId(worker), server_id),
     ]
     await sink.record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker), state="running"
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state="running",
+        observed_at=clock.now(),
     )
     healed = await _load(engine, server_id)
     assert healed is not None
@@ -1344,11 +1392,17 @@ async def _go_down(
 
     sink = _sink(engine, clock)
     await sink.record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker.value), state="running"
+        server_id=str(server_id.value),
+        worker_id=str(worker.value),
+        state="running",
+        observed_at=clock.now(),
     )
     if how in ("crashed", "stopped"):
         await sink.record_observed_state(
-            server_id=str(server_id.value), worker_id=str(worker.value), state=how
+            server_id=str(server_id.value),
+            worker_id=str(worker.value),
+            state=how,
+            observed_at=clock.now(),
         )
     else:
         await sink.mark_worker_servers_unknown(worker_id=str(worker.value))
@@ -1524,7 +1578,10 @@ async def test_crash_under_a_stop_intent_waits_a_full_grace_from_a_disconnect(
     )(community_id=server.community_id, server_id=server.id)
     sink = _sink(engine, clock)
     await sink.record_observed_state(
-        server_id=str(server.id.value), worker_id=str(worker.value), state="running"
+        server_id=str(server.id.value),
+        worker_id=str(worker.value),
+        state="running",
+        observed_at=clock.now(),
     )
     with pytest.raises(WorkerUnavailableError):
         await _stop_server_use_case(
@@ -1535,6 +1592,7 @@ async def test_crash_under_a_stop_intent_waits_a_full_grace_from_a_disconnect(
         worker_id=str(worker.value),
         state="crashed",
         detail="the server process exited",
+        observed_at=clock.now(),
     )
     crashed = await _load(engine, server.id)
     assert crashed is not None
@@ -1611,7 +1669,10 @@ async def _reconnect_mid(
             community_id=server.community_id, server_id=server.id
         )
         await sink.record_observed_state(
-            server_id=str(server.id.value), worker_id=str(worker.value), state="running"
+            server_id=str(server.id.value),
+            worker_id=str(worker.value),
+            state="running",
+            observed_at=clock.now(),
         )
     dropping = FakeControlPlane(place_to=worker, unavailable_kinds={verb})
     use_case: StartServer | StopServer | RestartServer
@@ -1629,7 +1690,10 @@ async def _reconnect_mid(
     assert interrupted.observed_state is ObservedState.UNKNOWN
 
     applied = await sink.record_observed_state(
-        server_id=str(server.id.value), worker_id=str(worker.value), state=leg.value
+        server_id=str(server.id.value),
+        worker_id=str(worker.value),
+        state=leg.value,
+        observed_at=clock.now(),
     )
     assert applied is True
     row = await _load(engine, server.id)
@@ -1704,7 +1768,10 @@ async def test_launch_that_fails_after_a_starting_resync_is_redispatched(
     assert reconcile_cp.dispatched == []
 
     applied = await _sink(engine, clock).record_observed_state(
-        server_id=str(server.id.value), worker_id=str(worker.value), state="stopped"
+        server_id=str(server.id.value),
+        worker_id=str(worker.value),
+        state="stopped",
+        observed_at=clock.now(),
     )
     assert applied is True
     row = await _load(engine, server.id)
@@ -1752,6 +1819,7 @@ async def test_command_that_ends_around_the_resync_leaves_the_row_at_its_end(
         server_id=str(server.id.value),
         worker_id=str(worker.value),
         state=terminal.value,
+        observed_at=clock.now(),
     )
     assert applied is True
     row = await _load(engine, server.id)
@@ -1845,7 +1913,10 @@ async def test_failed_stop_left_at_stopping_recovered_by_reconciler(
         engine, FakeControlPlane(place_to=WorkerId(worker)), clock
     )(community_id=community, server_id=server_id)
     await _sink(engine, clock).record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker), state="running"
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state="running",
+        observed_at=clock.now(),
     )
 
     # The operator stops; the dispatch fails. StopServer deliberately does NOT
@@ -1861,7 +1932,10 @@ async def test_failed_stop_left_at_stopping_recovered_by_reconciler(
     # paths restore the prior state without emitting, so this report is the last
     # one the API will ever see for that stop.
     await _sink(engine, clock).record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker), state="stopping"
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state="stopping",
+        observed_at=clock.now(),
     )
     wedged = await _load(engine, server_id)
     assert wedged is not None
@@ -1997,7 +2071,10 @@ async def test_failed_restart_stop_orphan_window_never_converges_running(
         engine, FakeControlPlane(place_to=WorkerId(worker)), clock
     )(community_id=community, server_id=server_id)
     await _sink(engine, clock).record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker), state="running"
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state="running",
+        observed_at=clock.now(),
     )
 
     # The operator restarts. The Worker's stop leg cannot confirm the process
@@ -2014,7 +2091,10 @@ async def test_failed_restart_stop_orphan_window_never_converges_running(
     # the id as unknown (issues #2474/#2475).
     for state in ("stopping", "unknown"):
         await _sink(engine, clock).record_observed_state(
-            server_id=str(server_id.value), worker_id=str(worker), state=state
+            server_id=str(server_id.value),
+            worker_id=str(worker),
+            state=state,
+            observed_at=clock.now(),
         )
 
     # The window. Each tick replays the start to the SAME Worker, which refuses it
@@ -2041,7 +2121,10 @@ async def test_failed_restart_stop_orphan_window_never_converges_running(
     # The orphan was LIVE: the converger's retry stop reaches the process, the
     # record is retired, and the Worker reports the terminal state.
     await _sink(engine, clock).record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker), state="stopped"
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state="stopped",
+        observed_at=clock.now(),
     )
 
     # With the orphan gone the very next tick relaunches for real, honouring the
@@ -2085,7 +2168,10 @@ async def test_dead_failed_stop_orphan_window_ends_in_snapshot_and_release(
         engine, FakeControlPlane(place_to=WorkerId(worker)), clock
     )(community_id=community, server_id=server_id)
     await _sink(engine, clock).record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker), state="running"
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state="running",
+        observed_at=clock.now(),
     )
 
     with pytest.raises(CommandDispatchError):
@@ -2094,7 +2180,10 @@ async def test_dead_failed_stop_orphan_window_ends_in_snapshot_and_release(
         )(community_id=community, server_id=server_id)
     for state in ("stopping", "unknown"):
         await _sink(engine, clock).record_observed_state(
-            server_id=str(server_id.value), worker_id=str(worker), state=state
+            server_id=str(server_id.value),
+            worker_id=str(worker),
+            state=state,
+            observed_at=clock.now(),
         )
 
     refusing = _orphan_holding_worker(worker, server_id)
@@ -2121,7 +2210,10 @@ async def test_dead_failed_stop_orphan_window_ends_in_snapshot_and_release(
     # The converger's probes confirm the process dead, so it retires the record and
     # reports the terminal state it could never observe from the driver Stop.
     await _sink(engine, clock).record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker), state="stopped"
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state="stopped",
+        observed_at=clock.now(),
     )
 
     # (stopped, stopped, assigned): the reconciler takes the final snapshot the
@@ -2203,7 +2295,10 @@ async def test_confirmed_stop_whose_write_failed_converges_on_the_short_grace(
         engine, FakeControlPlane(place_to=WorkerId(worker)), clock
     )(community_id=community, server_id=server_id)
     await _sink(engine, clock).record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker), state="running"
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state="running",
+        observed_at=clock.now(),
     )
 
     class _DatabaseFailsDuringStop(FakeControlPlane):
@@ -2308,6 +2403,7 @@ async def test_late_snapshot_release_whose_write_failed_converges_on_the_short_g
             clock=clock,
             stop_convergence=StopConvergenceGuard(),
             unrecorded_stops=unrecorded,
+            unannounced_refusals=UnannouncedRefusals(),
         )
     )
     reporter = FleetWorkerId(str(worker))
@@ -2316,8 +2412,15 @@ async def test_late_snapshot_release_whose_write_failed_converges_on_the_short_g
     )
     state.discard_pending("final-snapshot")
     outage.down = True
+    # Read after the stop that held the row, as a late result always is: the
+    # release's record carries this instant (issue #4117).
     with pytest.raises(OSError):
-        await state.resolve("final-snapshot", reporter, pb.CommandResult(success=True))
+        await state.resolve(
+            "final-snapshot",
+            reporter,
+            pb.CommandResult(success=True),
+            received_at=clock.now(),
+        )
     outage.down = False
     assert not state.final_snapshot_outstanding(str(server_id.value))
     still_held = await _load(engine, server_id)
@@ -2363,7 +2466,10 @@ async def test_recovery_whose_release_failed_retries_on_the_short_grace(
         engine, FakeControlPlane(place_to=WorkerId(worker)), clock
     )(community_id=community, server_id=server_id)
     await _sink(engine, clock).record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker), state="running"
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state="running",
+        observed_at=clock.now(),
     )
 
     class _DatabaseFailsDuringSnapshot(FakeControlPlane):
@@ -2585,7 +2691,9 @@ async def test_a_refused_final_snapshot_hold_is_released_without_it_then_starts(
         server_id=str(server_id.value), streams=frozenset({EventStream.STATUS})
     )
     released = await ReleaseHeldServer(
-        uow=ServersUnitOfWork(factory, bus), stop_convergence=StopConvergenceGuard()
+        uow=ServersUnitOfWork(factory, bus),
+        stop_convergence=StopConvergenceGuard(),
+        unannounced_refusals=UnannouncedRefusals(),
     )(community_id=community, server_id=server_id)
 
     # The returned server is the row as the release wrote it (issue #4056).
@@ -2638,7 +2746,10 @@ async def test_the_3701_sequence_ends_in_a_published_snapshot_and_a_release(
         community_id=community, server_id=server_id
     )
     await _sink(engine, clock).record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker.value), state="crashed"
+        server_id=str(server_id.value),
+        worker_id=str(worker.value),
+        state="crashed",
+        observed_at=clock.now(),
     )
     refused_start = FakeControlPlane(
         outcomes={"start": CommandOutcome(status=CommandStatus.UNAVAILABLE)}
@@ -2727,3 +2838,86 @@ async def test_the_3701_sequence_ends_in_a_published_snapshot_and_a_release(
         engine, FakeControlPlane(place_to=next_worker), clock, store
     )(community_id=community, server_id=server_id)
     assert restarted.assigned_worker_id == next_worker
+
+
+# --- A stop of a held server while its Worker is gone (issue #4111) ----------
+
+
+class _SnapshotMeetingADrop(FakeControlPlane):
+    """A fake whose snapshot is in flight when its Worker's session ends."""
+
+    async def snapshot(
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        final: bool = False,
+    ) -> CommandOutcome:
+        self.dispatched.append(("snapshot", worker_id, server_id))
+        self.end_session(worker_id, at=_NOW)
+        raise WorkerUnavailableError(
+            str(worker_id.value),
+            session_ended_in_flight=True,
+            worker_state=UnavailableWorkerState.NOT_CONNECTED,
+        )
+
+
+async def test_a_held_server_stays_held_through_a_drop_until_its_worker_returns(
+    engine: AsyncEngine,
+) -> None:
+    """start -> stop whose final snapshot the Worker refuses: held -> the
+    operator's re-stop retries the snapshot, and the Worker drops while it is in
+    flight: still held, with the refusal -> the drop marks the server unknown ->
+    a stop while the Worker is gone answers worker_unavailable and changes
+    nothing -> the Worker returns, and a stop takes the snapshot, which
+    publishes, and releases the server.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    store = _StoreGeneration(1)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id, community = server.id, server.community_id
+    worker = WorkerId(uuid.uuid4())
+    await _start_server_use_case(engine, FakeControlPlane(place_to=worker), clock)(
+        community_id=community, server_id=server_id
+    )
+    refusing = FakeControlPlane(
+        outcomes={"snapshot": CommandOutcome(status=CommandStatus.UNAVAILABLE)}
+    )
+    await _stop_server_use_case(engine, refusing, clock)(
+        community_id=community, server_id=server_id
+    )
+
+    dropping = _SnapshotMeetingADrop()
+    with pytest.raises(WorkerUnavailableError):
+        await _stop_server_use_case(engine, dropping, clock)(
+            community_id=community, server_id=server_id
+        )
+    assert [kind for kind, _, _ in dropping.dispatched] == ["snapshot"]
+    await _sink(engine, clock).mark_worker_servers_unknown(worker_id=str(worker.value))
+    held = await _load(engine, server_id)
+    assert held is not None
+    assert held.observed_state is ObservedState.UNKNOWN
+    assert held.assigned_worker_id == worker
+    assert held.final_snapshot_refusal is FinalSnapshotRefusal.UNAVAILABLE
+
+    gone = FakeControlPlane(connected={worker: False})
+    with pytest.raises(WorkerUnavailableError) as excinfo:
+        await _stop_server_use_case(engine, gone, clock)(
+            community_id=community, server_id=server_id
+        )
+    assert excinfo.value.worker_state is UnavailableWorkerState.NOT_CONNECTED
+    assert gone.dispatched == []
+    assert (await _load(engine, server_id)) == held
+
+    back = _PublishingControlPlane(store, place_to=worker, held={})
+    released = await _stop_server_use_case(engine, back, clock)(
+        community_id=community, server_id=server_id
+    )
+    assert [kind for kind, _, _ in back.dispatched] == ["stop", "snapshot"]
+    assert store.generation == 2
+    for row in (released, await _load(engine, server_id)):
+        assert row is not None
+        assert row.assigned_worker_id is None
+        assert row.final_snapshot_refusal is None

@@ -97,6 +97,18 @@ test("owner creates, toggles, and deletes a schedule", async ({
   const created = await listSchedules(request, token, communityId, serverId);
   expect(created.map((s) => s.name)).toContain(scheduleName);
 
+  // API-visible: the dialog's retention step set its default, keep-last 7, on
+  // this keep-all server (#4084).
+  await expect
+    .poll(async () => {
+      const res = await request.get(
+        `${API_URL}/api/communities/${communityId}/servers/${serverId}`,
+        { headers: { authorization: `Bearer ${token}` } },
+      );
+      return (await res.json()).backup_retention;
+    })
+    .toEqual({ keep_last: 7 });
+
   // Disable: the toggle unchecks (next_run_at nulls out server-side).
   await toggle.click();
   await expect(toggle).not.toBeChecked();

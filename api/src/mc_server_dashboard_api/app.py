@@ -209,6 +209,9 @@ from mc_server_dashboard_api.servers.application.reconciler import RunReconciler
 from mc_server_dashboard_api.servers.application.resource_pack_gc import (
     RunResourcePackGc,
 )
+from mc_server_dashboard_api.servers.application.rowless_archive_gc import (
+    ReclaimRowlessBackupArchives,
+)
 from mc_server_dashboard_api.servers.application.schedule_runner import (
     ExecuteScheduleAction,
     RunScheduleTick,
@@ -232,6 +235,9 @@ from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
 )
 from mc_server_dashboard_api.servers.application.stop_intents import (
     StopIntentCounter,
+)
+from mc_server_dashboard_api.servers.application.unannounced_refusals import (
+    UnannouncedRefusals,
 )
 from mc_server_dashboard_api.servers.application.unrecorded_stops import (
     UnrecordedStops,
@@ -852,6 +858,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await storage.sweep()
         else:
             await asyncio.to_thread(storage.sweep)
+        # Then reclaim the backup archives no row names (issue #4106), which the
+        # sweep cannot see: it reads no rows. The storage sweep loop below runs it
+        # after each of its passes too, so a failure here is logged and the API
+        # still starts.
+        reclaim_rowless_archives = ReclaimRowlessBackupArchives(
+            uow=ServersUnitOfWork(create_session_factory(engine)),
+            backup_store=StorageBackupStoreAdapter(storage=storage),
+            clock=ServersSystemClock(),
+            ownership=store_ownership,
+            lifecycle_lock=PgLifecycleLock(engine=engine),
+            grace=dt.timedelta(
+                seconds=settings.storage_sweep.rowless_archive_grace_seconds
+            ),
+        )
+        try:
+            await reclaim_rowless_archives()
+        except Exception:  # noqa: BLE001 - the loop retries; the API must start
+            logging.getLogger(__name__).exception(
+                "row-less backup archive reclaim at startup failed; the storage "
+                "sweep loop runs it again"
+            )
         # Bedrock gate-flip sweep (issue #1588): when the Bedrock deployment
         # gate is on, allocate bedrock_port for every server that already has
         # an installed, enabled Geyser but no port (installed while the gate
@@ -897,6 +924,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # shared the same way and for the same reader: without it the reconciler
         # cannot tell such a stop from one that may still be in flight.
         app.state.unrecorded_stops = UnrecordedStops()
+        # Process-wide record of final-snapshot refusals whose write's COMMIT
+        # failed (issue #4152), shared by every StopServer and ReleaseHeldServer:
+        # the next refused attempt, whichever flow makes it, announces the
+        # refusal, and a release by any of them forgets it.
+        app.state.unannounced_refusals = UnannouncedRefusals()
         # Shared control-plane command-routing state: the servicer registers
         # sessions and resolves results on it; the GrpcControlPlane adapter
         # dispatches through it. The lifecycle use cases reach it via the adapter.
@@ -994,6 +1026,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 real_time_events=real_time_events,
                 stop_convergence=app.state.stop_convergence,
                 unrecorded_stops=app.state.unrecorded_stops,
+                unannounced_refusals=app.state.unannounced_refusals,
             )
         )
         logging.getLogger(__name__).info(
@@ -1192,6 +1225,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         bedrock_tunnel_sync=bedrock_tunnel_syncer,
                         stop_refusals=app.state.stop_dispatch_refusals,
                         unrecorded_stops=app.state.unrecorded_stops,
+                        unannounced_refusals=app.state.unannounced_refusals,
                         stop_convergence=app.state.stop_convergence,
                         stop_intents=app.state.stop_intents,
                     ),
@@ -1288,7 +1322,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # (#871). The control plane, clock, and JAR seams are stateless and
             # reused across the per-action use cases.
             reconciler = RunReconcilerTick(
-                uow=ServersUnitOfWork(create_session_factory(engine)),
+                uow=ServersUnitOfWork(create_session_factory(engine), real_time_events),
                 make_start_server=lambda: StartServer(
                     uow=ServersUnitOfWork(
                         create_session_factory(engine), real_time_events
@@ -1324,6 +1358,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     bedrock_tunnel_sync=bedrock_tunnel_syncer,
                     stop_refusals=app.state.stop_dispatch_refusals,
                     unrecorded_stops=app.state.unrecorded_stops,
+                    unannounced_refusals=app.state.unannounced_refusals,
                     stop_convergence=app.state.stop_convergence,
                     stop_intents=app.state.stop_intents,
                 ),
@@ -1341,6 +1376,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     settings.reconciler.refused_stop_grace_seconds
                 ),
                 restart_timeout_seconds=settings.control.restart_timeout_seconds,
+                heartbeat_timeout_seconds=settings.control.heartbeat_timeout_seconds,
                 backoff_base_seconds=settings.reconciler.backoff_base_seconds,
                 backoff_max_seconds=settings.reconciler.backoff_max_seconds,
                 listener_started_at=listener_started_at,
@@ -1449,10 +1485,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # backends — like the startup sweep, and NOT gated on control.enabled —
         # so orphan staging/snapshot prefixes and orphan in-progress multipart
         # parts are reclaimed without a restart. Dispatched sync/async by the
-        # loop exactly as the startup hook does.
+        # loop exactly as the startup hook does. Each pass then runs the row-less
+        # backup archive reclaim built above (issue #4106).
         storage_sweep_task = asyncio.create_task(
             run_storage_sweep_loop(
                 storage.sweep,
+                reclaim_rowless_archives=reclaim_rowless_archives,
                 tick_seconds=settings.storage_sweep.interval_seconds,
             )
         )

@@ -40,7 +40,12 @@ import {
   type PluginJarSource,
   pluginErrorPresentation,
 } from "./serverPluginsErrorPresentation.ts";
-import { atRest, normalizeState } from "./serverState.ts";
+import {
+  atRestWriteRefusal,
+  finalSnapshotRefusal,
+  normalizeState,
+  serverAssignedKey,
+} from "./serverState.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
 type PluginResponse = components["schemas"]["PluginResponse"];
@@ -151,7 +156,14 @@ export function ServerPluginsTab({
 
   const state = normalizeState(server.observed_state);
   const desired = normalizeState(server.desired_state);
-  const serverAtRest = atRest(state, desired);
+  // Every change needs the server at rest and released: a stop holds its
+  // Worker until the final snapshot settles (409 server_assigned, #3998).
+  const writeRefusal = atRestWriteRefusal(
+    state,
+    desired,
+    server.assigned_worker_id !== null,
+  );
+  const serverAtRest = writeRefusal === null;
 
   const showError = (error: unknown, jarSource: PluginJarSource) => {
     if (onForbidden(error)) return;
@@ -424,9 +436,15 @@ export function ServerPluginsTab({
 
   return (
     <section className="plugins">
-      {!serverAtRest && (
+      {writeRefusal !== null && (
         <p className="field-hint plugins-notice">
-          {tn("plugins.serverNotStopped")}
+          {writeRefusal === "server_assigned"
+            ? t(
+                serverAssignedKey(
+                  finalSnapshotRefusal(server.final_snapshot_refusal),
+                ),
+              )
+            : tn("plugins.serverNotStopped")}
         </p>
       )}
 

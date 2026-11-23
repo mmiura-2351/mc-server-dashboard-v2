@@ -155,6 +155,34 @@ describe("ApiError", () => {
     expect(error.workerState).toBeUndefined();
   });
 
+  it("exposes the detail member a held stop's 503 carries", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(503, {
+        reason: "worker_unavailable",
+        worker_state: "not_connected",
+        detail: "The server's Worker refused its final snapshot …",
+      }),
+    );
+
+    const error = await api.get("/api/communities").catch((e) => e);
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.detail).toBe(
+      "The server's Worker refused its final snapshot …",
+    );
+  });
+
+  it("leaves detail undefined when the body omits it", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(503, { reason: "worker_unavailable" }),
+    );
+
+    const error = await api.get("/api/communities").catch((e) => e);
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.detail).toBeUndefined();
+  });
+
   it("leaves reason undefined for a non-problem body", async () => {
     fetchMock.mockResolvedValue(jsonResponse(500, { message: "boom" }));
 

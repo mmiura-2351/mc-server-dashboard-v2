@@ -20,6 +20,8 @@ const PLUGIN_REASON_PRESENTATION: Record<string, TranslationKey> = {
   server_not_stopped: "plugins.error.notStopped",
   server_unsettled: "plugins.error.unsettled",
   server_busy: "plugins.error.busy",
+  // A change the stop's Worker still holds the server for (#3998, #4003).
+  server_assigned: "common.serverAssigned",
   invalid_path: "plugins.error.invalidPath",
   catalog_upstream_failed: "plugins.error.catalogUpstreamFailed",
   catalog_project_not_found: "plugins.error.catalogNotFound",

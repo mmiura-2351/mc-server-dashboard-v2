@@ -208,6 +208,21 @@ def _set_test_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "mc_server_dashboard_api.app.read_installation_id", _no_installation_id
     )
+    # Stand in for the row-less backup archive reclaim (issue #4106), which the
+    # lifespan runs at startup and reads the servers' rows for: the dummy
+    # database is never dialed. tests/test_rowless_archive_reclaim_wiring.py
+    # pins its wiring.
+    monkeypatch.setattr(
+        "mc_server_dashboard_api.app.ReclaimRowlessBackupArchives", _StandinReclaim
+    )
+
+
+class _StandinReclaim:
+    def __init__(self, **_kwargs: object) -> None:
+        pass
+
+    async def __call__(self) -> None:
+        return None
 
 
 def _standin_ownership(*_args: object, **_kwargs: object) -> FakeStoreOwnership:

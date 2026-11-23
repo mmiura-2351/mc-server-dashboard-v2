@@ -146,6 +146,9 @@ from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
 from mc_server_dashboard_api.servers.application.stop_intents import (
     StopIntentCounter,
 )
+from mc_server_dashboard_api.servers.application.unannounced_refusals import (
+    UnannouncedRefusals,
+)
 from mc_server_dashboard_api.servers.application.unrecorded_stops import (
     UnrecordedStops,
 )
@@ -162,6 +165,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
     CommandStatus,
     ControlPlane,
+    HeldServerWorkerNotConnectedError,
     UnavailableWorkerState,
     WorkerUnavailableError,
     console_line_bytes,
@@ -755,14 +759,21 @@ class StartServer:
             # KEEP desired=running + the assignment.
             if dispatch.attempted:
                 # The user's start IS satisfied.
-                await self._record_running(server, worker_id)
+                await self._record_running(
+                    server, worker_id, answered_at=outcome.answered_at
+                )
                 return server
             # A refused hydrate means this start launched nothing: the instance was
             # there before it, on whatever working set it had, which may be older
             # than the store's. So the player files are owed again (see
             # ``_record_running``), the start did not happen as asked, and the user
             # gets the start verb's "already running" conflict instead of a success.
-            await self._record_running(server, worker_id, owe_again=owed_group_files)
+            await self._record_running(
+                server,
+                worker_id,
+                answered_at=outcome.answered_at,
+                owe_again=owed_group_files,
+            )
             _LOG.warning(
                 "worker %s refused the hydrate for server %s because it already "
                 "runs an instance of it; this start does not give that Worker back",
@@ -991,7 +1002,10 @@ class StartServer:
                 # Nothing failed, so this returns, and the reconciler counts no
                 # failure.
                 await self._record_running(
-                    server, worker_id, owe_again=owed_group_files
+                    server,
+                    worker_id,
+                    answered_at=outcome.answered_at,
+                    owe_again=owed_group_files,
                 )
                 _LOG.warning(
                     "worker %s refused the hydrate for server %s because it "
@@ -1195,7 +1209,9 @@ class StartServer:
             # that did not say, an older Worker's, may have swapped.
             await self._unmark(marked, worker_id, stop_intent_count)
         if outcome.status is CommandStatus.INVALID_STATE:
-            await self._record_running(server, worker_id)
+            await self._record_running(
+                server, worker_id, answered_at=outcome.answered_at
+            )
             return server
         if outcome.status is CommandStatus.BUSY:
             # A BUSY start (or hydrate) means the Worker is in one of two UNSETTLED
@@ -1543,6 +1559,7 @@ class StartServer:
         server: Server,
         worker_id: WorkerId,
         *,
+        answered_at: dt.datetime | None,
         owe_again: list[PendingGroupSync] | None = None,
     ) -> None:
         """Record observed=running for an instance found live on ``worker_id``.
@@ -1551,6 +1568,13 @@ class StartServer:
         (#213): the Worker performed no transition, so no ``StatusChange`` will
         come to record it. The write asserts the row is still on ``worker_id``.
 
+        It is stamped ``answered_at``, the instant the API read that answer
+        (issue #4117), not when it is made: work done in between, such as
+        :meth:`_unmark`'s round trip, could otherwise stamp it after a report
+        read since, which it would then overwrite, or after the Worker's
+        session ended, whose ``unknown`` it would then outlive. An outcome no
+        Worker sent carries no instant and is stamped now.
+
         ``owe_again`` is passed when the refused step was the hydrate (issue
         #3865): the marks the start cleared with its intent, for a launch that did
         not happen. The instance keeps its own working set, and its snapshots
@@ -1558,7 +1582,7 @@ class StartServer:
         again in this same transaction, as :meth:`_owe_group_files_again` says.
         """
 
-        observed_at = self.clock.now()
+        observed_at = self.clock.now() if answered_at is None else answered_at
         async with self.uow:
             applied = await self.uow.servers.record_observed_state(
                 server.id,
@@ -2035,6 +2059,14 @@ class StopServer:
     # (issue #3441), so its replay waits the short grace rather than the full one.
     # Defaulted for the same reason as ``stop_refusals``.
     unrecorded_stops: UnrecordedStops = field(default_factory=UnrecordedStops)
+    # Where a write of a final-snapshot refusal whose COMMIT failed is recorded
+    # (issue #4152), so the next refused attempt of the server, in time or late,
+    # announces the refusal. Process-wide in production, shared with every
+    # ReleaseHeldServer, whose release forgets it; defaulted for the same reason
+    # as ``stop_refusals``.
+    unannounced_refusals: UnannouncedRefusals = field(
+        default_factory=UnannouncedRefusals
+    )
     # The per-server exclusion every snapshot-then-release flow holds (issue #3491,
     # ``stop_convergence.py``). Process-wide in production — every construction
     # site wires the one app-state instance; the private default only serves the
@@ -2060,7 +2092,9 @@ class StopServer:
             )
 
     @contextmanager
-    def _recording_unwritten_stop(self, server_id: ServerId) -> Iterator[None]:
+    def _recording_unwritten_stop(
+        self, server_id: ServerId, *, answered_at: dt.datetime | None
+    ) -> Iterator[None]:
         """Record a finished stop whose write raises, then re-raise (issue #3441).
 
         Without the record the row, left diverged and assigned, looks like a stop
@@ -2069,17 +2103,22 @@ class StopServer:
         answered the stop or reported the process gone, and no final snapshot of it
         can still be uploading.
 
-        The record carries the instant the write began, not the one it raised at
-        (issue #3981). A Worker that drops while the write fails is then newer than
-        the record, which no longer keeps the short grace: the Worker may be back
-        with a working set no final snapshot has taken.
+        The record carries ``answered_at``, the instant the API read the Worker's
+        answer the write follows (issue #4117), as the observed state converged
+        from that answer is stamped. A report read after the answer is then newer
+        than the record, and one read before it is not, however long the answer
+        waited to be handled. A write that follows no Worker's answer is recorded
+        at the instant it began, not the one it raised at (issue #3981). Either
+        way, a Worker that drops while the write fails is newer than the record,
+        which no longer keeps the short grace: the Worker may be back with a
+        working set no final snapshot has taken.
         """
 
-        began_at = self.clock.now()
+        recorded_at = self.clock.now() if answered_at is None else answered_at
         try:
             yield
         except Exception:
-            self.unrecorded_stops.record(server_id, at=began_at)
+            self.unrecorded_stops.record(server_id, at=recorded_at)
             raise
 
     async def _stop(
@@ -2103,6 +2142,19 @@ class StopServer:
                     owed_worker is not None
                     and self.control_plane.is_worker_connected(worker_id=owed_worker)
                 )
+                if (
+                    owed_worker is not None
+                    and server.final_snapshot_refusal is not None
+                    and not owed_on_connected_worker
+                ):
+                    # Held by a refused final snapshot (issue #4111): the stale-stop
+                    # arm would release it without the snapshot it is held for. Only
+                    # the Worker's return, the disconnected-Worker grace (PM ruling
+                    # 2(a) on #3697) or ``ReleaseHeldServer`` releases it. A row
+                    # with no refusal recorded is released at once, as before: the
+                    # manual move off a Worker that never returns (CONFIGURATION.md
+                    # Section 5.6).
+                    raise HeldServerWorkerNotConnectedError(str(owed_worker.value))
             else:
                 # ``None`` is a start intent no Worker holds yet, while the
                 # reconciler retries its placement (issue #3815). The stop withdraws
@@ -2190,6 +2242,7 @@ class StopServer:
                     worker_id=worker_id,
                     community_id=community_id,
                     server_id=server_id,
+                    answered_at=outcome.answered_at,
                 )
             return server
         if not outcome.success:
@@ -2199,8 +2252,16 @@ class StopServer:
             # (issue #2478). Without this the server the operator asked to stop keeps
             # running — and accepting players — for 11-12 minutes after a refusal the
             # system already knows about (issue #2442).
+            # Recorded as the answer was read (issue #4117), so a report read
+            # after it supersedes the refusal, however long the answer waited.
             self.stop_refusals.record_refusal(
-                server_id, outcome=outcome, at=self.clock.now()
+                server_id,
+                outcome=outcome,
+                at=(
+                    self.clock.now()
+                    if outcome.answered_at is None
+                    else outcome.answered_at
+                ),
             )
             raise _dispatch_failure(
                 server_id=server_id, kind="StopServer", outcome=outcome
@@ -2223,6 +2284,7 @@ class StopServer:
                 worker_id=worker_id,
                 community_id=community_id,
                 server_id=server_id,
+                answered_at=outcome.answered_at,
             )
         return server
 
@@ -2233,6 +2295,7 @@ class StopServer:
         worker_id: WorkerId,
         community_id: CommunityId,
         server_id: ServerId,
+        answered_at: dt.datetime | None,
     ) -> None:
         """Converge observed=stopped, snapshot, then DELAY the unassign (issue #847).
 
@@ -2296,10 +2359,12 @@ class StopServer:
         row once the grace window lapses if no late result arrives — grace-bounded.
         """
 
-        observed_at = self.clock.now()
+        # Stamped as the Worker's answer was read, as ``_record_running`` is (issue
+        # #4117).
+        observed_at = self.clock.now() if answered_at is None else answered_at
         # The Worker confirmed the stop and no final snapshot has been dispatched
         # yet, so nothing is in flight if this write fails.
-        with self._recording_unwritten_stop(server_id):
+        with self._recording_unwritten_stop(server_id, answered_at=answered_at):
             async with self.uow:
                 applied = await self.uow.servers.record_observed_state(
                     server_id,
@@ -2340,7 +2405,7 @@ class StopServer:
         # post-#847 no other path unassigns (the sink no longer does), so running the
         # clear cannot clobber a fresher write and removes the wedge the old
         # ``applied`` gate left for the full grace window.
-        upload_may_be_live = await self._final_snapshot(
+        upload_may_be_live, snapshot_answered_at = await self._final_snapshot(
             server=server, worker_id=worker_id
         )
         # Unlike ``_release_after_final_snapshot``, this clear is NOT gated on the
@@ -2373,7 +2438,10 @@ class StopServer:
             # Shielded through the guard (issue #3491), so a cancelled caller's
             # release keeps the server in flight until it lands.
             await self.stop_convergence.shield(
-                server_id, self._clear_held_assignment(server, worker_id, server_id)
+                server_id,
+                self._clear_held_assignment(
+                    server, worker_id, server_id, answered_at=snapshot_answered_at
+                ),
             )
 
     async def _release_after_final_snapshot(
@@ -2383,6 +2451,7 @@ class StopServer:
         worker_id: WorkerId,
         community_id: CommunityId,
         server_id: ServerId,
+        answered_at: dt.datetime | None,
     ) -> None:
         """Release a stop the Worker answered ``SERVER_NOT_FOUND`` (issue #2448).
 
@@ -2453,10 +2522,12 @@ class StopServer:
         # permanent wedge shape of #2439/#2452. Holding costs a grace window and
         # nothing else: every held triple IS reconcilable, and the arm it lands on
         # re-runs this release.
-        observed_at = self.clock.now()
+        # Stamped as the Worker's answer was read, as ``_record_running`` is (issue
+        # #4117).
+        observed_at = self.clock.now() if answered_at is None else answered_at
         # The Worker answered that no instance remains, and no final snapshot has been
         # dispatched yet, so nothing is in flight if this write fails (issue #3441).
-        with self._recording_unwritten_stop(server_id):
+        with self._recording_unwritten_stop(server_id, answered_at=answered_at):
             async with self.uow:
                 current = await self.uow.servers.get_by_id(server_id)
                 if (
@@ -2502,18 +2573,26 @@ class StopServer:
                 bedrock_port=server.bedrock_port,
                 running=False,
             )
-        upload_may_be_live = await self._final_snapshot(
+        upload_may_be_live, snapshot_answered_at = await self._final_snapshot(
             server=server, worker_id=worker_id
         )
         if at_rest_under_us and not upload_may_be_live:
             # Shielded through the guard (issue #3491), so a cancelled caller's
             # release keeps the server in flight until it lands.
             await self.stop_convergence.shield(
-                server_id, self._clear_held_assignment(server, worker_id, server_id)
+                server_id,
+                self._clear_held_assignment(
+                    server, worker_id, server_id, answered_at=snapshot_answered_at
+                ),
             )
 
     async def _clear_held_assignment(
-        self, server: Server, worker_id: WorkerId, server_id: ServerId
+        self,
+        server: Server,
+        worker_id: WorkerId,
+        server_id: ServerId,
+        *,
+        answered_at: dt.datetime | None,
     ) -> None:
         """Release the assignment held across the final snapshot (issue #847).
 
@@ -2521,11 +2600,14 @@ class StopServer:
         re-placed during the window (its unassigned-only CAS saw the held
         assignment), so the guard normally matches; it makes the clear a no-op rather
         than a clobber if the row moved by any other path.
+
+        ``answered_at`` is the instant the API read the final snapshot's answer,
+        ``None`` when no snapshot was answered.
         """
 
         # The final snapshot has settled, so nothing is in flight if this write fails
         # (issue #3441).
-        with self._recording_unwritten_stop(server_id):
+        with self._recording_unwritten_stop(server_id, answered_at=answered_at):
             async with self.uow:
                 cleared = await self.uow.servers.clear_assignment_after_final_snapshot(
                     server_id, worker_id
@@ -2533,8 +2615,11 @@ class StopServer:
                 await self.uow.commit()
         if cleared:
             _reflect_release(server)
+            self.unannounced_refusals.forget(server_id)
 
-    async def _final_snapshot(self, *, server: Server, worker_id: WorkerId) -> bool:
+    async def _final_snapshot(
+        self, *, server: Server, worker_id: WorkerId
+    ) -> tuple[bool, dt.datetime | None]:
         """Capture the working set of a server whose process is gone.
 
         Shared by ``__call__`` and ``redispatch_stop`` (issue #846) so reconciler-
@@ -2569,7 +2654,9 @@ class StopServer:
         uploading, so the caller must HOLD the assignment rather than release it
         while the upload is in flight. ``False`` for success and for a failed
         snapshot, including one the API could not send at all (no data-plane URL),
-        which says nothing about the Worker — clearing is safe.
+        which says nothing about the Worker — clearing is safe. With it comes the
+        instant the API read the snapshot's answer (issue #4117), ``None`` when no
+        answer was read, for the caller's release to record if its write fails.
 
         A Worker whose session ended re-raises the ``WorkerUnavailableError``
         (``not_connected``) instead: at dispatch, in flight, or retired by a fast
@@ -2593,11 +2680,14 @@ class StopServer:
         settles otherwise, or an operator's release without it
         (``ReleaseHeldServer``), releases the row.
 
-        A later attempt that is not refused clears the recorded refusal: a release
-        clears it with the assignment, and a timeout or a session end, which keep
-        the row, clear it here. It is written only from here and from the late
-        result of a final snapshot, both under the stop-convergence claim, so the
-        value this reads before the dispatch is still the row's when it answers.
+        Only a release clears the recorded refusal, with the assignment. A retry
+        left unanswered (a timeout or a session end) keeps the row and the refusal
+        alike (issue #4111): the snapshot the row is held for is still owed, and
+        a stop while its Worker is gone must not mistake the row for one never
+        refused. A later refusal rewrites it. It is written only from here and
+        from the late result of a final snapshot, both under the stop-convergence
+        claim, so the value this reads before the dispatch is still the row's
+        when it answers.
 
         A row whose Worker is not known to hold the store's working set
         (``awaiting_hydrate``: it has not hydrated the server under this assignment,
@@ -2633,7 +2723,8 @@ class StopServer:
                 server_id.value,
                 worker_id.value,
             )
-            return False
+            return False, None
+        answered_at: dt.datetime | None = None
         try:
             snapshot = await self.control_plane.snapshot(
                 worker_id=worker_id,
@@ -2641,6 +2732,7 @@ class StopServer:
                 server_id=server_id,
                 final=True,
             )
+            answered_at = snapshot.answered_at
             refusal = _FINAL_SNAPSHOT_REFUSALS_KEEPING_THE_WORKER.get(snapshot.status)
             if refusal is not None:
                 detail = snapshot.message or snapshot.status.value
@@ -2654,9 +2746,13 @@ class StopServer:
                     worker_id.value,
                     detail,
                 )
-                # Answered, so nothing of this snapshot is in flight.
-                self.unrecorded_stops.record(server_id, at=self.clock.now())
-                await self._record_final_snapshot_answer(
+                # Answered, so nothing of this snapshot is in flight. Recorded as
+                # the answer was read (issue #4117).
+                self.unrecorded_stops.record(
+                    server_id,
+                    at=self.clock.now() if answered_at is None else answered_at,
+                )
+                await self._record_final_snapshot_refusal(
                     server, worker_id, refusal, recorded=recorded
                 )
                 raise FinalSnapshotRefusedError(detail, status=snapshot.status)
@@ -2705,10 +2801,7 @@ class StopServer:
                     "assignment for the stale-stop arm to clear once grace lapses",
                     server_id.value,
                 )
-                await self._record_final_snapshot_answer(
-                    server, worker_id, None, recorded=recorded
-                )
-                return True
+                return True, None
             if exc.worker_state is UnavailableWorkerState.NOT_CONNECTED:
                 _LOG.warning(
                     "final snapshot could not reach the Worker for server %s: its "
@@ -2717,9 +2810,6 @@ class StopServer:
                     "takes the snapshot (issues #3963, #3981)",
                     server_id.value,
                 )
-                await self._record_final_snapshot_answer(
-                    server, worker_id, None, recorded=recorded
-                )
                 raise
             _LOG.error(
                 "final snapshot could not reach the Worker for server %s; the "
@@ -2727,52 +2817,67 @@ class StopServer:
                 "and progression since the last periodic snapshot is lost",
                 server_id.value,
             )
-        return False
+        return False, answered_at
 
-    async def _record_final_snapshot_answer(
+    async def _record_final_snapshot_refusal(
         self,
         server: Server,
         worker_id: WorkerId,
-        refusal: FinalSnapshotRefusal | None,
+        refusal: FinalSnapshotRefusal,
         *,
         recorded: FinalSnapshotRefusal | None,
     ) -> None:
-        """Record on the row whether the final snapshot was refused (issue #3697).
+        """Record on the row that the final snapshot was refused (issue #3697).
 
-        ``refusal`` is the refusal that keeps the Worker, or ``None`` for an
-        answer that keeps the row without being one (a timeout, a session end).
         ``recorded`` is the value the row held before the dispatch; an unchanged
         value is not written again, so a refusal repeated every reconciler tick
         costs no write. The write's guard (still stopped, still this Worker's)
         matches under the stop-convergence claim: every release holds the claim,
         and no start places a row that is still assigned. So the entity takes the
-        value either way.
+        value whether or not the write changed the row.
 
-        A clear that fails is logged, not raised: the answer it follows decides
-        what the caller does (a timeout holds, a session end raises), and an
-        operator's re-stop would otherwise answer 500 for it. The row keeps the
-        refusal until a later answer is recorded or a release clears it.
+        A write that fails is logged, not raised (issue #4103): the refusal it
+        follows decides what the caller does (the stop that set the intent
+        answers, a convergence raises it, and the reconciler classifies it), and
+        the database error would otherwise replace it. The row is held all the
+        same, since it stays assigned, and keeps ``recorded`` until the next
+        refused retry writes the refusal. The entity keeps ``recorded`` too.
+
+        A COMMIT that fails, or whose caller is cancelled at its await, may
+        have landed with its answer unread, and then the row holds the refusal
+        with no frame published. That write is recorded
+        (``unannounced_refusals``, issue #4152), and the next refused attempt
+        writes the refusal as a retry even when it reads it recorded, which
+        publishes the frame. An API restart loses the record, and a reload
+        then shows the hold.
         """
 
-        if refusal is not recorded:
+        retry = self.unannounced_refusals.pending(server.id)
+        if refusal is not recorded or retry:
             try:
                 async with self.uow:
                     await self.uow.servers.set_final_snapshot_refusal(
-                        server.id, worker_id, refusal
+                        server.id, worker_id, refusal, retry=retry
                     )
-                    await self.uow.commit()
+                    try:
+                        await self.uow.commit()
+                    except BaseException:
+                        # A cancellation at the await may leave it landed too.
+                        self.unannounced_refusals.record(server.id)
+                        raise
             except Exception:
-                if refusal is not None:
-                    raise
                 _LOG.warning(
-                    "could not clear the recorded final-snapshot refusal of server "
-                    "%s; it stays recorded until a later answer is recorded or the "
-                    "server is released",
+                    "could not record the final-snapshot refusal of server %s: it "
+                    "stays assigned to worker %s, and the next refused retry of "
+                    "the snapshot records the refusal, or announces it if this "
+                    "write's COMMIT landed unanswered (issues #4103, #4152)",
                     server.id.value,
+                    worker_id.value,
                     exc_info=True,
                 )
                 server.final_snapshot_refusal = recorded
                 return
+            self.unannounced_refusals.forget(server.id)
         server.final_snapshot_refusal = refusal
 
     async def redispatch_stop(
@@ -2845,9 +2950,16 @@ class StopServer:
             # Keep the verdict current across the reconciler's own retries (issue
             # #2478): a replay the Worker refuses again is still settled, so the next
             # tick stays on the short grace and the per-server backoff — not the full
-            # grace — governs the cadence.
+            # grace — governs the cadence. Recorded as the answer was read, as
+            # ``_stop`` records it (issue #4117).
             self.stop_refusals.record_refusal(
-                server_id, outcome=outcome, at=self.clock.now()
+                server_id,
+                outcome=outcome,
+                at=(
+                    self.clock.now()
+                    if outcome.answered_at is None
+                    else outcome.answered_at
+                ),
             )
             raise _dispatch_failure(
                 server_id=server_id, kind="StopServer", outcome=outcome
@@ -2862,6 +2974,7 @@ class StopServer:
                 worker_id=worker_id,
                 community_id=community_id,
                 server_id=server_id,
+                answered_at=outcome.answered_at,
             )
             return server
         # A confirmed live stop: converge observed=stopped, take the final snapshot,
@@ -2872,6 +2985,7 @@ class StopServer:
             worker_id=worker_id,
             community_id=community_id,
             server_id=server_id,
+            answered_at=outcome.answered_at,
         )
         return server
 
@@ -3014,9 +3128,10 @@ class StopServer:
         look like a Worker long gone: the reconciler the one it measured the grace
         on, an operator stop the one it read in its own unit of work. A Worker
         already gone when the operator's stop began is released at once, as
-        documented. The owed stop's own release, once the Worker has answered it,
-        keeps the row the same way when its final snapshot fails on a session end
-        (issue #3981).
+        documented, unless the row records a refused final snapshot: that stop
+        never reaches here (issue #4111). The owed stop's own release, once the
+        Worker has answered it, keeps the row the same way when its final snapshot
+        fails on a session end (issue #3981).
 
         Step A also withdraws the intent again, with a bump, as
         :meth:`_redispatch_stop` does and for the same reasons: the write that
@@ -3080,11 +3195,12 @@ class StopServer:
 
         # --- Step B: re-drive the final snapshot when the process is gone and
         # the worker is still reachable (observed stopped, #1004; crashed, #2439)
+        snapshot_answered_at: dt.datetime | None = None
         if (
             server.observed_state in (ObservedState.STOPPED, ObservedState.CRASHED)
             and connected
         ):
-            upload_may_be_live = await self._final_snapshot(
+            upload_may_be_live, snapshot_answered_at = await self._final_snapshot(
                 server=server, worker_id=worker_id
             )
             if upload_may_be_live:
@@ -3139,9 +3255,13 @@ class StopServer:
             # only while no other final snapshot is outstanding, and a disconnected
             # Worker's uploads died with its session. The stopping leg above and the
             # unknown leg here record nothing: their stop was interrupted, not
-            # finished, and the Worker may still be driving it.
+            # finished, and the Worker may still be driving it. A release after
+            # Step B's snapshot is recorded as its answer was read (issue #4117);
+            # one with no snapshot answered, as its write begins.
             with (
-                self._recording_unwritten_stop(server_id)
+                self._recording_unwritten_stop(
+                    server_id, answered_at=snapshot_answered_at
+                )
                 if wedged_at is not ObservedState.UNKNOWN
                 else nullcontext()
             ):
@@ -3152,6 +3272,7 @@ class StopServer:
                     await self.uow.commit()
         if cleared:
             _reflect_release(server)
+            self.unannounced_refusals.forget(server_id)
             if wedged_at is ObservedState.UNKNOWN:
                 _LOG.warning(
                     "recovered a stop wedged at (stopped, unknown, assigned) for "
@@ -3326,15 +3447,23 @@ class StopServer:
         result is dropped above, and a newer one's answer arrives on the same
         Worker stream behind this result, or not at all once that stream ends.
         A retry of a late refusal takes no unassigned row: it has no release to
-        announce, and the row it held was released since.
+        announce, and the row it held was released since. On a row it still
+        holds, it announces the refusal even when it finds it recorded, by its
+        earlier attempt or before (issue #4104). So does a first attempt that
+        follows an in-time write of the refusal whose COMMIT failed (issue
+        #4152), which may have landed unannounced.
         """
 
         refusal = _FINAL_SNAPSHOT_REFUSALS_KEEPING_THE_WORKER.get(outcome.status)
-        answered_at = self.clock.now()
+        # The instant the API read the late result (issue #4117), which each held
+        # retry of it carries too.
+        answered_at = (
+            self.clock.now() if outcome.answered_at is None else outcome.answered_at
+        )
         # The late result says the upload settled. If the write fails, record it for
         # the reconciler (issue #3441): only an outage's failure is retried (issue
         # #3614), and only while the Worker's session lasts.
-        with self._recording_unwritten_stop(server_id):
+        with self._recording_unwritten_stop(server_id, answered_at=answered_at):
             async with self.uow:
                 server = await self.uow.servers.get_by_id(server_id)
                 if (
@@ -3366,8 +3495,13 @@ class StopServer:
                     else ""
                 )
                 if refusal is not None:
+                    # An in-time write of the refusal whose COMMIT failed may
+                    # have landed unannounced (issue #4152).
                     await self.uow.servers.set_final_snapshot_refusal(
-                        server_id, worker_id, refusal
+                        server_id,
+                        worker_id,
+                        refusal,
+                        retry=retry or self.unannounced_refusals.pending(server_id),
                     )
                     cleared = False
                 else:
@@ -3378,6 +3512,7 @@ class StopServer:
                     )
                 await self.uow.commit()
         if refusal is not None:
+            self.unannounced_refusals.forget(server_id)
             # Answered, so nothing of the snapshot is in flight.
             self.unrecorded_stops.record(server_id, at=answered_at)
             _LOG.warning(
@@ -3393,6 +3528,7 @@ class StopServer:
             return
         if not cleared:
             return
+        self.unannounced_refusals.forget(server_id)
         if outcome.success:
             _LOG.info(
                 "released worker %s for server %s on a LATE successful final "

@@ -21,6 +21,8 @@ domain Port stays transport-free (ARCHITECTURE.md Section 2.1).
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import datetime as dt
 import logging
 import math
 import uuid
@@ -68,6 +70,10 @@ from mc_server_dashboard_api.fleet.domain.value_objects import DriverKind, Worke
 from mcsd.controlplane.v1 import control_plane_pb2 as pb
 
 _LOG = logging.getLogger(__name__)
+
+# A Worker's answer to a command, with the instant the servicer read it off the
+# stream (issue #4117).
+_Answer = tuple[pb.CommandResult, dt.datetime]
 
 # The largest encoded control-plane message either side sends or accepts,
 # inclusive (CONTROL_PLANE.md Section 3.1). It is the file cap (MAX_EDIT_BYTES,
@@ -195,7 +201,7 @@ class ControlPlaneState:
         # for, and a final snapshot, which must run however late.
         self._pending: dict[
             str,
-            tuple[WorkerId, asyncio.Future[pb.CommandResult], float | None],
+            tuple[WorkerId, asyncio.Future[_Answer], float | None],
         ] = {}
         # command_id -> (dispatched worker, server id) for an IN-FLIGHT snapshot
         # command (issue #891). Held only while the future is pending so a timeout
@@ -291,8 +297,11 @@ class ControlPlaneState:
         *,
         snapshot_server_id: str | None = None,
         budget: float | None = None,
-    ) -> asyncio.Future[pb.CommandResult]:
+    ) -> asyncio.Future[_Answer]:
         """Create and track a future awaiting the result for ``command_id``.
+
+        The future resolves to the result and the instant the servicer read it
+        (:meth:`resolve`).
 
         ``worker_id`` is the worker the command was dispatched to, recorded so
         :meth:`fail_worker_pending` can fail it on that worker's disconnect.
@@ -309,7 +318,7 @@ class ControlPlaneState:
         """
 
         loop = asyncio.get_running_loop()
-        future: asyncio.Future[pb.CommandResult] = loop.create_future()
+        future: asyncio.Future[_Answer] = loop.create_future()
         deadline = None if budget is None else loop.time() + budget
         self._pending[command_id] = (worker_id, future, deadline)
         if snapshot_server_id is not None:
@@ -339,9 +348,14 @@ class ControlPlaneState:
         worker_id: WorkerId,
         result: pb.CommandResult,
         *,
+        received_at: dt.datetime,
         retry: bool = False,
     ) -> None:
         """Resolve the future waiting on ``command_id`` with ``result``.
+
+        ``received_at`` is the instant the servicer read ``result`` off the
+        stream (issue #4117); the future carries it with the result, and so does
+        a late final-snapshot result on its way to the sink.
 
         A result for an unknown/already-resolved command is ignored, so a late
         or duplicate ``CommandResult`` never crashes the inbound loop — except a
@@ -367,7 +381,7 @@ class ControlPlaneState:
             # late final-snapshot result for a dispatch that timed out or was
             # cancelled (#891/#901).
             await self._clear_on_late_snapshot(
-                command_id, worker_id, result, retry=retry
+                command_id, worker_id, result, received_at=received_at, retry=retry
             )
             return
         owning_worker, future, _ = entry
@@ -384,7 +398,7 @@ class ControlPlaneState:
         del self._pending[command_id]
         snapshot = self._snapshot_servers.pop(command_id, None)
         if not future.done():
-            future.set_result(result)
+            future.set_result((result, received_at))
             return
         # The future was cancelled by asyncio.wait_for between the cancellation
         # and discard_pending running (issue #1996). Promote the snapshot record
@@ -392,7 +406,7 @@ class ControlPlaneState:
         if future.cancelled() and snapshot is not None:
             self._late_snapshots[command_id] = snapshot
             await self._clear_on_late_snapshot(
-                command_id, worker_id, result, retry=retry
+                command_id, worker_id, result, received_at=received_at, retry=retry
             )
 
     async def _clear_on_late_snapshot(
@@ -401,6 +415,7 @@ class ControlPlaneState:
         worker_id: WorkerId,
         result: pb.CommandResult,
         *,
+        received_at: dt.datetime,
         retry: bool,
     ) -> None:
         """Release a held assignment on a late final-snapshot result (#891).
@@ -463,6 +478,7 @@ class ControlPlaneState:
                 worker_id=worker_id.value,
                 code=_to_result(result).code,
                 message=_failure_detail(result),
+                received_at=received_at,
                 retry=retry,
             )
         except Exception as exc:
@@ -851,7 +867,7 @@ class GrpcControlPlane(ControlPlane):
         )
         await queue.put(msg)
         try:
-            result = await asyncio.wait_for(future, timeout=timeout)
+            result, received_at = await asyncio.wait_for(future, timeout=timeout)
         except TimeoutError as exc:
             self._state.discard_pending(command_id)
             raise CommandTimedOutError(command_id) from exc
@@ -874,7 +890,7 @@ class GrpcControlPlane(ControlPlane):
             # body (issue #3950).
             self._state.discard_pending(command_id)
             raise
-        return _to_result(result)
+        return dataclasses.replace(_to_result(result), answered_at=received_at)
 
     async def dispatch_fire_and_forget(
         self, *, worker_id: WorkerId, server_id: str, command: Command
@@ -916,10 +932,10 @@ class GrpcControlPlane(ControlPlane):
         self,
         command_id: str,
         server_id: str,
-        future: asyncio.Future[pb.CommandResult],
+        future: asyncio.Future[_Answer],
     ) -> None:
         try:
-            result = await asyncio.wait_for(future, timeout=self._timeout)
+            result, _ = await asyncio.wait_for(future, timeout=self._timeout)
         except (TimeoutError, WorkerNotConnectedError):
             # The dial-back never arriving is a relay-side timeout (RELAY.md
             # Section 10), recovered there; the API only notes the missing result.

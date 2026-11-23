@@ -17,6 +17,8 @@ describe("backupErrorPresentation", () => {
     [409, "server_not_stopped", "backups.error.serverMustBeStopped"],
     [409, "server_busy", "backups.error.serverBusy"],
     [409, "worker_busy", "backups.error.serverBusy"],
+    // A create the stop's Worker still holds the server for (#3998, #4003).
+    [409, "server_assigned", "common.serverAssigned"],
     // A running server's backup cannot quiesce the world when its
     // server.properties is refused (issue #3347).
     [
@@ -105,6 +107,14 @@ describe("backupRestoreErrorPresentation", () => {
   it("names the restore precondition for server_not_stopped", () => {
     expect(backupRestoreErrorPresentation(409, "server_not_stopped")).toBe(
       "backups.error.notStopped",
+    );
+  });
+
+  // A restore the stop's Worker still holds the server for (#3998): the
+  // server reads stopped, and waiting for the release is the remedy (#4003).
+  it("names the release for server_assigned", () => {
+    expect(backupRestoreErrorPresentation(409, "server_assigned")).toBe(
+      "common.serverAssigned",
     );
   });
 

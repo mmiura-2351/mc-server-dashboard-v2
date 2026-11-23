@@ -306,6 +306,7 @@ def _worker(status: WorkerStatus) -> WorkerSnapshot:
         last_heartbeat_at=now,
         status=status,
         offline_since=None,
+        disconnected_at=None,
         assigned_count=1,
     )
 

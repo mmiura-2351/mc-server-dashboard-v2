@@ -870,6 +870,45 @@ class ServerRepositoryContract:
         assert row is not None
         assert (row.observed_state, row.observed_at) == (state, _NOW)
 
+    async def test_lists_the_workers_whose_servers_a_disconnect_would_change(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+    ) -> None:
+        # Issue #4130: a Worker assigned a server observed neither unknown nor
+        # crashed, one server per state on a Worker of its own; an unassigned
+        # server names no Worker.
+        items = []
+        for offset, state in enumerate(ObservedState):
+            item = server(contract_community_id, name=f"srv-{state.value}")
+            item.observed_state = state
+            if state is not ObservedState.CRASHED:
+                item.crash_reason = None
+                item.crash_detail = None
+            item.game_port = 25565 + offset
+            item.bedrock_port = 19132 + offset
+            items.append(item)
+        unassigned = server(contract_community_id, name="unassigned")
+        unassigned.observed_state = ObservedState.STOPPED
+        unassigned.crash_reason = None
+        unassigned.crash_detail = None
+        unassigned.assigned_worker_id = None
+        unassigned.game_port = 25600
+        unassigned.bedrock_port = 19200
+        async with server_repository_harness.open() as tx:
+            for item in [*items, unassigned]:
+                await tx.repository.add(item)
+            await tx.commit()
+
+        async with server_repository_harness.open() as tx:
+            listed = await tx.repository.workers_with_trusted_observed_state()
+
+        assert listed == {
+            item.assigned_worker_id
+            for item in items
+            if item.observed_state not in (ObservedState.UNKNOWN, ObservedState.CRASHED)
+        }
+
     @pytest.mark.parametrize(
         ("state", "observed_at"),
         [(ObservedState.RUNNING, _NOW), (ObservedState.STOPPED, None)],
@@ -1225,8 +1264,6 @@ class ServerRepositoryContract:
                 FinalSnapshotRefusal.BUSY,
                 False,
             ),
-            (DesiredState.STOPPED, "w1", FinalSnapshotRefusal.BUSY, None, True),
-            (DesiredState.STOPPED, "w1", None, None, False),
             (DesiredState.RUNNING, "w1", None, FinalSnapshotRefusal.BUSY, False),
             (DesiredState.STOPPED, "w2", None, FinalSnapshotRefusal.BUSY, False),
             (DesiredState.STOPPED, None, None, FinalSnapshotRefusal.BUSY, False),
@@ -1236,8 +1273,6 @@ class ServerRepositoryContract:
             "unavailable",
             "changed",
             "unchanged",
-            "cleared",
-            "already-clear",
             "running",
             "other-worker",
             "unassigned",
@@ -1250,11 +1285,11 @@ class ServerRepositoryContract:
         desired: DesiredState,
         holder: str | None,
         stored: FinalSnapshotRefusal | None,
-        refusal: FinalSnapshotRefusal | None,
+        refusal: FinalSnapshotRefusal,
         applies: bool,
     ) -> None:
         # Issue #4054: worker w1 refused the final snapshot of a stop that still
-        # holds it, or a later attempt was no longer refused. Only a change counts.
+        # holds it. Only a change counts.
         workers = {"w1": WorkerId(uuid.uuid4()), "w2": WorkerId(uuid.uuid4())}
         item = server(contract_community_id)
         item.desired_state = desired
@@ -1274,6 +1309,51 @@ class ServerRepositoryContract:
             row = await tx.repository.get_by_id(item.id)
         assert row is not None
         assert row.final_snapshot_refusal is (refusal if applies else stored)
+
+    @pytest.mark.parametrize(
+        ("desired", "holder", "stored", "applies"),
+        [
+            (DesiredState.STOPPED, "w1", FinalSnapshotRefusal.BUSY, True),
+            (DesiredState.STOPPED, "w1", None, True),
+            (DesiredState.RUNNING, "w1", None, False),
+            (DesiredState.STOPPED, "w2", None, False),
+            (DesiredState.STOPPED, None, None, False),
+        ],
+        ids=["unchanged", "changed", "running", "other-worker", "unassigned"],
+    )
+    async def test_a_retry_counts_a_final_snapshot_refusal_already_recorded(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+        desired: DesiredState,
+        holder: str | None,
+        stored: FinalSnapshotRefusal | None,
+        applies: bool,
+    ) -> None:
+        # Issue #4104: the attempt a held retry repeats may have recorded the
+        # refusal with its answer lost, so the same refusal again counts too,
+        # under the same guard.
+        workers = {"w1": WorkerId(uuid.uuid4()), "w2": WorkerId(uuid.uuid4())}
+        item = server(contract_community_id)
+        item.desired_state = desired
+        item.observed_state = ObservedState.STOPPED
+        item.assigned_worker_id = None if holder is None else workers[holder]
+        item.final_snapshot_refusal = stored
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            changed = await tx.repository.set_final_snapshot_refusal(
+                item.id, workers["w1"], FinalSnapshotRefusal.BUSY, retry=True
+            )
+            await tx.commit()
+        assert changed is applies
+        async with server_repository_harness.open() as tx:
+            row = await tx.repository.get_by_id(item.id)
+        assert row is not None
+        assert row.final_snapshot_refusal is (
+            FinalSnapshotRefusal.BUSY if applies else stored
+        )
 
     @pytest.mark.parametrize(
         "release", ["lifecycle", "observed-unassign", "final-snapshot", "stale"]
@@ -1778,6 +1858,24 @@ class ScheduleRunRepositoryContract:
             saved = await tx.repository.list_for_schedule(contract_schedule_id)
         assert len(saved) == 1
         assert saved[0].outcome is ScheduleRunOutcome.SUCCESS
+
+    async def test_a_run_added_again_keeps_its_one_row(
+        self,
+        schedule_run_repository_harness: RepositoryHarness[ScheduleRunRepository],
+        contract_schedule_id: ScheduleId,
+    ) -> None:
+        # A record retried after a COMMIT that applied but was answered as
+        # failed adds the same run again (issue #4141).
+        item = run(contract_schedule_id)
+        async with schedule_run_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+        async with schedule_run_repository_harness.open() as tx:
+            await tx.repository.add(replace(item, detail="added again"))
+            await tx.commit()
+        async with schedule_run_repository_harness.open() as tx:
+            listed = await tx.repository.list_for_schedule(contract_schedule_id)
+        assert [(r.id, r.detail) for r in listed] == [(item.id, None)]
 
 
 class ResourcePackRepositoryContract:

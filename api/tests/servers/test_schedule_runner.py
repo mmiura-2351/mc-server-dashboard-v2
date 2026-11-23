@@ -11,6 +11,7 @@ notification emission, and per-schedule tick isolation.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import logging
 import uuid
@@ -81,6 +82,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 )
 from tests.audit.fakes import RecordingAuditRecorder
 from tests.servers.fakes import (
+    DatabaseOutageError,
     FakeBackupArchiveStore,
     FakeClock,
     FakeControlPlane,
@@ -90,6 +92,7 @@ from tests.servers.fakes import (
     FakeServerRepository,
     FakeStoreGenerationReader,
     FakeUnitOfWork,
+    OutageUnitOfWork,
 )
 
 _NOW = dt.datetime(2026, 7, 11, 12, 0, 30, tzinfo=dt.timezone.utc)
@@ -184,8 +187,9 @@ def _env(
     backup_retry_delay: dt.timedelta = dt.timedelta(minutes=30),
     warning_grace: dt.timedelta = WARNING_GRACE_FLOOR,
     deferral_bound: dt.timedelta = _DEFERRAL_BOUND,
+    uow: FakeUnitOfWork | None = None,
 ) -> _Env:
-    uow = FakeUnitOfWork()
+    uow = uow or FakeUnitOfWork()
     cp = control_plane or FakeControlPlane()
     the_clock = clock or FakeClock(_NOW)
     store = backup_store or FakeBackupArchiveStore()
@@ -891,7 +895,9 @@ async def test_a_held_occurrence_skip_keeps_a_retry_not_yet_due() -> None:
     env.uow.servers.seed(server)
     env.uow.schedules.seed(schedule)
     await env.runner.tick()
-    assert env.runner._backup_retry == {schedule.id: day.replace(hour=3, minute=30)}
+    assert env.runner._backup_retry == {
+        schedule.id: (day.replace(hour=3, minute=30), None)
+    }
 
     env.uow.servers.by_id[server.id].assigned_worker_id = _WORKER
     store._missing = False
@@ -902,7 +908,9 @@ async def test_a_held_occurrence_skip_keeps_a_retry_not_yet_due() -> None:
         ScheduleRunOutcome.FAILURE,
         ScheduleRunOutcome.SKIPPED,
     ]
-    assert env.runner._backup_retry == {schedule.id: day.replace(hour=3, minute=30)}
+    assert env.runner._backup_retry == {
+        schedule.id: (day.replace(hour=3, minute=30), None)
+    }
 
     env.uow.servers.by_id[server.id].assigned_worker_id = None  # released at 03:25
     await _tick_at(env, day.replace(hour=3, minute=30))
@@ -932,7 +940,7 @@ async def test_a_held_occurrence_skip_takes_a_retry_due_that_very_tick() -> None
     env.uow.schedules.seed(schedule)
     await env.runner.tick()  # fails -> arms the retry 30 minutes on
     retry_at = _NOW + dt.timedelta(minutes=30)
-    assert env.runner._backup_retry == {schedule.id: retry_at}
+    assert env.runner._backup_retry == {schedule.id: (retry_at, None)}
 
     # An occurrence first deferred a bound and a tick before the retry is skipped
     # at the retry's own instant. The retry is due then, so it goes with it.
@@ -1046,6 +1054,56 @@ async def test_a_held_backup_given_up_as_its_schedule_goes_is_not_said_recorded(
     ]
     assert len(warnings) == 1
     assert "the schedule was deleted" in warnings[0]
+    assert env.runner._deferred == {}
+
+
+async def test_a_held_retry_given_up_as_its_schedule_goes_is_not_said_recorded(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    store = FakeBackupArchiveStore(missing=True)  # the occurrence fails
+    env = _env(backup_store=store)
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        cadence=_HOURLY,
+        only_when_running=False,
+        next_run_at=_NOW.replace(minute=0, second=0),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+    await env.runner.tick()  # fails -> arms the retry 30 minutes on
+    env.uow.schedules.by_id[schedule.id] = _replace_next_run(
+        env.uow.schedules.by_id[schedule.id], _NOW + dt.timedelta(days=1)
+    )
+    env.uow.servers.by_id[server.id].assigned_worker_id = _WORKER
+    store._missing = False
+    retry_at = _NOW + dt.timedelta(minutes=30)
+    await _tick_at(env, retry_at)  # deferred
+
+    # Past the bound, the schedule is deleted after the retry's claim and before
+    # its skipped run's record.
+    real_lock = env.uow.schedules.lock
+
+    async def lock_then_delete(schedule_id: ScheduleId) -> Schedule | None:
+        found = await real_lock(schedule_id)
+        env.uow.schedules.by_id.pop(schedule_id, None)
+        return found
+
+    env.uow.schedules.lock = lock_then_delete  # type: ignore[method-assign]
+    await _tick_at(env, retry_at + _DEFERRAL_BOUND + _TICK)
+
+    assert _rows(env, schedule) == [(ScheduleRunOutcome.FAILURE, "action failed")]
+    assert _gave_up_lines(caplog, schedule) == []
+    warnings = [
+        line
+        for line in _lines_naming(caplog, logging.WARNING, schedule)
+        if "backup retry" in line
+    ]
+    assert len(warnings) == 1
+    assert "the schedule was deleted" in warnings[0]
+    assert env.runner._backup_retry == {}
     assert env.runner._deferred == {}
 
 
@@ -1278,6 +1336,703 @@ class _StorageUnavailableBackupStore(FakeBackupArchiveStore):
         )
 
         raise BackupStorageUnavailableError(str(server_id.value))
+
+
+class _FailsAndTakesTheDatabaseDown(FakeBackupArchiveStore):
+    """The store refuses every archive, and the database goes down with it."""
+
+    def __init__(self, uow: OutageUnitOfWork) -> None:
+        super().__init__()
+        self._uow = uow
+        self.attempts = 0
+
+    async def create_from_current(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> None:
+        from mc_server_dashboard_api.servers.domain.errors import (
+            BackupStorageUnavailableError,
+        )
+
+        self.attempts += 1
+        self._uow.down = True
+        raise BackupStorageUnavailableError(str(server_id.value))
+
+
+async def test_backups_failing_in_a_database_outage_leave_no_rows() -> None:
+    # Production, 2026-10-15 (issue #4086): the store refused every archive and
+    # the database went down with it. No run could be recorded, so the occurrence
+    # ran again every tick, and each run left a row with no archive behind.
+    uow = OutageUnitOfWork()
+    store = _FailsAndTakesTheDatabaseDown(uow)
+    env = _env(backup_store=store, uow=uow)
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        # Keeps the next occurrence clear of the ticks below.
+        cadence=_HOURLY,
+        only_when_running=False,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    for tick in range(3):
+        uow.down = False
+        # The tick's own warnings poll meets the same outage.
+        with contextlib.suppress(DatabaseOutageError):
+            await _tick_at(env, _NOW + tick * _TICK)
+
+    # It runs once now: a later tick records the run it owes (issue #4108).
+    assert store.attempts == 1
+    assert env.uow.backups.by_id == {}
+
+
+# --- an occurrence whose record fails (issue #4108) --------------------------
+#
+# A backup has no staleness cut-off, so an occurrence whose record and advance
+# kept failing ran again every tick, a new archive each time: 21 of them in the
+# 2026-10-15 outage. It now runs once, and each later tick retries only its
+# record, with the outcome and times of the run that took place.
+
+
+class _RecordsFail:
+    """Makes every run record raise while ``down`` is set, as a database outage."""
+
+    def __init__(self, env: _Env) -> None:
+        self.down = True
+        real_add = env.uow.schedule_runs.add
+
+        async def add(run: ScheduleRun) -> None:
+            if self.down:
+                raise RuntimeError("database down")
+            await real_add(run)
+
+        env.uow.schedule_runs.add = add  # type: ignore[method-assign]
+
+
+def _archive_attempts(store: FakeBackupArchiveStore) -> int:
+    return sum(1 for _server_id, op in store.events if op == "create-archive")
+
+
+def _run_rows(
+    env: _Env, schedule: Schedule
+) -> list[tuple[ScheduleRunOutcome, str | None, dt.datetime, dt.datetime]]:
+    return [
+        (run.outcome, run.detail, run.started_at, run.finished_at)
+        for run in env.uow.schedule_runs.rows
+        if run.schedule_id == schedule.id
+    ]
+
+
+def _lines_naming(
+    caplog: pytest.LogCaptureFixture, level: int, schedule: Schedule
+) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == level and str(schedule.id.value) in record.getMessage()
+    ]
+
+
+def _restart(env: _Env) -> None:
+    """Replace the runner as an API restart does: the same wiring, no memory."""
+
+    env.runner = RunScheduleTick(
+        **{
+            f.name: getattr(env.runner, f.name)
+            for f in fields(env.runner)
+            if f.init and not f.name.startswith("_")
+        }
+    )
+
+
+def _backup_schedule(env: _Env) -> Schedule:
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        cadence=_HOURLY,
+        only_when_running=False,
+        next_run_at=_NOW.replace(minute=0, second=0),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+    return schedule
+
+
+async def test_an_occurrence_whose_record_fails_runs_once_until_it_is_recorded(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    store = FakeBackupArchiveStore()
+    env = _env(backup_store=store)
+    schedule = _backup_schedule(env)
+    outage = _RecordsFail(env)
+
+    for tick in range(5):
+        await _tick_at(env, _NOW + tick * _TICK)
+    assert _archive_attempts(store) == 1
+    assert _run_rows(env, schedule) == []
+
+    outage.down = False
+    await _tick_at(env, _NOW + 5 * _TICK)
+
+    assert _archive_attempts(store) == 1
+    assert _run_rows(env, schedule) == [(ScheduleRunOutcome.SUCCESS, None, _NOW, _NOW)]
+    stored = env.uow.schedules.by_id[schedule.id]
+    assert stored.next_run_at == _NOW.replace(hour=13, minute=0, second=0)
+    assert stored.last_run_at == _NOW
+    assert _lines_naming(caplog, logging.WARNING, schedule) == [
+        f"schedule {schedule.id.value}: the success run of its backup could not "
+        "be recorded; the record is retried each tick, and the backup is not run "
+        "again"
+    ]
+    assert [
+        line for line in _lines_naming(caplog, logging.INFO, schedule) if "owed" in line
+    ] == [
+        f"schedule {schedule.id.value}: the owed success run of its backup is "
+        "recorded, 0:01:40 after it ran"
+    ]
+
+
+async def test_a_failed_occurrence_whose_record_fails_records_one_failure() -> None:
+    store = FakeBackupArchiveStore(missing=True)
+    env = _env(backup_store=store)
+    schedule = _backup_schedule(env)
+    outage = _RecordsFail(env)
+
+    for tick in range(5):
+        await _tick_at(env, _NOW + tick * _TICK)
+    outage.down = False
+    await _tick_at(env, _NOW + 5 * _TICK)
+
+    assert _archive_attempts(store) == 1
+    assert _run_rows(env, schedule) == [
+        (ScheduleRunOutcome.FAILURE, "action failed", _NOW, _NOW)
+    ]
+    stored = env.uow.schedules.by_id[schedule.id]
+    assert stored.next_run_at == _NOW.replace(hour=13, minute=0, second=0)
+    assert _titles(env) == ["Scheduled backup failed"]
+    assert len(env.audit.events) == 1
+
+
+async def test_a_restart_runs_an_occurrence_whose_record_failed_once_more() -> None:
+    store = FakeBackupArchiveStore()
+    env = _env(backup_store=store)
+    schedule = _backup_schedule(env)
+    outage = _RecordsFail(env)
+    for tick in range(3):
+        await _tick_at(env, _NOW + tick * _TICK)
+
+    # The restart loses the owed record, so the occurrence, still due, runs once
+    # more: and only once, however long the record keeps failing.
+    _restart(env)
+    restarted_at = _NOW + 3 * _TICK
+    for tick in range(3):
+        await _tick_at(env, restarted_at + tick * _TICK)
+    outage.down = False
+    await _tick_at(env, restarted_at + 3 * _TICK)
+
+    assert _archive_attempts(store) == 2
+    assert _run_rows(env, schedule) == [
+        (ScheduleRunOutcome.SUCCESS, None, restarted_at, restarted_at)
+    ]
+
+
+async def test_a_schedule_owing_a_record_runs_no_backup_retry_either() -> None:
+    store = FakeBackupArchiveStore(missing=True)
+    env = _env(backup_store=store)
+    schedule = _backup_schedule(env)
+    await _tick_at(env, _NOW)  # fails -> arms the retry 30 minutes on
+    # The next occurrence comes due before the retry, and runs while the
+    # database is down; an edit then moves the schedule's next run out.
+    env.uow.schedules.by_id[schedule.id] = _replace_next_run(
+        env.uow.schedules.by_id[schedule.id], _NOW + dt.timedelta(minutes=10)
+    )
+    store._missing = False
+    outage = _RecordsFail(env)
+    await _tick_at(env, _NOW + dt.timedelta(minutes=10))
+    env.uow.schedules.by_id[schedule.id] = _replace_next_run(
+        env.uow.schedules.by_id[schedule.id], _NOW + dt.timedelta(days=1)
+    )
+
+    retry_at = _NOW + dt.timedelta(minutes=30)
+    await _tick_at(env, retry_at)
+    assert _archive_attempts(store) == 2
+
+    # The owed success is recorded, and spends the retry it made moot.
+    outage.down = False
+    await _tick_at(env, retry_at + _TICK)
+    assert _archive_attempts(store) == 2
+    assert _runs(env, schedule) == [
+        ScheduleRunOutcome.FAILURE,
+        ScheduleRunOutcome.SUCCESS,
+    ]
+
+
+async def test_an_owed_record_of_a_deleted_schedule_is_audited_once_and_dropped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    env = _env()
+    schedule = _backup_schedule(env)
+    outage = _RecordsFail(env)
+    await _tick_at(env, _NOW)
+    await env.uow.schedules.delete(schedule.id)
+
+    outage.down = False
+    await _tick_at(env, _NOW + _TICK)
+    await _tick_at(env, _NOW + 2 * _TICK)
+
+    assert _run_rows(env, schedule) == []
+    assert [event.target_id for event in env.audit.events] == [schedule.id.value]
+    infos = _lines_naming(caplog, logging.INFO, schedule)
+    assert (
+        f"schedule {schedule.id.value} was deleted during its run; run not recorded"
+        in infos
+    )
+    assert not [line for line in infos if "owed" in line]
+
+
+async def test_an_owed_record_once_recorded_is_owed_no_more() -> None:
+    store = FakeBackupArchiveStore()
+    env = _env(backup_store=store)
+    schedule = _backup_schedule(env)
+    outage = _RecordsFail(env)
+    await _tick_at(env, _NOW)
+    outage.down = False
+    await _tick_at(env, _NOW + _TICK)  # records the owed run
+
+    await _tick_at(env, _NOW + 2 * _TICK)
+    assert _run_rows(env, schedule) == [(ScheduleRunOutcome.SUCCESS, None, _NOW, _NOW)]
+
+    next_at = _NOW.replace(hour=13)
+    await _tick_at(env, next_at)
+    assert _archive_attempts(store) == 2
+    assert _run_rows(env, schedule) == [
+        (ScheduleRunOutcome.SUCCESS, None, _NOW, _NOW),
+        (ScheduleRunOutcome.SUCCESS, None, next_at, next_at),
+    ]
+
+
+async def test_a_command_whose_record_fails_is_sent_once_until_it_is_recorded() -> None:
+    env = _env()
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.COMMAND,
+        cadence=_HOURLY,
+        command="say hi",
+        next_run_at=_NOW.replace(minute=0, second=0),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+    outage = _RecordsFail(env)
+
+    # Every tick is within the late-run grace, so a re-run would be sent.
+    for tick in range(5):
+        await _tick_at(env, _NOW + tick * _TICK)
+    outage.down = False
+    await _tick_at(env, _NOW + 5 * _TICK)
+
+    assert [kind for kind, *_ in env.control_plane.dispatched] == ["command"]
+    assert _run_rows(env, schedule) == [(ScheduleRunOutcome.SUCCESS, None, _NOW, _NOW)]
+
+
+async def test_an_owed_failure_arms_its_retry_from_when_it_ran() -> None:
+    store = FakeBackupArchiveStore(missing=True)
+    env = _env(backup_store=store)
+    schedule = _backup_schedule(env)
+    outage = _RecordsFail(env)
+    await _tick_at(env, _NOW)
+    store._missing = False
+    outage.down = False
+    await _tick_at(env, _NOW + dt.timedelta(minutes=10))  # records the owed failure
+
+    retry_at = _NOW + dt.timedelta(minutes=30)
+    await _tick_at(env, retry_at - _TICK)
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+
+    await _tick_at(env, retry_at)
+    assert _runs(env, schedule) == [
+        ScheduleRunOutcome.FAILURE,
+        ScheduleRunOutcome.SUCCESS,
+    ]
+
+
+async def test_an_owed_success_prunes_per_retention_once_it_is_recorded() -> None:
+    env = _env()
+    schedule = _backup_schedule(env)
+    server = env.uow.servers.by_id[schedule.server_id]
+    server.backup_retention = {"keep_last": 1}
+    old = _scheduled_backup(env, server, _NOW - dt.timedelta(days=1))
+    outage = _RecordsFail(env)
+    await _tick_at(env, _NOW)
+    assert len(_scheduled_rows(env, server)) == 2
+
+    outage.down = False
+    await _tick_at(env, _NOW + _TICK)
+
+    remaining = _scheduled_rows(env, server)
+    assert len(remaining) == 1
+    assert remaining[0].id != old.id
+
+
+async def test_a_precondition_skip_whose_record_fails_is_recorded_once_as_decided(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    env = _env()
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        cadence=_HOURLY,
+        only_when_running=True,
+        next_run_at=_NOW.replace(minute=0, second=0),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+    outage = _RecordsFail(env)
+
+    for tick in range(5):
+        await _tick_at(env, _NOW + tick * _TICK)
+    outage.down = False
+    await _tick_at(env, _NOW + 5 * _TICK)
+
+    # Owed like any outcome: recorded with the times it was decided.
+    assert _run_rows(env, schedule) == [
+        (ScheduleRunOutcome.SKIPPED, "server not running", _NOW, _NOW)
+    ]
+    assert _lines_naming(caplog, logging.WARNING, schedule) == [
+        f"schedule {schedule.id.value}: the skipped run of its backup could not "
+        "be recorded; the record is retried each tick, and the backup is not run "
+        "again"
+    ]
+
+
+async def test_a_record_owed_for_hours_warns_once_an_hour(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    env = _env()
+    schedule = _backup_schedule(env)
+    _RecordsFail(env)
+
+    for minutes in range(0, 140, 10):
+        await _tick_at(env, _NOW + dt.timedelta(minutes=minutes))
+
+    warnings = _lines_naming(caplog, logging.WARNING, schedule)
+    assert len(warnings) == 3
+    assert warnings[1:] == [
+        f"schedule {schedule.id.value}: the success run of its backup is still "
+        f"not recorded, owed for {owed}; the record is retried each tick"
+        for owed in ("1:00:00", "2:00:00")
+    ]
+    debugs = [
+        line
+        for line in _lines_naming(caplog, logging.DEBUG, schedule)
+        if "could not be recorded" in line
+    ]
+    assert len(debugs) == 11
+
+
+# A record that commits late advances as if it had committed when its run
+# finished, so the occurrences that came due meanwhile follow the missed-run rule.
+
+
+class _SlowArchiveStore(FakeBackupArchiveStore):
+    """An archive that takes ``duration`` of the fake clock."""
+
+    def __init__(self, clock: FakeClock, duration: dt.timedelta) -> None:
+        super().__init__()
+        self._clock = clock
+        self._duration = duration
+
+    async def create_from_current(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> None:
+        self._clock.set(self._clock.now() + self._duration)
+        await super().create_from_current(
+            community_id=community_id, server_id=server_id, storage_ref=storage_ref
+        )
+
+
+async def test_a_run_advances_to_the_first_occurrence_after_it_finished() -> None:
+    clock = FakeClock(_NOW)
+    env = _env(
+        backup_store=_SlowArchiveStore(clock, dt.timedelta(hours=1)), clock=clock
+    )
+    schedule = _backup_schedule(env)
+
+    await env.runner.tick()
+
+    # Ran 12:00:30 to 13:00:30: the 13:00 occurrence came due during the run.
+    stored = env.uow.schedules.by_id[schedule.id]
+    assert stored.next_run_at == _NOW.replace(hour=14, minute=0, second=0)
+
+
+async def test_backups_due_while_a_record_is_owed_coalesce_into_one_catch_up() -> None:
+    store = FakeBackupArchiveStore()
+    env = _env(backup_store=store)
+    schedule = _backup_schedule(env)
+    outage = _RecordsFail(env)
+    await _tick_at(env, _NOW)
+    await _tick_at(env, _NOW.replace(hour=13, minute=30))
+    assert _archive_attempts(store) == 1
+
+    outage.down = False
+    recorded_at = _NOW.replace(hour=14, minute=10, second=20)
+    await _tick_at(env, recorded_at)
+
+    # The 13:00 and 14:00 occurrences: one catch-up, neither dropped nor doubled.
+    assert _archive_attempts(store) == 2
+    assert _run_rows(env, schedule) == [
+        (ScheduleRunOutcome.SUCCESS, None, _NOW, _NOW),
+        (ScheduleRunOutcome.SUCCESS, None, recorded_at, recorded_at),
+    ]
+    stored = env.uow.schedules.by_id[schedule.id]
+    assert stored.next_run_at == _NOW.replace(hour=15, minute=0, second=0)
+
+
+async def test_a_command_due_while_its_record_was_owed_is_skipped_as_too_stale() -> (
+    None
+):
+    env = _env()
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.COMMAND,
+        cadence=_HOURLY,
+        command="say hi",
+        next_run_at=_NOW.replace(minute=0, second=0),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+    outage = _RecordsFail(env)
+    await _tick_at(env, _NOW)
+    await _tick_at(env, _NOW.replace(hour=13, minute=30))
+
+    outage.down = False
+    await _tick_at(env, _NOW.replace(hour=14, minute=10, second=20))
+
+    assert [kind for kind, *_ in env.control_plane.dispatched] == ["command"]
+    assert _rows(env, schedule) == [
+        (ScheduleRunOutcome.SUCCESS, None),
+        (ScheduleRunOutcome.SKIPPED, "occurrence too stale"),
+    ]
+    stored = env.uow.schedules.by_id[schedule.id]
+    assert stored.next_run_at == _NOW.replace(hour=15, minute=0, second=0)
+
+
+class _RecordAnswerLost:
+    """The first COMMIT of a run record applies, then raises (issue #4141).
+
+    As a COMMIT whose answer is lost with its connection does (the #4062 shape).
+    The fake applies each write at once, so raising after the commit leaves them.
+    """
+
+    def __init__(self, env: _Env) -> None:
+        self.cuts = 0
+        self._recording = False
+        real_add = env.uow.schedule_runs.add
+        real_commit = env.uow.commit
+
+        async def add(run: ScheduleRun) -> None:
+            await real_add(run)
+            self._recording = True
+
+        async def commit() -> None:
+            await real_commit()
+            recording, self._recording = self._recording, False
+            if recording and not self.cuts:
+                self.cuts += 1
+                raise ConnectionError("connection lost")
+
+        env.uow.schedule_runs.add = add  # type: ignore[method-assign]
+        env.uow.commit = commit  # type: ignore[method-assign]
+
+
+async def test_an_owed_record_whose_commit_applied_is_written_and_audited_once() -> (
+    None
+):
+    store = FakeBackupArchiveStore(missing=True)  # audited and notified
+    env = _env(backup_store=store)
+    schedule = _backup_schedule(env)
+    lost = _RecordAnswerLost(env)
+
+    await _tick_at(env, _NOW)
+    await _tick_at(env, _NOW + _TICK)  # the owed record is retried
+    await _tick_at(env, _NOW + 2 * _TICK)
+
+    assert lost.cuts == 1
+    assert _run_rows(env, schedule) == [
+        (ScheduleRunOutcome.FAILURE, "action failed", _NOW, _NOW)
+    ]
+    assert [event.outcome for event in env.audit.events] == [Outcome.ERROR]
+    assert _titles(env) == ["Scheduled backup failed"]
+    assert env.runner._owed == {}
+
+
+# --- a backup retry whose record fails (issue #4140) -------------------------
+#
+# The retry ran, so it is spent before its record. A record that raises is owed
+# like an occurrence's, without the advance: later ticks record it with the
+# retry's own outcome and times, and the retry never runs again.
+
+
+async def test_a_retry_whose_record_fails_runs_once_and_is_recorded_later() -> None:
+    store = FakeBackupArchiveStore(missing=True)  # the occurrence fails
+    env = _env(backup_store=store)
+    spy = _SpyPrune(uow=env.uow, backup_store=store, audit=env.audit, clock=env.clock)
+    env.runner.prune_backups = spy
+    schedule = _backup_schedule(env)
+    await _tick_at(env, _NOW)  # arms the retry 30 minutes on
+    store._missing = False
+    retry_at = _NOW + dt.timedelta(minutes=30)
+    outage = _RecordsFail(env)
+
+    for tick in range(3):
+        await _tick_at(env, retry_at + tick * _TICK)
+    assert _archive_attempts(store) == 2
+    outage.down = False
+    await _tick_at(env, retry_at + 3 * _TICK)
+    await _tick_at(env, retry_at + 4 * _TICK)
+
+    assert _archive_attempts(store) == 2
+    assert _run_rows(env, schedule) == [
+        (ScheduleRunOutcome.FAILURE, "action failed", _NOW, _NOW),
+        (ScheduleRunOutcome.SUCCESS, None, retry_at, retry_at),
+    ]
+    assert [event.outcome for event in env.audit.events] == [
+        Outcome.ERROR,
+        Outcome.SUCCESS,
+    ]
+    assert _titles(env) == ["Scheduled backup failed", "Scheduled backup recovered"]
+    assert len(spy.calls) == 1
+    # A retry never moves next_run_at.
+    stored = env.uow.schedules.by_id[schedule.id]
+    assert stored.next_run_at == _NOW.replace(hour=13, minute=0, second=0)
+
+
+async def test_a_failed_retry_whose_record_fails_arms_no_further_retry() -> None:
+    store = FakeBackupArchiveStore(missing=True)  # every backup fails
+    env = _env(backup_store=store)
+    schedule = _backup_schedule(env)
+    await _tick_at(env, _NOW)  # arms the retry 30 minutes on
+    # Isolate the retry from the next occurrence.
+    env.uow.schedules.by_id[schedule.id] = _replace_next_run(
+        env.uow.schedules.by_id[schedule.id], _NOW + dt.timedelta(days=1)
+    )
+    retry_at = _NOW + dt.timedelta(minutes=30)
+    outage = _RecordsFail(env)
+    await _tick_at(env, retry_at)
+    outage.down = False
+    await _tick_at(env, retry_at + _TICK)  # records the owed failure
+
+    await _tick_at(env, retry_at + dt.timedelta(minutes=30))
+
+    assert _archive_attempts(store) == 2
+    assert _runs(env, schedule) == [
+        ScheduleRunOutcome.FAILURE,
+        ScheduleRunOutcome.FAILURE,
+    ]
+
+
+async def test_a_retry_record_whose_commit_applied_is_written_and_audited_once() -> (
+    None
+):
+    store = FakeBackupArchiveStore(missing=True)  # the occurrence fails
+    env = _env(backup_store=store)
+    spy = _SpyPrune(uow=env.uow, backup_store=store, audit=env.audit, clock=env.clock)
+    env.runner.prune_backups = spy
+    schedule = _backup_schedule(env)
+    await _tick_at(env, _NOW)  # arms the retry 30 minutes on
+    store._missing = False
+    retry_at = _NOW + dt.timedelta(minutes=30)
+    lost = _RecordAnswerLost(env)  # from the retry's record on
+
+    await _tick_at(env, retry_at)
+    await _tick_at(env, retry_at + _TICK)  # the owed record is retried
+    await _tick_at(env, retry_at + 2 * _TICK)
+
+    assert lost.cuts == 1
+    assert _archive_attempts(store) == 2
+    assert _run_rows(env, schedule) == [
+        (ScheduleRunOutcome.FAILURE, "action failed", _NOW, _NOW),
+        (ScheduleRunOutcome.SUCCESS, None, retry_at, retry_at),
+    ]
+    assert [event.outcome for event in env.audit.events] == [
+        Outcome.ERROR,
+        Outcome.SUCCESS,
+    ]
+    assert _titles(env) == ["Scheduled backup failed", "Scheduled backup recovered"]
+    assert len(spy.calls) == 1
+    assert env.runner._owed == {}
+
+
+async def test_a_held_retry_skip_whose_commit_applied_is_written_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    bound = dt.timedelta(seconds=60)
+    store = FakeBackupArchiveStore(missing=True)  # the occurrence fails
+    env = _env(backup_store=store, deferral_bound=bound)
+    schedule = _backup_schedule(env)
+    await _tick_at(env, _NOW)  # arms the retry 30 minutes on
+    env.uow.schedules.by_id[schedule.id] = _replace_next_run(
+        env.uow.schedules.by_id[schedule.id], _NOW + dt.timedelta(days=1)
+    )
+    env.uow.servers.by_id[schedule.server_id].assigned_worker_id = _WORKER
+    retry_at = _NOW + dt.timedelta(minutes=30)
+    await _tick_at(env, retry_at)  # deferred
+    lost = _RecordAnswerLost(env)  # from the skip's record on
+
+    # Past the bound the skip is not owed: the retry stays armed, and the next
+    # tick, still held, decides the same skip again.
+    past = retry_at + bound + _TICK
+    await _tick_at(env, past)
+    await _tick_at(env, past + _TICK)
+    await _tick_at(env, past + 2 * _TICK)
+
+    assert lost.cuts == 1
+    assert _rows(env, schedule)[1:] == [(ScheduleRunOutcome.SKIPPED, "server_assigned")]
+    assert len(_gave_up_lines(caplog, schedule)) == 1
+    assert env.runner._backup_retry == {}
+    assert env.runner._deferred == {}
+
+
+async def test_a_held_retry_released_after_its_skip_applied_writes_its_own_row() -> (
+    None
+):
+    bound = dt.timedelta(seconds=60)
+    store = FakeBackupArchiveStore(missing=True)  # the occurrence fails
+    env = _env(backup_store=store, deferral_bound=bound)
+    schedule = _backup_schedule(env)
+    await _tick_at(env, _NOW)  # arms the retry 30 minutes on
+    env.uow.schedules.by_id[schedule.id] = _replace_next_run(
+        env.uow.schedules.by_id[schedule.id], _NOW + dt.timedelta(days=1)
+    )
+    env.uow.servers.by_id[schedule.server_id].assigned_worker_id = _WORKER
+    retry_at = _NOW + dt.timedelta(minutes=30)
+    await _tick_at(env, retry_at)  # deferred
+    lost = _RecordAnswerLost(env)  # from the skip's record on
+    past = retry_at + bound + _TICK
+    await _tick_at(env, past)  # the skip's record applies, and raises
+
+    # Released: the retry, still armed, runs, and is a run of its own.
+    env.uow.servers.by_id[schedule.server_id].assigned_worker_id = None
+    store._missing = False
+    await _tick_at(env, past + _TICK)
+
+    assert lost.cuts == 1
+    assert _archive_attempts(store) == 2
+    assert _rows(env, schedule) == [
+        (ScheduleRunOutcome.FAILURE, "action failed"),
+        (ScheduleRunOutcome.SKIPPED, "server_assigned"),
+        (ScheduleRunOutcome.SUCCESS, None),
+    ]
+    assert env.runner._backup_retry == {}
 
 
 async def test_backup_storage_timeout_records_distinguishable_detail() -> None:
@@ -1945,6 +2700,230 @@ async def test_successful_retry_clears_retry_and_is_not_notified() -> None:
     assert len(env.notifier.notifications) == 2
     assert env.notifier.notifications[0][1] == "schedule_failed"
     assert env.notifier.notifications[1][1] == "schedule_recovered"
+
+
+async def test_a_retry_whose_claim_raises_stays_armed_for_a_later_tick(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = FakeBackupArchiveStore(missing=True)
+    env = _env(backup_store=store)
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        only_when_running=False,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+    await env.runner.tick()  # fails, arms the retry
+    store._missing = False
+    # Isolate the retry from the interval grid (see the retry test above).
+    env.uow.schedules.by_id[schedule.id] = _replace_next_run(
+        env.uow.schedules.by_id[schedule.id], _NOW + dt.timedelta(days=1)
+    )
+
+    # The retry's claim cannot read the row for three ticks, as on a database
+    # still down.
+    caplog.set_level(logging.DEBUG)
+    real_lock = env.uow.schedules.lock
+    failures = [RuntimeError("database down")] * 3
+
+    async def failing_lock(schedule_id: ScheduleId) -> Schedule | None:
+        if failures:
+            raise failures.pop()
+        return await real_lock(schedule_id)
+
+    env.uow.schedules.lock = failing_lock  # type: ignore[method-assign]
+    retry_at = _NOW + dt.timedelta(minutes=30)
+    for tick in range(3):
+        await _tick_at(env, retry_at + tick * _TICK)
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+
+    await _tick_at(env, retry_at + 3 * _TICK)
+
+    assert _runs(env, schedule) == [
+        ScheduleRunOutcome.FAILURE,
+        ScheduleRunOutcome.SUCCESS,
+    ]
+    # A WARNING with its traceback on the first failing tick, DEBUG on the
+    # later ones, and no ERROR: the claim failure is not the tick's.
+    warnings = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and str(schedule.id.value) in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert warnings[0].exc_info is not None
+    assert [
+        line
+        for line in _lines_naming(caplog, logging.DEBUG, schedule)
+        if "could not be claimed" in line
+    ] == [
+        f"schedule {schedule.id.value}: its backup retry still could not be "
+        "claimed; it is kept for the next tick"
+    ] * 2
+    assert _lines_naming(caplog, logging.ERROR, schedule) == []
+
+
+async def test_a_retry_whose_server_read_raises_stays_armed_for_a_later_tick() -> None:
+    store = FakeBackupArchiveStore(missing=True)
+    env = _env(backup_store=store)
+    schedule = _backup_schedule(env)
+    await _tick_at(env, _NOW)  # fails, arms the retry
+    store._missing = False
+
+    # The retry is claimed, but its first read of the server raises, as on a
+    # database going down between the two: nothing was attempted.
+    real_get = env.uow.servers.get_by_id
+    failures = [RuntimeError("database down")]
+
+    async def failing_get(server_id: ServerId) -> Server | None:
+        if failures:
+            raise failures.pop()
+        return await real_get(server_id)
+
+    env.uow.servers.get_by_id = failing_get  # type: ignore[method-assign]
+    retry_at = _NOW + dt.timedelta(minutes=30)
+    await _tick_at(env, retry_at)
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+
+    await _tick_at(env, retry_at + _TICK)
+
+    assert _runs(env, schedule) == [
+        ScheduleRunOutcome.FAILURE,
+        ScheduleRunOutcome.SUCCESS,
+    ]
+
+
+async def test_a_retry_claimed_while_its_schedule_is_disabled_is_spent() -> None:
+    store = FakeBackupArchiveStore(missing=True)
+    env = _env(backup_store=store)
+    schedule = _backup_schedule(env)
+    await _tick_at(env, _NOW)  # fails, arms the retry
+    store._missing = False
+    env.uow.schedules.by_id[schedule.id] = replace(
+        env.uow.schedules.by_id[schedule.id], enabled=False, next_run_at=None
+    )
+    retry_at = _NOW + dt.timedelta(minutes=30)
+    await _tick_at(env, retry_at)
+
+    # Enabled again before its next occurrence: the spent retry does not run.
+    env.uow.schedules.by_id[schedule.id] = replace(
+        env.uow.schedules.by_id[schedule.id],
+        enabled=True,
+        next_run_at=_NOW + dt.timedelta(days=1),
+    )
+    await _tick_at(env, retry_at + _TICK)
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+
+
+class _Fails:
+    """Makes ``owner.<name>`` raise while ``down`` is set, as a database outage."""
+
+    def __init__(self, owner: object, name: str) -> None:
+        self.down = False
+        real = getattr(owner, name)
+
+        async def call(*args: object, **kwargs: object) -> object:
+            if self.down:
+                raise RuntimeError("database down")
+            return await real(*args, **kwargs)
+
+        setattr(owner, name, call)
+
+
+async def _a_retry_whose_claim_raised(
+    env: _Env, store: FakeBackupArchiveStore
+) -> tuple[Schedule, _Fails]:
+    """A failed backup whose retry's claim raised at 12:30:30, so it stays armed."""
+
+    schedule = _backup_schedule(env)
+    claim = _Fails(env.uow.schedules, "lock")
+    await _tick_at(env, _NOW)  # fails, arms the retry
+    claim.down = True
+    await _tick_at(env, _NOW + dt.timedelta(minutes=30))
+    claim.down = False
+    store._missing = False
+    return schedule, claim
+
+
+async def test_a_retry_claim_raising_after_one_that_returned_warns_again(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    store = FakeBackupArchiveStore(missing=True)
+    env = _env(backup_store=store)
+    schedule, claim = await _a_retry_whose_claim_raised(env, store)
+
+    # The next claim returns, but the server read raises: the retry stays armed
+    # at the same instant. A claim that raises after it is a new failure.
+    read = _Fails(env.uow.servers, "get_by_id")
+    read.down = True
+    await _tick_at(env, _NOW + dt.timedelta(minutes=30) + _TICK)
+    read.down, claim.down = False, True
+    await _tick_at(env, _NOW + dt.timedelta(minutes=30) + 2 * _TICK)
+
+    warnings = [
+        line
+        for line in _lines_naming(caplog, logging.WARNING, schedule)
+        if "could not be claimed" in line
+    ]
+    assert len(warnings) == 2
+
+
+async def test_an_unclaimed_retry_superseded_by_a_success_is_forgotten() -> None:
+    store = FakeBackupArchiveStore(missing=True)
+    env = _env(backup_store=store)
+    await _a_retry_whose_claim_raised(env, store)
+
+    await _tick_at(env, _NOW.replace(hour=13))
+
+    assert env.runner._backup_retry == {}
+    assert env.runner._retry_unclaimed == {}
+
+
+async def test_an_unclaimed_retry_is_forgotten_with_its_deleted_schedule() -> None:
+    store = FakeBackupArchiveStore(missing=True)
+    env = _env(backup_store=store)
+    await _a_retry_whose_claim_raised(env, store)
+
+    # The 13:00 occurrence is claimed, and its schedule deleted before its record.
+    real_lock = env.uow.schedules.lock
+
+    async def lock_then_delete(schedule_id: ScheduleId) -> Schedule | None:
+        found = await real_lock(schedule_id)
+        env.uow.schedules.by_id.pop(schedule_id, None)
+        return found
+
+    env.uow.schedules.lock = lock_then_delete  # type: ignore[method-assign]
+    await _tick_at(env, _NOW.replace(hour=13))
+
+    assert env.runner._backup_retry == {}
+    assert env.runner._retry_unclaimed == {}
+
+
+async def test_an_unclaimed_retry_goes_with_a_held_occurrence_skip() -> None:
+    store = FakeBackupArchiveStore(missing=True)
+    bound = dt.timedelta(seconds=60)
+    env = _env(backup_store=store, deferral_bound=bound)
+    schedule, _claim = await _a_retry_whose_claim_raised(env, store)
+
+    # The 13:00 occurrence is held past the bound, with the retry due all along.
+    env.uow.servers.by_id[schedule.server_id].assigned_worker_id = _WORKER
+    at = _NOW.replace(hour=13, second=0)
+    while at <= _NOW.replace(hour=13, second=0) + bound + _TICK:
+        await _tick_at(env, at)
+        at += _TICK
+
+    assert _runs(env, schedule) == [
+        ScheduleRunOutcome.FAILURE,
+        ScheduleRunOutcome.SKIPPED,
+    ]
+    assert env.runner._backup_retry == {}
+    assert env.runner._retry_unclaimed == {}
 
 
 async def test_corrupt_backup_failure_is_not_retried() -> None:

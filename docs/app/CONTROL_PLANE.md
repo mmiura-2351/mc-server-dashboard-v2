@@ -423,10 +423,10 @@ other unexpected stop, which the reconciler restarts after its grace (CONFIGURAT
 Section 5.6).
 
 No resync report is queued behind a newer event for the same server (#3587). The API
-stamps each `StatusChange` as its write lands, so a report queued after the event that
-superseded it, such as a stop's `STOPPED` that landed between the Worker reading the
-state and sending the report, would set the row back to the older state until the
-reconciler's slow path. The Worker reads each server's state and queues its report in
+stamps each `StatusChange` as it reads it (Section 4.2), so a report queued after the
+event that superseded it, such as a stop's `STOPPED` that landed between the Worker
+reading the state and sending the report, is read after that event and stamped later,
+and would set the row back to the older state until the reconciler's slow path. The Worker reads each server's state and queues its report in
 one critical section. A command, an instance's status forwarding or the orphan
 converger has to enter that section to change the state or to queue an event for the
 server, so its events follow the report. The one event that comes before the record
@@ -525,9 +525,20 @@ for 10 s. Cancelling the attempt instead could abandon a commit that still
 lands, and its retry would then apply the message a second time.
 If the attempt then succeeds, the hold ends; if it fails as an outage, the
 retries follow. Only the first attempt has the 3 s deadline. The retries back
-off from 0.5 s, doubling up to 10 s, with no time budget. A held `StatusChange`
-is stamped when its write lands, not when it arrived. The hold ends when the
-message is applied, or when the session ends:
+off from 0.5 s, doubling up to 10 s, with no time budget. A `StatusChange` is
+stamped when the API reads it off the stream, before it waits for anything, and
+each attempt of it carries that stamp, a held one's retries included (issue
+#4118). Its write is dropped for a server whose state is stamped later, or at the
+same instant; only a retry is applied at its own stamp, which its first attempt
+may have written with the answer lost. A `CommandResult` is stamped the same way.
+When the command's caller converges a server's observed state from the Worker's
+answer (Section 6), the write carries that stamp, not the instant it is made
+(issue #4117). So a report read after the answer outlasts the convergence, and
+one read before it does not, whichever is written first. The reconciler's record
+that the answer settled the command, a refused stop or a finished stop whose
+write failed, carries it too, so a report read after the answer supersedes that
+record (CONFIGURATION.md Section 5.6). The hold ends when the message is applied,
+or when the session ends:
 
 - When the Worker closes the stream, the held message gets one last attempt,
   and so does each message queued behind it. Any failure then drops the message.
@@ -535,6 +546,10 @@ message is applied, or when the session ends:
   queued behind it are dropped unapplied. Nothing from the old session lands
   after the new session's reports, except a message already being applied when
   the newer session registers: at most one per superseded session (#4015).
+  That message arrived before the newer session registered, so it is stamped
+  earlier than that session's reports and its teardown's `unknown` (Section
+  4.4). It overwrites neither, and that `unknown` marks it too if it lands
+  first (issue #4118).
 - When the heartbeats lapse or the transport drops, the held message and the
   queue behind it are lost.
 
@@ -570,8 +585,9 @@ the Worker's sends are not acknowledged. The live frame an applied message
 announces (Section 6) is published at least once too (issue #4062). An attempt
 whose commit lands but whose answer is lost with the connection fails as an
 outage. Its retry then finds the write already made: the row at the reported
-state, or, for a late final-snapshot result (Section 5.1), already released. It
-still publishes the frame the attempt would have, and logs the release. An
+state, or, for a late final-snapshot result (Section 5.1), already released, or
+holding the refusal it records (Section 5; issue #4104). It still publishes the
+frame the attempt would have, and logs the release. An
 attempt can also fail as an outage after it has committed and published: a
 `StatusChange` for a server with a Bedrock port then syncs the server's Bedrock
 tunnel ([`BEDROCK_TUNNEL.md`](BEDROCK_TUNNEL.md) Section 3), and that sync
@@ -621,7 +637,9 @@ stamps, the start of this process's control-plane listener (issue #3916), and
 the instant the Worker first read disconnected (issue #3963): the stream's end,
 or the heartbeat lapse the registry reports before the teardown runs. The
 server's stamps lag that instant until the teardown's write lands, and keep the
-old one if the write fails. A Worker that re-registers within the grace, after a
+old one if the write fails, until the reconciler makes that write itself, stamped
+with the session's end (Teardown, below).
+A Worker that re-registers within the grace, after a
 drop, a graceful restart or a crash, still gets the final snapshot or the stop,
 and so does one that drops before the reconciler's release has taken the final
 snapshot or sent the owed stop: the release is abandoned and waits that grace
@@ -663,9 +681,24 @@ Worker can also re-register after that check, while the `unknown` write waits
 on a slow database, however the Session ended, a refused registration
 included, and the new Session's reports can then commit first. So the write
 is stamped as the check passes and leaves every server observed later than
-that stamp: the ending Session's own reports were all stamped earlier, and a
-newer Session's are stamped later, so the outcome no longer depends on which
-write commits first (issue #4092). The
+that stamp. A report is stamped as it arrives (Section 4.2), so the ending
+Session's own reports were all stamped earlier, and so was a report of an
+older Session still being written, and the convergence of an answer either sent
+(issue #4117). A newer Session's are stamped later, so the outcome no longer
+depends on which write commits first (issues #4092, #4118).
+After a refused registration
+(Section 4.1), whose Worker is alive and retries, the write is held to the
+registration's 10 s deadline and skipped past it with a warning, so a stalled
+database does not hold a connection for each retry; the Worker's next accepted
+registration re-establishes its state (issue #4091). If the write fails or is
+skipped and the Worker does not come back, the reconciler's tick makes the same
+write once the session has been over for `control.heartbeat_timeout_seconds`
+with no newer one (issue #4130). It reads the session's end from this process's
+registry, so it assumes a single API process, as the teardown does, and stamps
+the write with that instant: the servers end as the teardown's write would have
+left them, a newer session's reports survive it, and each server it changes is
+published as a status frame. A heartbeat lapse alone does not count as the end;
+the session lasts until the watchdog ends it. The
 teardown runs in a task the API owns, not in the RPC task. When a Worker's
 transport dies, gRPC reports the end of the inbound stream and cancels the RPC
 separately, and the cancel can arrive while the teardown is already writing. The
@@ -847,18 +880,30 @@ Notes:
   on #3701). So the stop keeps the assignment, records the refusal on the
   server (`final_snapshot_refusal`, DATABASE.md Section 7) and logs a warning,
   not an error. The stop that set the intent still answers, with the server
-  stopped, assigned and the refusal set. A late result of an abandoned final
-  snapshot that is such a refusal holds the server the same way.
+  stopped and assigned, and with the refusal set unless its write fails
+  (below). A late result of an abandoned final snapshot that is such a refusal
+  holds the server the same way.
   The reconciler retries the snapshot once `refused_stop_grace_seconds` has
   passed since the server's last report or intent commit (the refusal only
   selects that shorter grace), then retries a `BUSY` one every tick and backs an
   `UNAVAILABLE` one off (CONFIGURATION.md Section 5.6). Nothing bounds the
   retries. A stop of the held server retries at once and answers
-  `409 final_snapshot_refused` when the Worker refuses again. A retry that
-  publishes releases the server and clears
-  the refusal. One that times out or meets a session end keeps the server and
-  clears the refusal, since the latest answer is not a refusal; a later
-  refusal sets it again. Every other answer to a final snapshot releases the
+  `409 final_snapshot_refused` when the Worker refuses again. A write of the
+  refusal that fails changes none of these answers: it is logged, the server
+  stays assigned and so held, and the next refused retry records the refusal
+  (issue #4103). Until then the server keeps the refusal it held before, unless
+  the write landed. After a first refusal that is none, so the release without
+  the snapshot refuses it, and a stop while its Worker is not connected
+  releases it at once. A write whose COMMIT lands with its answer lost has
+  recorded the refusal but published no `{final_snapshot_refusal}` frame. So
+  the API remembers a write whose COMMIT failed, and the next refused retry,
+  answered in time or late, writes the refusal again and publishes its frame
+  (issue #4152). A release forgets it, and so does an API restart, after which
+  a reload shows the hold. A retry that publishes releases the server and
+  clears the refusal. One that times out or meets a session end keeps the
+  server and the refusal (issue #4111): the snapshot the server is held for
+  is still owed, so only a release clears the refusal, and a later refusal
+  rewrites it. Every other answer to a final snapshot releases the
   server as before. While the server is held, a start is
   `409 transition_conflict`, and a delete and every at-rest write are
   `409 server_assigned` (WEBUI_SPEC.md Section 2.3), so the store generation
@@ -866,12 +911,12 @@ Notes:
   only the short grace is lost, and the first retry after the restart waits
   the full grace. A Worker that disconnects and stays away a full grace from
   the drop loses the hold, and the server is released without the snapshot
-  (Section 4.4). One exception remains (issue #4111): a stop of the held
-  server while its Worker is not connected releases it at once, without the
-  snapshot and without the grace, as it does any server of a disconnected
-  Worker. It is audited as a plain `server:stop`, and nothing retries the
-  snapshot when the Worker comes back. A holder of `server:stop` can release
-  it at once (next note).
+  (Section 4.4). A stop of the held server while its Worker is not connected
+  releases nothing and changes nothing: it answers `503 worker_unavailable`
+  (`worker_state: "not_connected"`), with a `detail` naming what does release
+  the server (issue #4111). That is the Worker's return, whose retry takes the
+  snapshot, the full grace above, or the release without the snapshot (next
+  note).
 - **Releasing a held server without its final snapshot sends no command.** A
   stop holds its Worker until the final snapshot settles. When the Worker
   refuses that snapshot `BUSY` or `UNAVAILABLE`, the server records the refusal
@@ -885,9 +930,11 @@ Notes:
   that may still publish is never released under (issue #847). It releases
   only a server still `desired=stopped`, at rest, assigned and holding a
   refusal, and answers any other `409 invalid_transition`. A server held for
-  another reason (a snapshot not answered yet, a session that ended, a
-  disconnected Worker's grace) may still get its snapshot. A refusal held
-  through its Worker's disconnect reads `unknown` and stays releasable. The
+  another reason, with no refusal recorded (a snapshot not answered yet, a
+  session that ended, a disconnected Worker's grace), may still get its
+  snapshot. A refusal held through its Worker's disconnect reads `unknown` and
+  stays releasable, as does one whose retry was left unanswered, which keeps
+  the refusal (issue #4111). The
   write is the stale-assignment release, guarded on the Worker and on the
   `observed_at` it read, so a report that lands meanwhile keeps the server
   held (`409 transition_conflict`). It clears the assignment, the refusal and
@@ -1480,14 +1527,18 @@ and equally the writes the API makes without one, whose frames carry an empty
   a start or a placement keeps the Worker that refused its hydrate `BUSY`,
   `UNAVAILABLE` or `EXPIRED` (Section 5), `stopped` when a stop is confirmed
   or answered `SERVER_NOT_FOUND`, and `unknown` when a stop left at `stopping`
-  under a disconnected Worker is released.
+  under a disconnected Worker is released. The `running` and `stopped` writes
+  are stamped with the instant the API read the Worker's answer (Section 4.2);
+  the `unknown` for a kept Worker with the instant of its placement, so a report
+  sent during the hydrate is kept.
 
 A write that leaves the state as it was — the bulk `unknown` over a row already
 `unknown`, a confirmed stop the Worker's own `stopped` report preceded —
 publishes nothing, unless it is a `StatusChange` carrying a `detail` or crash
 reason, or the held retry of a `StatusChange` (Section 4.2). A report the API
-drops — it comes from a Worker that no longer owns the server, or is no fresher
-than the state already recorded — is not relayed.
+drops — it comes from a Worker that no longer owns the server, or it is no
+fresher than the state already recorded, counted from the instant it arrived
+(Section 4.2) — is not relayed.
 
 Real-time delivery is best-effort end to end: if the control plane is down the
 API's REST endpoints still function and clients simply miss live updates

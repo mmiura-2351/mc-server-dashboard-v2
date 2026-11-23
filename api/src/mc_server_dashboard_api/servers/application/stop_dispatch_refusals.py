@@ -93,6 +93,10 @@ class StopDispatchRefusals:
     ) -> None:
         """Record ``outcome`` as the settled verdict of a stop dispatch at ``at``.
 
+        ``at`` is the instant the API read the Worker's answer (issue #4117), so
+        a report read after the answer supersedes the verdict, however long the
+        answer waited to be handled.
+
         Recorded only when the outcome PROVES nothing is in flight for the server:
 
         * The Worker returned a result at all. A returned result is the end of the

@@ -44,6 +44,17 @@ describe("operationLabel", () => {
     );
   });
 
+  // The release of a held server without its final snapshot is recorded
+  // apart from a stop (#4055), so the audit list names it (#4057).
+  it("maps the release without the final snapshot", () => {
+    expect(operationLabel("server:release_without_snapshot")).toBe(
+      t("communitySettings.audit.op.server:release_without_snapshot"),
+    );
+    expect(operationLabel("server:release_without_snapshot")).not.toBe(
+      "server:release_without_snapshot",
+    );
+  });
+
   it("falls back to the raw code for an unmapped/unknown operation", () => {
     expect(operationLabel("community.permission_grant_revoke")).toBe(
       "community.permission_grant_revoke",

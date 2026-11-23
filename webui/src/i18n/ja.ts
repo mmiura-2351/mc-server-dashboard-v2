@@ -130,6 +130,12 @@ export const ja: Record<TranslationKey, string> = {
   "common.noFileChosen": "ファイルが選択されていません",
   "common.databaseUnavailable":
     "現在、ダッシュボードのデータベースを利用できません。しばらくしてから再度お試しください。",
+  "common.serverAssigned":
+    "サーバーはまだWorkerに割り当てられています。切り離されるまで待ってから、もう一度お試しください。",
+  "common.serverHeld.busy":
+    "サーバーホストがこのサーバーの別の処理で使用中のため最終スナップショットを取れず、サーバーは切り離されないままです。最終スナップショットは自動で再試行されます。成功するまで待ってから、もう一度お試しください。",
+  "common.serverHeld.unavailable":
+    "サーバーホストが最終スナップショットを取れなかったため、サーバーは切り離されないままです。最終スナップショットは自動で再試行されます。成功するまで待ってから、もう一度お試しください。",
 
   // Upload progress (issue #1207).
   "upload.label": "アップロード中",
@@ -274,6 +280,8 @@ export const ja: Record<TranslationKey, string> = {
   // 起動を伝えられた後の再試行にはこのメッセージを返す。
   "dashboard.lifecycle.startAlreadyRunning":
     "サーバーはすでに起動中または起動処理中のため、起動する必要はありません。",
+  "dashboard.lifecycle.finalSnapshotRefused":
+    "サーバーホストが再び最終スナップショットを拒否したため、サーバーは切り離されないままです。最終スナップショットは自動で再試行されます。スナップショットなしで切り離すには、サーバーの画面で「保存せずに切り離す…」を使ってください。",
   // 409 failed_stop_orphan (issue #2466): the host could not confirm an earlier
   // stop, so the process may still be running. A retry of the same action is
   // refused identically, and since issue #2475 the host converges the orphan on
@@ -298,6 +306,8 @@ export const ja: Record<TranslationKey, string> = {
   // connected (issue #3820); nothing recovers the server on its own.
   "dashboard.lifecycle.stopWorkerOffline":
     "サーバーホストに接続できません。停止の指示は有効なままです。猶予時間内にホストが戻れば、そのホストで最終スナップショットを取って停止が完了します。ホストが戻ったあとでもう一度停止すれば、すぐに完了します。ホストがこのまま戻らない場合は、もう一度停止すると最終スナップショットを取らずにすぐ切り離せます。そのあと起動すると別のホストへ移せます。ただし、元のホストが確実に停止していると分かってから行ってください。そうでないと、同じワールドが2つのホストで同時に動く恐れがあります。",
+  "dashboard.lifecycle.stopHeldWorkerOffline":
+    "サーバーホストに接続できず、サーバーは切り離されないままです。ホストが最終スナップショットを拒否しているため、もう一度停止しても切り離されません。ホストが戻って最終スナップショットを取ったとき、ホストが戻らないまま再調整の待ち時間（既定で約11分）が過ぎたとき（スナップショットなし）、または停止の権限を持つ人が保存せずに切り離したときに切り離されます。",
   "dashboard.lifecycle.restartWorkerOffline":
     "サーバーホストに接続できないため、システムはこのサーバーを再起動できません。ホストが戻ったら、もう一度再起動してください。別のホストへ移す場合は、停止を2回行ってから起動してください。ただし、元のホストが確実に停止していると分かってから行ってください。そうでないと、同じワールドが2つのホストで同時に動く恐れがあります。",
   // Live-status degraded indicator: WS down, polling fallback (SPEC 6.2 / 7.2).
@@ -425,6 +435,20 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.forceStop.dialogBody":
     "強制停止はサーバープロセスを即座に終了します。グレースフルシャットダウンは行われず、未保存のデータ（チャンク、プレイヤーの進行状況）が失われる可能性があります。",
   "serverDetail.forceStop.confirm": "強制停止",
+  "serverDetail.held.busy":
+    "サーバーホストがこのサーバーの別の処理で使用中のため、最終スナップショットをまだ取れていません。最終スナップショットは自動で再試行されます。成功するまで、このサーバーの起動・編集・バックアップ・削除はできません。",
+  "serverDetail.held.unavailable":
+    "サーバーホストが最終スナップショットを取れませんでした。最終スナップショットは自動で再試行されます。成功するまで、このサーバーの起動・編集・バックアップ・削除はできません。",
+  "serverDetail.release.button": "保存せずに切り離す…",
+  "serverDetail.release.dialogTitle":
+    "最終スナップショットを取らずにこのサーバーを切り離しますか？",
+  "serverDetail.release.dialogBody":
+    "サーバーホストはこのサーバーの最新のワールドをまだ保存していません。いま切り離すと、前回のスナップショット以降の変更が失われる可能性があります。次にサーバーが別のホストで起動したとき、またはファイルが編集・復元された時点で、その変更は失われます。元のホストでサーバーのコピーがまだ動いている可能性があり、別のホストで起動すると同じワールドが2つ同時に動く恐れがあります。この操作は取り消せません。",
+  "serverDetail.release.confirm": "保存せずに切り離す",
+  "serverDetail.release.error.notHeld":
+    "このサーバーはもう最終スナップショット待ちで保留されていないため、何も切り離していません。その間に最終スナップショットが成功した可能性があります。",
+  "serverDetail.release.error.inFlight":
+    "このサーバーの停止または最終スナップショットがまだ進行中のため、切り離していません。しばらく待ってから、もう一度お試しください。",
   "serverDetail.restart": "再起動",
   "serverDetail.export": "エクスポート",
   "serverDetail.delete": "削除",
@@ -598,6 +622,11 @@ export const ja: Record<TranslationKey, string> = {
   "backups.retention.error.tiered":
     "0以上の整数を入力し、少なくとも1つは0より大きい値にしてください。",
   "backups.retention.error.invalid": "その保持ポリシーは無効です。",
+  // An enabled backup schedule with no retention policy (keep all) grows
+  // without bound (#4084): warned on both the Backups and Schedules tabs.
+  "backups.retention.unboundedWarning":
+    "バックアップのスケジュールが有効ですが、保持ポリシーが設定されていません。定期バックアップが際限なく溜まり、ディスクを使い切るおそれがあります。",
+  "backups.retention.unboundedSetBelow": "下で保持ポリシーを設定してください。",
   // Restore dialog (stopped-only; two-step stop-then-restore).
   "backups.restoreDialog.title": "バックアップを復元",
   "backups.restoreDialog.blocked":
@@ -678,6 +707,8 @@ export const ja: Record<TranslationKey, string> = {
   "schedules.empty": "スケジュールはまだありません。",
   "schedules.none": "—",
   "schedules.create": "+ スケジュールを作成",
+  "schedules.retentionWarning.link":
+    "「バックアップ」タブで保持ポリシーを設定する",
   "schedules.edit": "編集",
   "schedules.delete": "削除",
   "schedules.history": "実行履歴",
@@ -701,6 +732,9 @@ export const ja: Record<TranslationKey, string> = {
   "schedules.cadence.everyMinutes": "{count}分ごと",
   "schedules.cadence.everyHours": "{count}時間ごと",
   "schedules.created": "スケジュールを作成しました。",
+  // The retention step found a policy set since the dialog opened (#4084).
+  "schedules.createdRetentionKept":
+    "スケジュールを作成しました。サーバーにはすでに保持ポリシーがあったため、ここで選んだものではなく既存のポリシーをそのまま残しました。",
   "schedules.updated": "スケジュールを更新しました。",
   "schedules.deleted": "スケジュールを削除しました。",
   "schedules.toggle.enabled": "スケジュールを有効にしました。",
@@ -746,6 +780,24 @@ export const ja: Record<TranslationKey, string> = {
     "サーバーの稼働中のみバックアップする",
   "schedules.dialog.onlyWhenRunningHint":
     "予定時刻にサーバーが停止している場合、バックアップを取らずに実行を「スキップ」として記録します。",
+  // Create only, for a backup schedule on a server with no retention policy
+  // (#4084): keep the last N (prefilled 7) or opt out to keep all. The hint
+  // follows the choice.
+  "schedules.dialog.retentionKeepLastHint":
+    "このサーバーにはまだ保持ポリシーがありません。スケジュールを作成すると、定期バックアップを最新のN件だけ保持するポリシーが設定され、それ以外の定期バックアップは既存のものも含めて削除されます。「破損」と表示された定期バックアップは、ほかの定期バックアップだけではN件に届かない場合にのみ保持されます。手動・アップロード・イベントのバックアップが削除されることはありません。",
+  "schedules.dialog.retentionKeepAllHint":
+    "このサーバーには保持ポリシーがないため、定期バックアップは削除するか「バックアップ」タブでポリシーを設定するまで、すべて保持されます。",
+  // Keep-last N prunes at once: the count of existing scheduled backups it
+  // deletes, a counting line while the backups list loads, or a generic line
+  // when it cannot be read; each gates Create behind the acknowledgement.
+  "schedules.dialog.retentionPrune":
+    "既存の定期バックアップ{count}件がすぐに削除されます。",
+  "schedules.dialog.retentionPruneCounting":
+    "すぐに削除される可能性のある既存の定期バックアップを数えています…",
+  "schedules.dialog.retentionPruneUnknown":
+    "既存の定期バックアップの件数を取得できませんでした。その一部がすぐに削除される可能性があります。",
+  "schedules.dialog.retentionPruneAck":
+    "この件数を超える既存の定期バックアップが削除されることを理解しました。",
   "schedules.dialog.warningsLabel": "プレイヤーへの警告",
   "schedules.dialog.warningsHint":
     "アクションの指定分前にメッセージを通知します（最大5ステップ）。",
@@ -769,6 +821,8 @@ export const ja: Record<TranslationKey, string> = {
   "schedules.error.invalidWarnings":
     "警告は1〜120分（間隔より短い）の重複しないオフセットとメッセージが必要です。",
   "schedules.error.generic": "問題が発生しました。もう一度お試しください。",
+  "schedules.error.retentionNotSet":
+    "スケジュールは作成されましたが、保持ポリシーを設定できませんでした。定期バックアップは引き続き無制限に保持されます。「バックアップ」タブで設定してください。",
   "schedules.deleteDialog.title": "スケジュールを削除",
   "schedules.deleteDialog.body":
     "「{name}」を削除しますか？実行履歴も一緒に削除されます。",
@@ -861,6 +915,8 @@ export const ja: Record<TranslationKey, string> = {
   "files.rolledBack": "選択したバージョンにロールバックしました。",
   "files.error.serverMustBeStopped":
     "ファイルのアップロードやフォルダの作成を行う前にサーバーを停止してください。",
+  "files.error.rollbackServerMustBeStopped":
+    "ファイルをロールバックする前にサーバーを停止してください。",
   "files.error.contentDirProtected":
     "このディレクトリは{noun}タブで管理されています。コンテンツの追加・削除は{noun}タブをご利用ください。",
   "files.error.goToContentTab": "{noun}タブへ移動",
@@ -1278,6 +1334,8 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.audit.op.server:stop": "サーバー停止",
   "communitySettings.audit.op.server:restart": "サーバー再起動",
   "communitySettings.audit.op.server:command": "コンソールコマンド送信",
+  "communitySettings.audit.op.server:release_without_snapshot":
+    "最終スナップショットなしでサーバーを切り離し",
   "communitySettings.audit.op.server:export": "サーバーエクスポート",
   "communitySettings.audit.op.server:import": "サーバーインポート",
   "communitySettings.audit.op.backup:create": "バックアップ作成",

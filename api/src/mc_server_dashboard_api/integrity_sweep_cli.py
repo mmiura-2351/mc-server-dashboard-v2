@@ -32,6 +32,39 @@ to re-run.
 ``log.level=debug`` logs the traceback of a 3. Any other error, a full disk on
 the store for one, ends in a traceback, and Python exits 1 for it too, so a 1
 alone does not prove a store outage.
+
+``--delete-dangling`` runs :class:`DeleteDanglingBackups` instead of the sweep
+(issue #4107): it lists the backup rows whose archive the store reports missing,
+with a HEAD per row rather than a full read, and deletes nothing. ``--apply``
+deletes the rows it lists, each audited as ``backup:delete_dangling``. It deletes
+the row only and sends the store no archive delete (issue #4158), so a NotFound
+that was false leaves the archive in the store, with no row. It runs only while
+the store owner marker names this database's installation (STORAGE.md Section
+4.3), since a store that is not this database's answers NotFound for every row.
+The marker is checked before the pass and again before each deletion.
+``--server`` scopes it the same way::
+
+    cd api && uv run python -m mc_server_dashboard_api.integrity_sweep_cli \
+        --delete-dangling [--apply] [--server <server-uuid>]
+
+The marker check does not catch three cases, in which a HEAD answers NotFound
+for an archive that exists while the marker names this installation (issue
+#4158): a subtree below the fs root that goes missing while the root's marker
+still reads, such as a mount or a symlink of its own under ``communities/``; a
+store that is away for a row's HEAD and back for the marker read; and a store
+that carries this installation's marker but is not the API's, such as the old fs
+root after a move to the object backend, which needs a configuration other than
+the API's. The row is then deleted and its archive kept. Review the dry run's
+list before ``--apply``.
+
+Its exit status keeps the meanings above: 0 when the pass completed; 1 when it
+completed but skipped a row the store could not answer for (an outage, a
+timeout), or when ``--apply`` stopped because the store owner marker could not
+be read, before the pass or before a deletion; 2 on a bad argument, ``--apply``
+without ``--delete-dangling`` among them, on a bad configuration, or when
+``--apply`` refuses a store not marked for this database, before the pass or
+mid-pass; 3 when the database failed or a lifecycle lock was lost. A stop says
+so in one line. Rows already deleted stay deleted, so a re-run is safe.
 """
 
 from __future__ import annotations
@@ -41,6 +74,7 @@ import asyncio
 import logging
 import sys
 import uuid
+from dataclasses import dataclass
 
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -62,21 +96,32 @@ from mc_server_dashboard_api.core.adapters.database import (
     is_transient_database_error,
     translate_connect_outages,
 )
+from mc_server_dashboard_api.core.adapters.installation import read_installation_id
 from mc_server_dashboard_api.logging import configure_logging
 from mc_server_dashboard_api.servers.adapters.backup_store import (
     StorageBackupStoreAdapter,
 )
 from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleLock
 from mc_server_dashboard_api.servers.adapters.unit_of_work import SqlAlchemyUnitOfWork
+from mc_server_dashboard_api.servers.application.backups import (
+    DanglingBackups,
+    DeleteDanglingBackups,
+)
 from mc_server_dashboard_api.servers.application.integrity_sweep import (
     IntegritySweep,
     SweepSummary,
 )
+from mc_server_dashboard_api.servers.domain.backup import Backup
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupStorageUnavailableError,
     LifecycleLockLostError,
+    StoreNotOwnedError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
+from mc_server_dashboard_api.storage.adapters.ownership import (
+    FsStoreOwnership,
+    ObjectStoreOwnership,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -144,12 +189,87 @@ async def run(settings: Settings, *, server_id: ServerId | None) -> SweepSummary
             audit=LoggingAuditRecorder(
                 SqlAlchemyAuditWriter(session_factory, clock=AuditSystemClock())
             ),
-            # The same per-server advisory lock the API's backup creation holds
-            # (issue #3220): keyed on the server id in PostgreSQL, so it serializes
-            # this process against the API's.
+            # The same per-server advisory lock the API's backup delete holds
+            # across its two removals (issue #3220): keyed on the server id in
+            # PostgreSQL, so it serializes this process against the API's.
             lifecycle_lock=PgLifecycleLock(engine=lock_engine),
         )
         return await sweep(server_id=server_id)
+    finally:
+        await lock_engine.dispose()
+        await engine.dispose()
+
+
+class _OwnerMarkerUnreadableError(Exception):
+    """The store owner marker could not be read, so whose store it is is unknown.
+
+    The message names the read's error (issue #4158).
+    """
+
+
+@dataclass(frozen=True)
+class _MarkedForThisDatabase:
+    """The ``StoreOwnership`` port for a command that never claims the store.
+
+    The store's own ``refusal`` always refuses in a process that never called
+    ``claim``, so this asks whether the marker names ``installation_id``, the
+    installation of the database the command was pointed at (issue #4107).
+    A marker read that fails, however it fails, raises
+    :class:`_OwnerMarkerUnreadableError`: the pass cannot tell whether the
+    store is this database's, so it deletes nothing more (issue #4158).
+    """
+
+    ownership: FsStoreOwnership | ObjectStoreOwnership
+    installation_id: uuid.UUID
+
+    async def refusal(self) -> str | None:
+        try:
+            return await self.ownership.refusal_for(self.installation_id)
+        except Exception as exc:
+            raise _OwnerMarkerUnreadableError(f"{type(exc).__name__}: {exc}") from exc
+
+
+async def run_delete_dangling(
+    settings: Settings, *, server_id: ServerId | None, apply: bool
+) -> DanglingBackups:
+    """List, and with ``apply`` delete, the dangling backup rows (issue #4107).
+
+    Wired as :func:`run` wires the sweep, the lock on its own engine. An applied
+    pass first checks that the store owner marker names this database's
+    installation (STORAGE.md Section 4.3), and raises
+    :class:`StoreNotOwnedError` otherwise: a store that is not this database's,
+    a wrong bucket or fs root, answers NotFound for every row, so the pass
+    would delete them all. The pass checks it again before each deletion
+    (:class:`DeleteDanglingBackups`). A dry run deletes nothing, so it runs
+    without the check.
+    """
+
+    engine = _engine(
+        settings.database,
+        pool_size=settings.database.pool_size,
+        max_overflow=settings.database.max_overflow,
+    )
+    lock_engine = _engine(settings.database, pool_size=1, max_overflow=0)
+    try:
+        session_factory = create_session_factory(engine)
+        storage, ownership = _build_storage(settings)
+        marked = _MarkedForThisDatabase(
+            ownership, await read_installation_id(session_factory)
+        )
+        if apply:
+            refusal = await marked.refusal()
+            if refusal is not None:
+                raise StoreNotOwnedError(refusal)
+        delete_dangling = DeleteDanglingBackups(
+            uow=SqlAlchemyUnitOfWork(session_factory),
+            backup_store=StorageBackupStoreAdapter(storage=storage),
+            audit=LoggingAuditRecorder(
+                SqlAlchemyAuditWriter(session_factory, clock=AuditSystemClock())
+            ),
+            ownership=marked,
+            lifecycle_lock=PgLifecycleLock(engine=lock_engine),
+        )
+        return await delete_dangling(apply=apply, server_id=server_id)
     finally:
         await lock_engine.dispose()
         await engine.dispose()
@@ -165,7 +285,23 @@ def main(argv: list[str]) -> int:
         metavar="UUID",
         help="scope the sweep to a single server id (default: every server)",
     )
+    parser.add_argument(
+        "--delete-dangling",
+        action="store_true",
+        help=(
+            "instead of the sweep, list the backup rows whose archive the store "
+            "reports missing; a dry run unless --apply is given (issue #4107)"
+        ),
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="with --delete-dangling, delete the rows it lists",
+    )
     args = parser.parse_args(argv)
+    if args.apply and not args.delete_dangling:
+        sys.stderr.write("--apply needs --delete-dangling\n")
+        return 2
 
     server_id: ServerId | None = None
     if args.server is not None:
@@ -187,6 +323,8 @@ def main(argv: list[str]) -> int:
     # The API's handler, level and format (issue #3942), so the sweep's lines are
     # escaped as the API's are (issue #3938).
     configure_logging(settings.log.level, settings.log.format)
+    if args.delete_dangling:
+        return _delete_dangling(settings, server_id=server_id, apply=args.apply)
     try:
         summary = asyncio.run(run(settings, server_id=server_id))
     except BackupStorageUnavailableError as exc:
@@ -249,6 +387,72 @@ def main(argv: list[str]) -> int:
         f"{summary.snapshots_not_examined}"
     )
     return 0
+
+
+def _delete_dangling(
+    settings: Settings, *, server_id: ServerId | None, apply: bool
+) -> int:
+    """Run ``--delete-dangling`` and print what it found; the exit status."""
+
+    stopped = "so the pass stopped. Rows already deleted this run stay deleted, and"
+    try:
+        found = asyncio.run(
+            run_delete_dangling(settings, server_id=server_id, apply=apply)
+        )
+    except StoreNotOwnedError as exc:
+        sys.stderr.write(f"dangling backups: refusing to delete: {exc}\n")
+        return 2
+    except _OwnerMarkerUnreadableError as exc:
+        _LOG.debug("dangling backups: the owner marker read failed", exc_info=True)
+        sys.stderr.write(
+            f"dangling backups aborted: the store owner marker could not be read "
+            f"({exc}), {stopped} it is safe to re-run.\n"
+        )
+        return 1
+    except LifecycleLockLostError as exc:
+        _LOG.debug("dangling backups: the lifecycle lock was lost", exc_info=True)
+        sys.stderr.write(
+            f"dangling backups aborted: the lifecycle lock on server {exc} was "
+            f"lost, {stopped} it is safe to re-run.\n"
+        )
+        return 3
+    except Exception as exc:
+        if not _is_database_failure(exc):
+            raise
+        _LOG.debug("dangling backups: the database failed", exc_info=True)
+        detail = exc.orig if isinstance(exc, DBAPIError) else exc
+        sys.stderr.write(
+            f"dangling backups aborted: the database failed "
+            f"({type(exc).__name__}: {detail}), {stopped} it is safe to re-run.\n"
+        )
+        return 3
+    print(f"servers scanned: {found.servers_scanned}")
+    _print_rows("dangling backup rows (the store reports no archive)", found.dangling)
+    _print_rows(
+        "skipped (the store could not say whether the archive exists; re-run "
+        "once it is healthy)",
+        found.skipped_store_error,
+    )
+    _print_rows("skipped (server busy; re-run to check them)", found.skipped_busy)
+    if apply:
+        print(
+            f"deleted: {len(found.dangling)} (each audited as backup:delete_dangling)"
+        )
+    else:
+        print(
+            "dry run: nothing was deleted. Re-run with --apply to delete the "
+            "dangling rows listed above."
+        )
+    return 1 if found.skipped_store_error else 0
+
+
+def _print_rows(heading: str, rows: tuple[Backup, ...]) -> None:
+    print(f"{heading}: {len(rows)}")
+    for row in rows:
+        print(
+            f"  backup {row.id.value} of server {row.server_id.value}, created "
+            f"{row.created_at.isoformat()}, source {row.source.value}"
+        )
 
 
 if __name__ == "__main__":

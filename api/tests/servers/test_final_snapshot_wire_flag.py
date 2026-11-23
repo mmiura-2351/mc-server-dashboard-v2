@@ -98,7 +98,10 @@ class _Worker:
             message = await asyncio.wait_for(self._queue.get(), timeout=1)
             sent.append(message.api_command)
             await self._state.resolve(
-                message.correlation_id, self._fleet_id, pb.CommandResult(success=True)
+                message.correlation_id,
+                self._fleet_id,
+                pb.CommandResult(success=True),
+                received_at=_NOW,
             )
         await asyncio.wait_for(task, timeout=1)
         return sent
