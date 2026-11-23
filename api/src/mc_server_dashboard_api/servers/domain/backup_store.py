@@ -16,8 +16,10 @@ layer.
 from __future__ import annotations
 
 import abc
+import datetime as dt
 import enum
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -45,6 +47,19 @@ class SnapshotScan(enum.Enum):
     """
 
 
+@dataclass(frozen=True)
+class StoredArchive:
+    """One archive the store holds, and when the store last wrote it (issue #4106).
+
+    ``modified_at`` is the store's own time for the archive, timezone-aware UTC:
+    the file's mtime on fs, the object's ``LastModified`` on the object backend.
+    The row-less archive reclaim reads it as the archive's age.
+    """
+
+    storage_ref: str
+    modified_at: dt.datetime
+
+
 class BackupArchiveStore(abc.ABC):
     """Port: the backup layer's seam to the authoritative-copy archive store."""
 
@@ -70,6 +85,17 @@ class BackupArchiveStore(abc.ABC):
         Returns every ref that has a physical archive, regardless of whether a
         metadata row exists. Used by ``DeleteServer`` to prune orphaned archives
         that have no row (issue #1707).
+        """
+
+    @abc.abstractmethod
+    async def list_archives(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> list[StoredArchive]:
+        """List every archive on storage with its store time (issue #4106).
+
+        The same archives :meth:`list_archive_refs` lists, each with the time
+        the row-less archive reclaim ages it by. Raises
+        :class:`BackupStorageUnavailableError` when the store cannot list them.
         """
 
     @abc.abstractmethod

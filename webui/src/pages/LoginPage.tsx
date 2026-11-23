@@ -74,6 +74,7 @@ export function LoginPage() {
           <input
             id="login-username"
             type="text"
+            name="username"
             autoComplete="username"
             placeholder={t("login.usernamePlaceholder")}
             value={username}
@@ -85,6 +86,7 @@ export function LoginPage() {
           <label htmlFor="login-password">{t("auth.fieldPassword")}</label>
           <PasswordInput
             id="login-password"
+            name="current-password"
             autoComplete="current-password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}

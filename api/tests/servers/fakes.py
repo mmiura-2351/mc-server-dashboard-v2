@@ -36,6 +36,7 @@ from mc_server_dashboard_api.servers.domain.backup_repository import (
 from mc_server_dashboard_api.servers.domain.backup_store import (
     BackupArchiveStore,
     SnapshotScan,
+    StoredArchive,
 )
 from mc_server_dashboard_api.servers.domain.bedrock_tunnel import BedrockTunnelSync
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
@@ -2594,6 +2595,11 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         # assert what the backfill (#661) tolerates: a store outage fails the read
         # (issue #2405), and only a missing archive leaves the row NULL.
         self.size_error: Exception | None = None
+        # What ``list_archives`` lists (issue #4106): each server's archives with
+        # their store times. ``delete`` removes an archive from it too, and a
+        # server in ``list_errors`` fails its listing with that error.
+        self.archive_times: dict[ServerId, dict[str, dt.datetime]] = {}
+        self.list_errors: dict[ServerId, Exception] = {}
         self._counter = 0
 
     async def create_from_current(
@@ -2610,6 +2616,16 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         self, *, community_id: CommunityId, server_id: ServerId
     ) -> list[str]:
         return sorted(self.archives)
+
+    async def list_archives(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> list[StoredArchive]:
+        if server_id in self.list_errors:
+            raise self.list_errors[server_id]
+        return [
+            StoredArchive(storage_ref=ref, modified_at=at)
+            for ref, at in sorted(self.archive_times.get(server_id, {}).items())
+        ]
 
     async def restore(
         self,
@@ -2659,6 +2675,7 @@ class FakeBackupArchiveStore(BackupArchiveStore):
     ) -> None:
         self.events.append((server_id, "delete-archive"))
         self.archives.discard(storage_ref)
+        self.archive_times.get(server_id, {}).pop(storage_ref, None)
         self.bytes_by_ref.pop(storage_ref, None)
         self.deleted.append((server_id, storage_ref))
 

@@ -1038,7 +1038,8 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 
 ### 6.11 Account
 - Profile (username/email) edit, password change (current + new + confirm),
-  logout, delete account (typed confirm + password).
+  logout, delete account (typed confirm + password). Enter in the delete
+  dialog's password field confirms, as its button does, once both are filled.
 
 ### 6.12 Admin area
 - **Overview**: worker count by status, total servers running, global backup

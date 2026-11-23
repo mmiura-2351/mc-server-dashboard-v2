@@ -209,6 +209,9 @@ from mc_server_dashboard_api.servers.application.reconciler import RunReconciler
 from mc_server_dashboard_api.servers.application.resource_pack_gc import (
     RunResourcePackGc,
 )
+from mc_server_dashboard_api.servers.application.rowless_archive_gc import (
+    ReclaimRowlessBackupArchives,
+)
 from mc_server_dashboard_api.servers.application.schedule_runner import (
     ExecuteScheduleAction,
     RunScheduleTick,
@@ -855,6 +858,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await storage.sweep()
         else:
             await asyncio.to_thread(storage.sweep)
+        # Then reclaim the backup archives no row names (issue #4106), which the
+        # sweep cannot see: it reads no rows. The storage sweep loop below runs it
+        # after each of its passes too, so a failure here is logged and the API
+        # still starts.
+        reclaim_rowless_archives = ReclaimRowlessBackupArchives(
+            uow=ServersUnitOfWork(create_session_factory(engine)),
+            backup_store=StorageBackupStoreAdapter(storage=storage),
+            clock=ServersSystemClock(),
+            ownership=store_ownership,
+            lifecycle_lock=PgLifecycleLock(engine=engine),
+            grace=dt.timedelta(
+                seconds=settings.storage_sweep.rowless_archive_grace_seconds
+            ),
+        )
+        try:
+            await reclaim_rowless_archives()
+        except Exception:  # noqa: BLE001 - the loop retries; the API must start
+            logging.getLogger(__name__).exception(
+                "row-less backup archive reclaim at startup failed; the storage "
+                "sweep loop runs it again"
+            )
         # Bedrock gate-flip sweep (issue #1588): when the Bedrock deployment
         # gate is on, allocate bedrock_port for every server that already has
         # an installed, enabled Geyser but no port (installed while the gate
@@ -1461,10 +1485,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # backends — like the startup sweep, and NOT gated on control.enabled —
         # so orphan staging/snapshot prefixes and orphan in-progress multipart
         # parts are reclaimed without a restart. Dispatched sync/async by the
-        # loop exactly as the startup hook does.
+        # loop exactly as the startup hook does. Each pass then runs the row-less
+        # backup archive reclaim built above (issue #4106).
         storage_sweep_task = asyncio.create_task(
             run_storage_sweep_loop(
                 storage.sweep,
+                reclaim_rowless_archives=reclaim_rowless_archives,
                 tick_seconds=settings.storage_sweep.interval_seconds,
             )
         )

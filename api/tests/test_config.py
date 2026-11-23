@@ -188,10 +188,10 @@ _SECTION_LOADING_CASES = [
     ),
     pytest.param(
         "storage_sweep",
-        {"interval_seconds": 86400},
-        {"interval_seconds": 1800},
-        {"interval_seconds": "3600"},
-        {"interval_seconds": 3600},
+        {"interval_seconds": 86400, "rowless_archive_grace_seconds": 604800},
+        {"interval_seconds": 1800, "rowless_archive_grace_seconds": 7200},
+        {"interval_seconds": "3600", "rowless_archive_grace_seconds": "5400"},
+        {"interval_seconds": 3600, "rowless_archive_grace_seconds": 5400},
         id="storage-sweep",
     ),
     pytest.param(
@@ -513,6 +513,12 @@ _SCALAR_INVALID_CASES = [
         "interval_seconds = 0",
         "interval_seconds",
         id="zero-storage-sweep-interval",
+    ),
+    pytest.param(
+        "storage_sweep",
+        "rowless_archive_grace_seconds = 0",
+        "rowless_archive_grace_seconds",
+        id="zero-rowless-archive-grace",
     ),
     pytest.param("ports", "range_start = 0", "range_start", id="zero-game-range-start"),
     pytest.param(

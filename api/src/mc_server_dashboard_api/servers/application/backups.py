@@ -29,7 +29,8 @@ cancellation included, deletes the archive again (best effort). Once the COMMIT
 is sent, its outcome is unknown, since a COMMIT can apply and still raise: the
 archive is kept and a WARNING logged. A crash, a delete that fails, or an
 unconfirmed COMMIT that did not apply leaves an archive with no row: no listing
-shows it, and the server's delete prunes it.
+shows it, and the row-less archive reclaim deletes it after its grace (issue
+#4106, ``rowless_archive_gc``).
 
 Restore requires the server **at rest** (FR-BAK-4): a hot replacement of a live
 working set is unsafe, so a running server is 409. Restore republishes the
@@ -313,7 +314,8 @@ async def _discard_archive(
     Only for a failure before the row's COMMIT is sent: after it the row may
     stand, and :func:`_keep_unconfirmed_archive` keeps the archive. Best effort: a
     delete that fails is logged and the caller's own failure is raised. The
-    archive left behind has no row, so no listing shows it. It runs without a
+    archive left behind has no row, so no listing shows it, and the row-less
+    archive reclaim deletes it after its grace (issue #4106). It runs without a
     lifecycle-lock check: the ref is new, so nothing else can be using the
     archive.
     """
@@ -339,7 +341,8 @@ def _keep_unconfirmed_archive(backup: Backup) -> None:
     cancellation while awaiting it, or a failure leaving the block after it. The
     row may stand, and deleting its archive would leave it without one, the row
     issue #4086 removes. So the archive is kept and logged. If the COMMIT did not
-    apply, the archive has no row, so no listing shows it.
+    apply, the archive has no row, so no listing shows it, and the row-less
+    archive reclaim deletes it after its grace (issue #4106).
     """
 
     _LOG.warning(
@@ -1232,7 +1235,9 @@ class DeleteDanglingBackups:
     archive delete (issue #4158). A true dangling row has no archive to delete,
     and a NotFound that was false, from a store that flapped, would take the
     real archive with the row. A false one instead leaves the archive in the
-    store with no row: no listing shows it, and the server's delete prunes it.
+    store with no row: no listing shows it, and the row-less archive reclaim
+    deletes it once it is older than the grace (issue #4106). The grace counts
+    from the archive's write, so an old backup's archive goes at the next pass.
     Each deletion is audited post-commit as ``backup:delete_dangling`` with
     ``actor_id``, ``None`` when run headless, as the sweep audits its verdicts.
 

@@ -247,6 +247,7 @@ _PORT_METHODS: dict[abc.ABCMeta, tuple[frozenset[str], frozenset[str]]] = {
             {
                 "create_from_current",
                 "list_archive_refs",
+                "list_archives",
                 "check_backup_health",
                 "check_current_health",
                 "delete",
@@ -291,6 +292,7 @@ _PORT_METHODS: dict[abc.ABCMeta, tuple[frozenset[str], frozenset[str]]] = {
                 "delete_jar",
                 "create_backup_from_current",
                 "list_backups",
+                "list_backup_entries",
                 "check_backup_health",
                 "delete_backup",
                 "open_backup",

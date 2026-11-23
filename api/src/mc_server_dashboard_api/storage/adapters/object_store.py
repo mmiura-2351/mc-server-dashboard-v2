@@ -108,6 +108,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
 from mc_server_dashboard_api.storage.domain.port import (
     API_EDIT_PUBLISHER,
     RESTORE_PUBLISHER,
+    BackupEntry,
     ByteStream,
     DirEntry,
     ExclusionFence,
@@ -1660,6 +1661,23 @@ class ObjectStorage(Storage):
             if name.endswith(".tar.gz"):
                 keys.append(BackupKey(name[: -len(".tar.gz")]))
         return keys
+
+    async def list_backup_entries(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> list[BackupEntry]:
+        # The listing ``list_backups`` takes; each object's ``LastModified``
+        # comes back with it (issue #4106).
+        prefix = self._server_prefix(community_id, server_id) + "backups/"
+        async with self._client_factory() as client:
+            objs = await client.list_objects(prefix)
+        return [
+            BackupEntry(
+                key=BackupKey(obj.key[len(prefix) : -len(".tar.gz")]),
+                modified_at=obj.last_modified,
+            )
+            for obj in sorted(objs, key=lambda o: o.key)
+            if obj.key.endswith(".tar.gz")
+        ]
 
     async def restore_backup(
         self,

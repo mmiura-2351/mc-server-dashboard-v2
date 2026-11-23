@@ -388,6 +388,7 @@ function DangerZone({ user, showToast, onDeleted }: DangerZoneProps) {
         confirmLabel={t("account.delete.confirm")}
         promptLabel={t("account.delete.prompt")}
         passwordLabel={t("account.delete.password")}
+        username={user.username}
         onConfirm={(password) => mutation.mutate(password)}
         onClose={() => setOpen(false)}
       />

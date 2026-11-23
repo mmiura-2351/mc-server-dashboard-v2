@@ -848,15 +848,33 @@ the snapshot that publish is still filling (STORAGE.md Section 4.3). The
 resource-pack GC (STORAGE.md Section 4.3) runs on the same cadence, on the object
 backend only.
 
+After the startup sweep, and after each pass of the sweep loop, the API runs the
+**row-less backup archive reclaim** (STORAGE.md Section 4.3), on both backends.
+It deletes each live server's backup archives that no backup row names, once
+they are older than `storage_sweep.rowless_archive_grace_seconds`. Such an
+archive is what a crash, or a failed cleanup, leaves between a backup's archive
+write and its row. Each deletion runs under the server's lifecycle lock, after
+the rows are read again, and a busy server is skipped until the next pass. The
+grace must be longer than any backup, created or uploaded, takes to write: it
+is what spares the archive of a backup that lost its lifecycle lock mid-write
+and has not recorded its row yet. An archive's age is the API's clock minus the
+store's last-modified time, so the grace must also exceed how far the API's
+clock runs ahead of the store's. The 7-day default also spares, for a while,
+the archives a database restored to an earlier point no longer has rows for
+(STORAGE.md Section 4.3). A reclaim that fails at startup is logged and the
+API still starts. The archives left under a deleted server are not reclaimed
+(issue #4165).
+
 The sweep loop's first pass comes one full interval after startup, because the
-one-shot startup sweep has just run. The resource-pack GC's first pass follows
-the JAR-pool GC rule (Section 5.7): a random delay, uniform between 0 and
-min(`storage_sweep.interval_seconds`, 600) seconds after startup. Later passes of
-both follow the interval.
+one-shot startup sweep and reclaim have just run. The resource-pack GC's first
+pass follows the JAR-pool GC rule (Section 5.7): a random delay, uniform between
+0 and min(`storage_sweep.interval_seconds`, 600) seconds after startup. Later
+passes of both follow the interval.
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
-| `storage_sweep.interval_seconds` | `86400` | | Loop resolution: how often the sweep wakes to reclaim orphan staging/snapshot prefixes and abort orphan in-progress multipart uploads, and how often the resource-pack GC wakes to reclaim stored packs no row names. A daily default matches the sibling GC loops and bounds accumulation without a restart. Must be positive. |
+| `storage_sweep.interval_seconds` | `86400` | | Loop resolution: how often the sweep wakes to reclaim orphan staging/snapshot prefixes, abort orphan in-progress multipart uploads and reclaim row-less backup archives, and how often the resource-pack GC wakes to reclaim stored packs no row names. A daily default matches the sibling GC loops and bounds accumulation without a restart. Must be positive. |
+| `storage_sweep.rowless_archive_grace_seconds` | `604800` | | How old a backup archive no row names must be before the row-less archive reclaim deletes it, by the store's last-modified time (7 days by default). The age counts from the archive's write, not from when it lost its row. Must be longer than any backup takes to write, plus how far the API's clock runs ahead of the store's. Must be positive. |
 
 ---
 
