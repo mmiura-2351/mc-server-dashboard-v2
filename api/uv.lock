@@ -835,7 +835,7 @@ dev = [
     { name = "pytest-cov", specifier = ">=7.1.0,<8" },
     { name = "pytest-timeout", specifier = ">=2.4.0,<3" },
     { name = "pytest-xdist", specifier = ">=3.8.0,<4" },
-    { name = "ruff", specifier = ">=0.17.4,<0.18" },
+    { name = "ruff", specifier = ">=0.17.5,<0.18" },
 ]
 
 [[package]]
