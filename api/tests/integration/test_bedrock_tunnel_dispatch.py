@@ -228,9 +228,10 @@ class _Harness:
         self.registration = RelayRegistration()
         self.registration.set(endpoint=_RELAY_ENDPOINT, ca_pem=_RELAY_CA_PEM)
         self.bedrock_tunnel_table = BedrockTunnelTable()
+        self.clock = _AdvancingClock(_NOW)
         self.sink = ServersServerStateSink(
             create_session_factory(engine),
-            clock=_AdvancingClock(_NOW),
+            clock=self.clock,
             real_time_events=InProcessRealTimeEvents(),
             control_plane=self.control_plane,
             relay_registration=self.registration,
@@ -243,6 +244,7 @@ class _Harness:
             server_id=str(server_id.value),
             worker_id=str(self.worker_id),
             state=state,
+            observed_at=self.clock.now(),
         )
 
     def queue_empty(self) -> bool:
@@ -438,9 +440,10 @@ async def test_api_restart_convergence_mints_fresh_and_redispatches(
     # clock starts after the harness's write so the resync report is fresher than
     # the cached observed_at (the #216 monotonic guard) and thus applies.
     restarted_table = BedrockTunnelTable()
+    restarted_clock = _AdvancingClock(_NOW + dt.timedelta(minutes=1))
     restarted_sink = ServersServerStateSink(
         create_session_factory(engine),
-        clock=_AdvancingClock(_NOW + dt.timedelta(minutes=1)),
+        clock=restarted_clock,
         real_time_events=InProcessRealTimeEvents(),
         control_plane=harness.control_plane,
         relay_registration=harness.registration,
@@ -448,7 +451,10 @@ async def test_api_restart_convergence_mints_fresh_and_redispatches(
         bedrock_tunnel_port=_BEDROCK_TUNNEL_PORT,
     )
     await restarted_sink.record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker_id), state="running"
+        server_id=str(server_id.value),
+        worker_id=str(worker_id),
+        state="running",
+        observed_at=restarted_clock.now(),
     )
 
     message = await harness.queue.get()

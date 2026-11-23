@@ -45,7 +45,7 @@ async def test_record_observed_state_logs_on_non_uuid_worker_id(
 ) -> None:
     with caplog.at_level(logging.ERROR):
         await _sink().record_observed_state(
-            server_id=_UUID, worker_id="worker-1", state="running"
+            server_id=_UUID, worker_id="worker-1", state="running", observed_at=_NOW
         )
     assert any(record.levelno == logging.ERROR for record in caplog.records)
 

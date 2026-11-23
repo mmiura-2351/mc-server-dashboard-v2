@@ -94,6 +94,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
 from mc_server_dashboard_api.storage.domain.port import (
     API_EDIT_PUBLISHER,
     RESTORE_PUBLISHER,
+    BackupEntry,
     ByteStream,
     DirEntry,
     ExclusionFence,
@@ -2245,6 +2246,13 @@ class FsStorage(Storage):
         ]
 
     @_translate_io_faults
+    async def list_backup_entries(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> list[BackupEntry]:
+        backups = self._server_root(community_id, server_id) / "backups"
+        return await asyncio.to_thread(_list_backup_entries, backups)
+
+    @_translate_io_faults
     async def restore_backup(
         self,
         community_id: CommunityId,
@@ -3340,6 +3348,29 @@ def _as_fs_handle(handle: SnapshotHandle) -> _FsSnapshotHandle:
     if not isinstance(handle, _FsSnapshotHandle):
         raise SnapshotHandleError("handle was not issued by this adapter")
     return handle
+
+
+def _list_backup_entries(backups: Path) -> list[BackupEntry]:
+    """The archives in ``backups/`` with their mtimes, as ``list_backups`` names
+    them (issue #4106). An archive deleted after the directory read is not one."""
+
+    if not backups.is_dir():
+        return []
+    entries: list[BackupEntry] = []
+    for path in sorted(backups.iterdir(), key=lambda p: p.name):
+        if not path.name.endswith(".tar.gz"):
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except FileNotFoundError:
+            continue
+        entries.append(
+            BackupEntry(
+                key=BackupKey(path.name[: -len(".tar.gz")]),
+                modified_at=dt.datetime.fromtimestamp(mtime, tz=dt.UTC),
+            )
+        )
+    return entries
 
 
 def _is_stale_spool(path: Path) -> bool:

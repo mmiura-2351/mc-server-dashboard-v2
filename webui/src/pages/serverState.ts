@@ -46,14 +46,96 @@ export function isTransitional(state: ObservedState): boolean {
 }
 
 /**
- * Whether the server is settled at rest — neither running nor transitional.
- * Export, delete and the at-rest settings edits (name/game-port/non-cadence
- * config) gate on this; the API otherwise answers 409 server_unsettled /
- * server_not_stopped (WEBUI_SPEC.md 6.9).
+ * Whether the server is settled at rest: under a stopped intent (when
+ * `desired` is given), and neither running nor transitional. The API serves
+ * the at-rest copy's reads here (a file download), and otherwise answers 409
+ * `server_unsettled` / `server_not_stopped`. Being at rest is not enough to
+ * write that copy: a stop still holding its Worker refuses the write, so a
+ * write control gates on {@link atRestWriteRefusal} instead.
  */
 export function atRest(state: ObservedState, desired?: string): boolean {
   if (desired !== undefined && desired !== "stopped") return false;
   return state === "stopped" || state === "crashed" || state === "unknown";
+}
+
+/** Why a write to the server's at-rest data is refused now. */
+export type AtRestWriteRefusal = "not_at_rest" | "server_assigned";
+
+/**
+ * Why the API would refuse a write to the server's at-rest data, or `null`
+ * where it accepts one: the one rule the at-rest write controls gate on (the
+ * Files, Plugins and Backups restore tabs, the resource pack and the Settings
+ * save). It is the API's `Server.is_quiescent()` gate, in the order
+ * `not_quiescent_error` names it (issue #3998).
+ *
+ * - `not_at_rest`: running, transitional or under a running intent
+ *   ({@link atRest}). Each surface names its own remedy, stopping the server.
+ *   It comes first: a running server is always assigned, and waiting for the
+ *   release is not its remedy.
+ * - `server_assigned`: at rest, but a Worker is still `assigned`. The stop
+ *   holds it until the final snapshot settles, and that snapshot would publish
+ *   over the write (409 `server_assigned`). The controls show held, with the
+ *   reason, until the release frame frees them (issue #4003).
+ * - `null`: at rest and released. The write may be made.
+ */
+export function atRestWriteRefusal(
+  state: ObservedState,
+  desired: string,
+  assigned: boolean,
+): AtRestWriteRefusal | null {
+  if (!atRest(state, desired)) return "not_at_rest";
+  if (assigned) return "server_assigned";
+  return null;
+}
+
+/** Why the Worker a stop still holds refused its final snapshot (#4054). */
+export type FinalSnapshotRefusal = "busy" | "unavailable";
+
+/**
+ * The server's `final_snapshot_refusal`, or `null` for none. The API records
+ * one only while a stop holds its Worker and clears it with the release
+ * (#4054), so a refusal means the server is held for that snapshot, with no
+ * bound, until a retry of it succeeds or someone releases the server without
+ * it (#4056). A value this client does not know reads as none.
+ */
+export function finalSnapshotRefusal(
+  value: string | null | undefined,
+): FinalSnapshotRefusal | null {
+  return value === "busy" || value === "unavailable" ? value : null;
+}
+
+/**
+ * Whether the API releases the server without its final snapshot
+ * (`…/release-without-snapshot`, #4055): at rest under a stopped intent, still
+ * assigned, and held by a refusal. It is that route's precondition, so the
+ * release is offered exactly where the API accepts it.
+ */
+export function releaseWithoutSnapshotApplies(
+  state: ObservedState,
+  desired: string,
+  assigned: boolean,
+  refusal: FinalSnapshotRefusal | null,
+): boolean {
+  return refusal !== null && assigned && atRest(state, desired);
+}
+
+/**
+ * The reason beside a control a stop's Worker still holds (409
+ * `server_assigned`, #4003): worded by the refusal when the Worker refused the
+ * final snapshot, since then the wait has no bound (#4057), and the neutral
+ * reason while that snapshot has yet to settle.
+ */
+export function serverAssignedKey(
+  refusal: FinalSnapshotRefusal | null,
+): TranslationKey {
+  return refusal === null
+    ? "common.serverAssigned"
+    : `common.serverHeld.${refusal}`;
+}
+
+/** The server detail's held notice for a refusal (#4057). */
+export function heldNoticeKey(refusal: FinalSnapshotRefusal): TranslationKey {
+  return `serverDetail.held.${refusal}`;
 }
 
 /**

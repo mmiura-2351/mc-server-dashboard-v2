@@ -170,6 +170,67 @@ describe("parseServerFrame", () => {
     ).toEqual({ kind: "snapshot", state: "stopped", assignedWorkerId: null });
   });
 
+  // A refusal of the stop's final snapshot recorded while its Worker holds
+  // the server is published on its own (#4054), and the release clears it
+  // with the assignment: a frame carrying only it is not malformed (#4057).
+  it("parses a status frame that carries only the final-snapshot refusal (#4057)", () => {
+    expect(
+      parseServerFrame(frame("status", { final_snapshot_refusal: "busy" })),
+    ).toEqual({
+      kind: "status",
+      finalSnapshotRefusal: "busy",
+      detail: "",
+      reason: "",
+    });
+    expect(
+      parseServerFrame(
+        frame("status", {
+          assigned_worker_id: null,
+          final_snapshot_refusal: null,
+        }),
+      ),
+    ).toEqual({
+      kind: "status",
+      assignedWorkerId: null,
+      finalSnapshotRefusal: null,
+      detail: "",
+      reason: "",
+    });
+  });
+
+  it("leaves the refusal out of a status frame that does not carry it", () => {
+    expect(
+      parseServerFrame(frame("status", { state: "stopped" })),
+    ).not.toHaveProperty("finalSnapshotRefusal");
+    expect(
+      parseServerFrame(frame("status", { final_snapshot_refusal: 7 })),
+    ).toBeNull();
+  });
+
+  it("parses the final-snapshot refusal a snapshot frame carries (#4057)", () => {
+    expect(
+      parseServerFrame(
+        frame("snapshot", {
+          state: "stopped",
+          final_snapshot_refusal: "unavailable",
+        }),
+      ),
+    ).toEqual({
+      kind: "snapshot",
+      state: "stopped",
+      finalSnapshotRefusal: "unavailable",
+    });
+    expect(
+      parseServerFrame(
+        frame("snapshot", { state: "stopped", final_snapshot_refusal: null }),
+      ),
+    ).toEqual({
+      kind: "snapshot",
+      state: "stopped",
+      finalSnapshotRefusal: null,
+    });
+  });
+
   it("parses the last crash a snapshot frame carries (#3281)", () => {
     expect(
       parseServerFrame(

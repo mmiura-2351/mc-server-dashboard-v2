@@ -94,6 +94,9 @@ from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
 from mc_server_dashboard_api.servers.application.stop_intents import (
     StopIntentCounter,
 )
+from mc_server_dashboard_api.servers.application.unannounced_refusals import (
+    UnannouncedRefusals,
+)
 from mc_server_dashboard_api.servers.application.unrecorded_stops import (
     UnrecordedStops,
 )
@@ -2597,6 +2600,7 @@ async def test_the_http_start_stop_and_drain_share_the_app_counter() -> None:
     app.state.real_time_events = InProcessRealTimeEvents()
     app.state.stop_dispatch_refusals = StopDispatchRefusals()
     app.state.unrecorded_stops = UnrecordedStops()
+    app.state.unannounced_refusals = UnannouncedRefusals()
     app.state.stop_convergence = StopConvergenceGuard()
     app.state.worker_drain_locks = WorkerDrainLocks()
     request = Request(scope={"type": "http", "app": app})
@@ -2622,6 +2626,8 @@ async def test_the_http_start_stop_and_drain_share_the_app_counter() -> None:
     assert isinstance(start.store_generation, StorageGenerationReader)
     assert start.store_generation.uploads is get_snapshot_uploads(request)
     assert stop.stop_intents is app.state.stop_intents
+    # Shared with every release, which forgets it (issue #4152).
+    assert stop.unannounced_refusals is app.state.unannounced_refusals
     assert isinstance(drain.stopper, ServersAssignedServerStopper)
     assert drain.stopper.stop_servers.stop_intents is app.state.stop_intents
 

@@ -290,6 +290,74 @@ describe("useCommunityEvents", () => {
     ]);
   });
 
+  // The dashboard's held Start tooltip follows the refusal live (#4057).
+  it("patches the cached server's final_snapshot_refusal from a refusal frame and the release (#4057)", () => {
+    const held = {
+      ...serverRow("s1", "stopped", "stopped"),
+      assigned_worker_id: "w1",
+    };
+    const { queryClient } = setup([{ ...held, final_snapshot_refusal: null }]);
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        JSON.stringify({
+          stream: "status",
+          ts: "t",
+          payload: { final_snapshot_refusal: "busy" },
+          server_id: "s1",
+        }),
+      );
+    });
+    expect(queryClient.getQueryData(serversKey(CID))).toEqual([
+      { ...held, final_snapshot_refusal: "busy" },
+    ]);
+    act(() => {
+      MockWebSocket.last().message(
+        JSON.stringify({
+          stream: "status",
+          ts: "t",
+          payload: { assigned_worker_id: null, final_snapshot_refusal: null },
+          server_id: "s1",
+        }),
+      );
+    });
+    expect(queryClient.getQueryData(serversKey(CID))).toEqual([
+      { ...held, assigned_worker_id: null, final_snapshot_refusal: null },
+    ]);
+  });
+
+  it("patches every cached server's final_snapshot_refusal from a snapshot (#4057)", () => {
+    const held = {
+      ...serverRow("s1", "stopped", "stopped"),
+      assigned_worker_id: "w1",
+    };
+    const { queryClient } = setup([{ ...held, final_snapshot_refusal: null }]);
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        JSON.stringify({
+          stream: "snapshot",
+          ts: "t",
+          payload: {
+            servers: [
+              {
+                server_id: "s1",
+                state: "stopped",
+                desired_state: "stopped",
+                assigned_worker_id: "w1",
+                final_snapshot_refusal: "unavailable",
+              },
+            ],
+          },
+          server_id: null,
+        }),
+      );
+    });
+    expect(queryClient.getQueryData(serversKey(CID))).toEqual([
+      { ...held, final_snapshot_refusal: "unavailable" },
+    ]);
+  });
+
   it("patches every cached server's assigned_worker_id from a snapshot (#3818)", () => {
     const { queryClient } = setup([
       { ...serverRow("s1", "stopped", "stopped"), assigned_worker_id: "w1" },
@@ -410,6 +478,38 @@ describe("useCommunityEvents", () => {
     expect(invalidateSpy).toHaveBeenCalledTimes(1);
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: serversKey(CID) });
   });
+
+  // The snapshot replaces the live states (#1795): a state a frame set for a
+  // server the snapshot does not list goes with it, so that server no longer
+  // counts as one the list lacks.
+  it.each([
+    ["assigned_worker_id", { assigned_worker_id: null }],
+    ["final_snapshot_refusal", { final_snapshot_refusal: "busy" }],
+  ] as const)(
+    "drops a frame's %s for a server the snapshot does not list",
+    (_name, payload) => {
+      const { invalidateSpy } = setup([serverRow("s1", "stopped")]);
+      act(() => {
+        MockWebSocket.last().open();
+        MockWebSocket.last().message(
+          JSON.stringify({
+            stream: "status",
+            ts: "t",
+            payload,
+            server_id: "s2",
+          }),
+        );
+      });
+      // A server the list lacks: one refetch loads it.
+      expect(invalidateSpy).toHaveBeenCalledTimes(1);
+
+      act(() => {
+        MockWebSocket.last().message(snapshotFrame([["s1", "stopped"]]));
+      });
+      // The snapshot lists s1 alone, as the list does: nothing to load.
+      expect(invalidateSpy).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("ignores a snapshot that arrives before the list is loaded", () => {
     const { queryClient, invalidateSpy } = setup(undefined);
@@ -657,6 +757,7 @@ type Row = ReturnType<typeof serverRow> & {
   crash_reason?: string | null;
   crash_detail?: string | null;
   crash_not_restarted?: boolean;
+  final_snapshot_refusal?: string | null;
 };
 
 function LiveProbe({ queryFn }: { queryFn: QueryFunction<Row[]> }) {
@@ -792,9 +893,10 @@ describe("useCommunityEvents with REST reads in flight (#3213)", () => {
     expect(cached()).toEqual([{ id: "s1", observed_state: "unknown" }]);
   });
 
-  // The same supersede for the intent (#3428) and the assignment (#3818): a
-  // read that started after the frame repairs a frame that went missing since,
-  // so a lost release cannot hold Start for good.
+  // The same supersede for the intent (#3428), the assignment (#3818) and the
+  // final-snapshot refusal (#4057): a read that started after the frame
+  // repairs a frame that went missing since, so a lost release cannot hold
+  // Start for good.
   it.each([
     [
       "desired_state",
@@ -815,6 +917,16 @@ describe("useCommunityEvents with REST reads in flight (#3213)", () => {
         server_id: "s1",
       },
       { ...serverRow("s1", "stopped"), assigned_worker_id: null },
+    ],
+    [
+      "final_snapshot_refusal",
+      {
+        stream: "status",
+        ts: "t",
+        payload: { final_snapshot_refusal: "busy" },
+        server_id: "s1",
+      },
+      { ...serverRow("s1", "stopped"), final_snapshot_refusal: null },
     ],
   ] as const)(
     "lets a REST read started after the frame supersede its %s",
@@ -884,6 +996,28 @@ describe("useCommunityEvents with REST reads in flight (#3213)", () => {
     expect(cached()).toEqual([
       { ...serverRow("s1", "stopped", "stopped"), assigned_worker_id: null },
     ]);
+  });
+
+  it("keeps a refusal frame that arrives before the cold list load lands (#4057)", async () => {
+    const held = {
+      ...serverRow("s1", "stopped", "stopped"),
+      assigned_worker_id: "w1",
+    };
+    const { respond, cached } = setupDeferred();
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        JSON.stringify({
+          stream: "status",
+          ts: "t",
+          payload: { final_snapshot_refusal: "busy" },
+          server_id: "s1",
+        }),
+      );
+    });
+    // The cold read captured the row before the refusal.
+    await respond([{ ...held, final_snapshot_refusal: null }]);
+    expect(cached()).toEqual([{ ...held, final_snapshot_refusal: "busy" }]);
   });
 
   it("orders the observed state and the intent against a read separately (#3428)", async () => {

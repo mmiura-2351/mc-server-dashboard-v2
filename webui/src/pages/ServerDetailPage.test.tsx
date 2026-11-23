@@ -24,6 +24,7 @@ import {
 import { ApiError } from "../api/client.ts";
 import { MAX_CONSOLE_LINE_BYTES } from "../api/limits.ts";
 import { setAccessToken } from "../auth/tokenStore.ts";
+import { Modal } from "../components/Modal.tsx";
 import { ToastProvider } from "../components/Toast.tsx";
 import {
   getLanguage,
@@ -117,6 +118,7 @@ function server(overrides: Record<string, unknown> = {}) {
     crash_reason: null,
     crash_detail: null,
     crash_not_restarted: false,
+    final_snapshot_refusal: null,
     config: {},
     slug: "survival",
     join_hostname: null,
@@ -841,6 +843,33 @@ describe("ServerDetailPage lifecycle controls", () => {
     ).not.toBeInTheDocument();
   });
 
+  // Escape under an open dialog closes the dialog, not the menu (#3920). No
+  // tab opens a dialog over the menu without the click that closes it any more
+  // (the Files drop is held whenever Stop shows, #4003), so one is mounted
+  // beside the page.
+  it("leaves an Escape to a dialog opened over the stop menu", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(screen.getByRole("button", { name: /Stop/ }));
+    const onClose = vi.fn();
+    render(
+      <Modal open title="over the menu" onClose={onClose}>
+        body
+      </Modal>,
+    );
+    const dialog = screen.getByRole("dialog");
+    await waitFor(() => expect(dialog).toHaveFocus());
+
+    fireEvent.keyDown(dialog, { key: "Escape" });
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByRole("menuitem", { name: t("serverDetail.stopForce") }),
+    ).toBeInTheDocument();
+  });
+
   // An Escape that cancels an IME conversion is the IME's (#3993).
   it.each([{ isComposing: true }, { keyCode: 229 }])(
     "keeps the stop menu open on an Escape the IME is composing with (%o)",
@@ -1264,6 +1293,389 @@ describe("ServerDetailPage lifecycle controls", () => {
   });
 });
 
+// A stop's Worker refused the final snapshot BUSY or UNAVAILABLE and holds the
+// server, with no bound, until a retry succeeds (#4056). The header says so,
+// and a holder of server:stop may release it without the snapshot (#4055,
+// #4057).
+describe("ServerDetailPage a server held by a refused final snapshot (#4057)", () => {
+  function held(refusal: string | null) {
+    return server({
+      observed_state: "stopped",
+      desired_state: "stopped",
+      assigned_worker_id: "worker-a",
+      final_snapshot_refusal: refusal,
+    });
+  }
+
+  function releaseButton() {
+    return screen.queryByRole("button", {
+      name: t("serverDetail.release.button"),
+    });
+  }
+
+  async function openRelease() {
+    await screen.findByText("survival");
+    const release = releaseButton();
+    expect(release).not.toBeNull();
+    fireEvent.click(release as HTMLElement);
+    return screen.getByRole("dialog", {
+      name: t("serverDetail.release.dialogTitle"),
+    });
+  }
+
+  it.each(["busy", "unavailable"] as const)(
+    "shows the held notice for a %s refusal read with the server, as Start's reason",
+    async (refusal) => {
+      mockApi.get.mockResolvedValue(held(refusal));
+      renderPage();
+
+      await screen.findByText("survival");
+      const notice = t(`serverDetail.held.${refusal}`);
+      expect(screen.getByText(notice)).toBeInTheDocument();
+      const start = screen.getByRole("button", {
+        name: t("serverDetail.start"),
+      });
+      expect(start).toBeDisabled();
+      expect(start).toHaveAccessibleDescription(notice);
+      expect(
+        screen.queryByText(t("serverDetail.startAwaitsRelease")),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  // The notice is about the server, not about the Start button.
+  it("shows the held notice to a caller who may not start the server", async () => {
+    mockCan = (code) => code !== "server:start";
+    mockApi.get.mockResolvedValue(held("busy"));
+    renderPage();
+
+    await screen.findByText("survival");
+    expect(screen.getByText(t("serverDetail.held.busy"))).toBeInTheDocument();
+  });
+
+  // A stop whose final snapshot has yet to settle is held too, but may still
+  // get its snapshot, so the API refuses to release it (#4055).
+  it("offers the release only while a refusal holds the server", async () => {
+    mockApi.get.mockResolvedValue(held(null));
+    const { unmount } = renderPage();
+
+    await screen.findByText("survival");
+    expect(
+      screen.getByText(t("serverDetail.startAwaitsRelease")),
+    ).toBeInTheDocument();
+    expect(releaseButton()).not.toBeInTheDocument();
+    unmount();
+
+    mockApi.get.mockResolvedValue(held("busy"));
+    renderPage();
+    await screen.findByText("survival");
+    expect(releaseButton()).toBeEnabled();
+  });
+
+  it("offers the release only with server:stop", async () => {
+    mockCan = (code) => code !== "server:stop";
+    mockApi.get.mockResolvedValue(held("busy"));
+    renderPage();
+
+    await screen.findByText("survival");
+    expect(screen.getByText(t("serverDetail.held.busy"))).toBeInTheDocument();
+    expect(releaseButton()).not.toBeInTheDocument();
+  });
+
+  // Stop's force means "kill now" only (owner decision on #3701): the
+  // release is its own control, beside the Stop menu and never in it.
+  it("never offers the release inside the Stop menu", async () => {
+    mockApi.get.mockResolvedValue(held("busy"));
+    renderPage();
+
+    await screen.findByText("survival");
+    expect(releaseButton()?.closest(".stop-control")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Stop/ }));
+    expect(
+      within(screen.getByRole("menu"))
+        .getAllByRole("menuitem")
+        .map((item) => item.textContent),
+    ).toEqual([t("serverDetail.stopGraceful"), t("serverDetail.stopForce")]);
+  });
+
+  it("releases through its own dialog to the release endpoint", async () => {
+    mockApi.get.mockResolvedValue(held("unavailable"));
+    mockApi.post.mockResolvedValue(
+      server({
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      }),
+    );
+    renderPage();
+
+    const dialog = await openRelease();
+    expect(
+      within(dialog).getByText(t("serverDetail.release.dialogBody")),
+    ).toBeInTheDocument();
+    // Cancel takes the default focus: the confirm gives up the progression
+    // since the last snapshot, and cannot be undone.
+    expect(
+      within(dialog).getByRole("button", { name: t("common.cancel") }),
+    ).toHaveFocus();
+    expect(mockApi.post).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      within(dialog).getByRole("button", {
+        name: t("serverDetail.release.confirm"),
+      }),
+    );
+    await waitFor(() =>
+      expect(mockApi.post).toHaveBeenCalledWith(
+        `/api/communities/${CID}/servers/${SID}/release-without-snapshot`,
+      ),
+    );
+    expect(mockApi.post).toHaveBeenCalledTimes(1);
+  });
+
+  // The force-stop dialog warns about killing a live process; this one about
+  // what the release gives up (WEBUI_SPEC.md 2.3).
+  it("words its dialog apart from the force-stop dialog", async () => {
+    mockApi.get.mockResolvedValue(held("busy"));
+    renderPage();
+
+    const dialog = await openRelease();
+    expect(
+      within(dialog).queryByText(t("serverDetail.forceStop.dialogBody")),
+    ).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole("button", {
+        name: t("serverDetail.forceStop.confirm"),
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("dialog", {
+        name: t("serverDetail.forceStop.dialogTitle"),
+      }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("sends nothing when the release is cancelled", async () => {
+    mockApi.get.mockResolvedValue(held("busy"));
+    renderPage();
+
+    const dialog = await openRelease();
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: t("common.cancel") }),
+    );
+    expect(
+      screen.queryByText(t("serverDetail.release.dialogBody")),
+    ).not.toBeInTheDocument();
+    expect(mockApi.post).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["invalid_transition", "serverDetail.release.error.notHeld"],
+    ["transition_conflict", "serverDetail.release.error.inFlight"],
+  ] as const)(
+    "toasts a release refused 409 %s by its reason",
+    async (reason, key) => {
+      mockApi.get.mockResolvedValue(held("busy"));
+      mockApi.post.mockRejectedValue(new ApiError(409, { reason }));
+      renderPage();
+
+      const dialog = await openRelease();
+      fireEvent.click(
+        within(dialog).getByRole("button", {
+          name: t("serverDetail.release.confirm"),
+        }),
+      );
+      expect(
+        await screen.findByText(aboutServer("survival", t(key))),
+      ).toBeInTheDocument();
+    },
+  );
+
+  // A held server's stop whose Worker is gone releases nothing (#4111), so it
+  // is not told to stop again to release it now.
+  it("words a held server's offline stop apart from an undelivered one", async () => {
+    mockApi.get.mockResolvedValue(held("busy"));
+    mockApi.post.mockRejectedValue(
+      new ApiError(503, {
+        reason: "worker_unavailable",
+        worker_state: "not_connected",
+      }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(screen.getByRole("button", { name: /Stop/ }));
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("serverDetail.stopGraceful") }),
+    );
+    expect(
+      await screen.findByText(
+        aboutServer("survival", t("dashboard.lifecycle.stopHeldWorkerOffline")),
+      ),
+    ).toBeInTheDocument();
+  });
+
+  describe("live", () => {
+    let restoreWs: () => void;
+    beforeEach(() => {
+      restoreWs = installMockWebSocket();
+    });
+    afterEach(() => restoreWs());
+
+    it("shows the held notice and the release from a refusal frame", async () => {
+      // Every REST read answers no refusal, so the frame alone shows it.
+      mockApi.get.mockResolvedValue(held(null));
+      renderPage();
+      await screen.findByText("survival");
+      expect(
+        screen.queryByText(t("serverDetail.held.busy")),
+      ).not.toBeInTheDocument();
+
+      act(() => {
+        MockWebSocket.last().open();
+        MockWebSocket.last().message(
+          serverFrame("status", { final_snapshot_refusal: "busy" }),
+        );
+      });
+
+      expect(screen.getByText(t("serverDetail.held.busy"))).toBeInTheDocument();
+      expect(releaseButton()).toBeEnabled();
+    });
+
+    it("clears the held notice and the release on the release frame", async () => {
+      // Every REST read still answers held, so the frame alone clears it.
+      mockApi.get.mockResolvedValue(held("unavailable"));
+      renderPage();
+      await screen.findByText("survival");
+      expect(
+        screen.getByText(t("serverDetail.held.unavailable")),
+      ).toBeInTheDocument();
+
+      act(() => {
+        MockWebSocket.last().open();
+        MockWebSocket.last().message(
+          serverFrame("status", {
+            assigned_worker_id: null,
+            final_snapshot_refusal: null,
+          }),
+        );
+      });
+
+      expect(
+        screen.queryByText(t("serverDetail.held.unavailable")),
+      ).not.toBeInTheDocument();
+      expect(releaseButton()).not.toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: t("serverDetail.start") }),
+      ).toBeEnabled();
+    });
+  });
+
+  // Settled either way, the release refetches the server and the list. A
+  // success holds the controls until that refetch answers, as a lifecycle
+  // success does (#3860): until then the cache still shows the server held.
+  // The socket is installed but never opens, so no drop refetch stands in for
+  // the settle refetch.
+  describe("the release's settle refetch", () => {
+    const serverPath = `/api/communities/${CID}/servers/${SID}`;
+    const stopButton = () => screen.getByRole("button", { name: /Stop/ });
+    let restoreWs: () => void;
+    beforeEach(() => {
+      restoreWs = installMockWebSocket();
+    });
+    afterEach(() => restoreWs());
+
+    it("holds the controls through a release that succeeds until the refetch answers", async () => {
+      const released = server({
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      });
+      mockApi.get.mockResolvedValue(held("busy"));
+      let answerPost!: (value: unknown) => void;
+      mockApi.post.mockReturnValue(
+        new Promise((resolve) => {
+          answerPost = resolve;
+        }),
+      );
+      const { queryClient } = renderPage();
+      queryClient.setQueryData(serversKey(CID), [held("busy")]);
+
+      const dialog = await openRelease();
+      fireEvent.click(
+        within(dialog).getByRole("button", {
+          name: t("serverDetail.release.confirm"),
+        }),
+      );
+      await waitFor(() => expect(stopButton()).toBeDisabled());
+
+      let answerRefetch!: (value: unknown) => void;
+      mockApi.get.mockReturnValue(
+        new Promise((resolve) => {
+          answerRefetch = resolve;
+        }),
+      );
+      const reads = mockApi.get.mock.calls.length;
+      await act(async () => answerPost(released));
+
+      await waitFor(() =>
+        expect(
+          mockApi.get.mock.calls.slice(reads).map(([path]) => path),
+        ).toContain(serverPath),
+      );
+      expect(queryClient.getQueryState(serversKey(CID))?.isInvalidated).toBe(
+        true,
+      );
+      // A settled mutation renders a task later; flush it, so a success that
+      // did not wait for the refetch would show here.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(stopButton()).toBeDisabled();
+
+      act(() => answerRefetch(released));
+      await waitFor(() => expect(releaseButton()).not.toBeInTheDocument());
+      expect(
+        screen.getByRole("button", { name: t("serverDetail.start") }),
+      ).toBeEnabled();
+    });
+
+    it("refetches after a release that fails and frees the controls at once", async () => {
+      mockApi.get.mockResolvedValue(held("busy"));
+      mockApi.post.mockRejectedValue(
+        new ApiError(409, { reason: "invalid_transition" }),
+      );
+      const { queryClient } = renderPage();
+      queryClient.setQueryData(serversKey(CID), [held("busy")]);
+
+      const dialog = await openRelease();
+      // The refetch never answers: a failure does not wait for it.
+      mockApi.get.mockReturnValue(new Promise(() => {}));
+      const reads = mockApi.get.mock.calls.length;
+      fireEvent.click(
+        within(dialog).getByRole("button", {
+          name: t("serverDetail.release.confirm"),
+        }),
+      );
+
+      expect(
+        await screen.findByText(
+          aboutServer("survival", t("serverDetail.release.error.notHeld")),
+        ),
+      ).toBeInTheDocument();
+      await waitFor(() =>
+        expect(
+          mockApi.get.mock.calls.slice(reads).map(([path]) => path),
+        ).toContain(serverPath),
+      );
+      expect(queryClient.getQueryState(serversKey(CID))?.isInvalidated).toBe(
+        true,
+      );
+      await waitFor(() => expect(stopButton()).toBeEnabled());
+    });
+  });
+});
+
 describe("ServerDetailPage export (minted grant, #2353)", () => {
   const GRANT_PATH = `/api/communities/${CID}/servers/${SID}/export/download-grant`;
   const GRANT_URL = `/api/communities/${CID}/servers/${SID}/export?grant=jwt-1`;
@@ -1660,6 +2072,91 @@ describe("ServerDetailPage settings", () => {
       name: "renamed",
       game_port: 25565,
       config: { motd: "hi" },
+    });
+  });
+
+  // A stop holds its Worker until the final snapshot settles, and the API
+  // refuses a save that rewrites server.properties until the release (409
+  // server_assigned, #3998): Save is held, with the reason (#4003).
+  describe("a stopped server its Worker still holds", () => {
+    const held = {
+      observed_state: "stopped",
+      desired_state: "stopped",
+      assigned_worker_id: "worker-a",
+    };
+
+    function saveButton() {
+      return screen.getByRole("button", {
+        name: t("serverDetail.settings.save"),
+      });
+    }
+
+    it("holds Save with the reason", async () => {
+      routeGet({ srv: held });
+      renderPage();
+
+      await screen.findByText("survival");
+      openSettings();
+      expect(saveButton()).toBeDisabled();
+      expect(saveButton()).toHaveAccessibleDescription(
+        t("common.serverAssigned"),
+      );
+    });
+
+    // A refusal hold has no bound, so its reason names the refusal (#4057).
+    it.each(["busy", "unavailable"] as const)(
+      "words Save's and Delete's hold by a %s refusal",
+      async (refusal) => {
+        routeGet({ srv: { ...held, final_snapshot_refusal: refusal } });
+        renderPage();
+
+        await screen.findByText("survival");
+        openSettings();
+        const reason = t(`common.serverHeld.${refusal}`);
+        expect(saveButton()).toBeDisabled();
+        expect(saveButton()).toHaveAccessibleDescription(reason);
+        const remove = screen.getByRole("button", {
+          name: t("serverDetail.danger.deleteButton"),
+        });
+        expect(remove).toBeDisabled();
+        expect(remove).toHaveAccessibleDescription(reason);
+      },
+    );
+
+    // A running server is assigned too, but waiting for a release is not its
+    // remedy: Save stays offered, as a safe-keys-only edit passes (#115).
+    it("keeps Save offered while the server runs", async () => {
+      routeGet({ srv: { assigned_worker_id: "worker-a" } });
+      renderPage();
+
+      await screen.findByText("survival");
+      openSettings();
+      expect(saveButton()).toBeEnabled();
+      expect(
+        screen.queryByText(t("common.serverAssigned")),
+      ).not.toBeInTheDocument();
+    });
+
+    it("frees Save on the release frame", async () => {
+      routeGet({ srv: held });
+      renderPage();
+
+      await screen.findByText("survival");
+      openSettings();
+      expect(saveButton()).toBeDisabled();
+
+      act(() => {
+        MockWebSocket.last().open();
+        MockWebSocket.last().message(
+          serverFrame("status", { assigned_worker_id: null }),
+        );
+      });
+
+      // The frame alone frees it: every REST read still answers worker-a.
+      await waitFor(() => expect(saveButton()).toBeEnabled());
+      expect(
+        screen.queryByText(t("common.serverAssigned")),
+      ).not.toBeInTheDocument();
     });
   });
 
@@ -2728,7 +3225,8 @@ describe("ServerDetailPage delete (typed confirm)", () => {
   });
 
   // The cache can still show the server released when the API finds it
-  // assigned; the refusal then says the same as the held button (#3852).
+  // assigned (#3852); the refusal toasts the one neutral release message
+  // every surface shows (#4003).
   it("toasts the release reason when the delete answers 409 server_assigned", async () => {
     routeGet({
       srv: {
@@ -2757,9 +3255,7 @@ describe("ServerDetailPage delete (typed confirm)", () => {
     );
 
     expect(
-      (
-        await screen.findByText(t("serverDetail.danger.deleteAwaitsRelease"))
-      ).closest(".toast"),
+      (await screen.findByText(t("common.serverAssigned"))).closest(".toast"),
     ).not.toBeNull();
     expect(navigateMock).not.toHaveBeenCalledWith(`/communities/${CID}`);
   });

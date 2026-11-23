@@ -453,8 +453,8 @@ async def test_rerunning_is_idempotent() -> None:
 
 
 async def test_dangling_row_is_still_condemned_under_the_lifecycle_lock() -> None:
-    """Holding the lifecycle lock (issue #3220) only rules out a publication in
-    flight; a row whose archive is missing with nothing publishing it is a real
+    """Holding the lifecycle lock (issue #3220) only rules out a delete in
+    flight; a row whose archive is missing with nothing deleting it is a real
     dangling row and still gets the UNREADABLE verdict and its audit."""
 
     sid = ServerId.new()
@@ -479,11 +479,11 @@ async def test_busy_backup_is_skipped_while_the_rest_of_the_server_is_swept(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The lock is taken per backup (issue #3220). A backup whose lock stays held
-    past the wait budget (a publication in flight, a restore, ...) is skipped for
+    past the wait budget (a delete in flight, a restore, ...) is skipped for
     this run: no verdict, no audit, logged at INFO and counted apart. The server's
     other backups still get verdicts and its snapshot is still checked. Judging
-    the row mid-publication is exactly the false "dangling" verdict the lock
-    exists to prevent."""
+    the row mid-delete is exactly the false "dangling" verdict the lock exists to
+    prevent."""
 
     sid = ServerId.new()
     # Newest first, so the sweep reaches it on the first (busy) acquisition. It
@@ -545,7 +545,7 @@ async def test_backup_deleted_before_its_lock_is_taken_gets_no_verdict() -> None
 
 @pytest.mark.parametrize("ref", ["good", "bad", "missing"])
 async def test_a_sweep_that_lost_the_lock_writes_no_verdict(ref: str) -> None:
-    # The lock is what keeps a backup still being published out of the check
+    # The lock is what keeps a backup still being deleted out of the check
     # (issue #3220); one lost during the probe leaves no verdict safe to write
     # (issue #3927), healthy or condemning.
     sid = ServerId.new()

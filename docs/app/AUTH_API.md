@@ -146,7 +146,11 @@ branches on exactly one contract:
   states need different recovery: a Worker that is not connected gets none on
   its own ([`CONFIGURATION.md`](CONFIGURATION.md) Section 5.6, "A Worker that
   never reconnects"), so the Web UI words them apart (WEBUI_SPEC.md Section
-  7.4). Other routes that answer `worker_unavailable` do not carry it.
+  7.4). Other routes that answer `worker_unavailable` do not carry it. A
+  `stop` of a server held by a refused final snapshot whose Worker is not
+  connected also carries a `detail`: the stop released nothing, and the
+  detail names what releases the server (issue #4111; CONFIGURATION.md
+  Section 5.6).
 - A `413` with `reason: "credential_required_for_body"` refuses a body past
   64 KiB that carries no valid credential: none, an invalid one, an expired
   token, or a deactivated account's ([`SECURITY.md`](SECURITY.md) Section 5).

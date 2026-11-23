@@ -108,7 +108,9 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   reconnects nothing re-places the server: an operator stop releases it (the
   ``unknown`` arm above, after the grace or at once on a second stop), and a start
   then places it elsewhere (CONFIGURATION.md Section 5.6; an automatic recovery is
-  issue #3809). The orphan path has no assigned Worker, so it is unaffected by this
+  issue #3809). A second stop of a server held by a refused final snapshot
+  releases nothing (issue #4111); the grace or the release without the snapshot
+  does. The orphan path has no assigned Worker, so it is unaffected by this
   skip.
 
 Grace window — a divergence is acted on only once it has persisted past a grace
@@ -139,7 +141,10 @@ read disconnected: the end of its session, or the lapse of its heartbeats, which
 the registry reports before the teardown runs (issue #3963). The teardown's bulk
 write restamps the Worker's rows, but until it lands, or when it fails, a row
 still carries its stamp from before the drop, and a tick in that window would
-release it at once without its final snapshot.
+release it at once without its final snapshot. When the write fails, the tick
+makes it itself once the session has been over for the heartbeat timeout,
+stamped with the session's end, the stamp the teardown would have given the
+row (issue #4130, ``RunReconcilerTick._mark_gone_workers_unknown``).
 
 The tick reads each row's Worker once, its connectivity and then its drop
 instant, and the grace, the finished-stop record below and the release's routing
@@ -199,9 +204,12 @@ snapshot can still be uploading (#847). Both stop-side floors are therefore met,
 The record is dropped before every stop or final-snapshot dispatch, and any newer
 intent commit or Worker report supersedes it, with no ``EXPIRED`` exception, as
 does a later disconnect of the row's Worker (issue #3963). The record carries the
-instant its failed write began, so a disconnect while that write fails is later
-than it (issue #3981). It is not persisted, so after an API restart the full grace
-applies again.
+instant the API read the Worker's answer its failed write follows (issue #4117),
+as a refusal's record does, or, after no answer, the instant that write began, so
+a disconnect while that write fails is later than it (issue #3981). A Worker
+report is stamped as it is read, so one read after that answer supersedes the
+record, however long the answer waited to be handled. It is not persisted, so
+after an API restart the full grace applies again.
 
 The record also covers a final snapshot the Worker REFUSED ``BUSY`` or
 ``UNAVAILABLE`` (issue #3697), which holds the row instead of releasing it. The
@@ -214,9 +222,13 @@ takes here: the short grace only re-drives the snapshot, and the row is released
 only once a snapshot settles. A refusal is superseded like any record, a later
 drop of the Worker included. That Worker may be back with the working set, so the
 row then waits a full grace from the drop, after which the disconnected-Worker leg
-releases it without the snapshot (PM ruling 2(a) on #3697, the one release of a
-refusal-held row no operator asked for). The hold itself is the row shape, which
-an API restart keeps; only the short grace is lost with the record.
+releases it without the snapshot (PM ruling 2(a) on #3697). Every other release of
+a refusal-held row follows a settled snapshot or an operator's release without it
+(``ReleaseHeldServer``): an operator's stop while that Worker is gone releases
+nothing (issue #4111), so this leg is the one release without the snapshot that
+no operator asked for. The hold itself is the row shape and its recorded refusal,
+which an API restart keeps, as does a retry left unanswered; only the short grace
+is lost with the record.
 
 Widening WHERE the predicate is true does not widen WHAT the short grace assumes.
 The two gates it rides on are unchanged, and they are what the long grace's floors
@@ -510,6 +522,9 @@ class RunReconcilerTick:
     held_start_grace_seconds: int
     refused_stop_grace_seconds: int
     restart_timeout_seconds: int
+    # How long after a Worker's session ended the tick marks its servers unknown
+    # itself (issue #4130, :meth:`_mark_gone_workers_unknown`).
+    heartbeat_timeout_seconds: int
     backoff_base_seconds: int
     backoff_max_seconds: int
     # When this process's control-plane listener started: the first instant a
@@ -519,6 +534,7 @@ class RunReconcilerTick:
 
     async def tick(self) -> None:
         now = self.clock.now()
+        await self._mark_gone_workers_unknown(now)
         async with self.uow:
             candidates = await self.uow.servers.list_reconcilable()
             # A converged row is never a candidate, so read each server holding a
@@ -559,6 +575,60 @@ class RunReconcilerTick:
                     server.id.value,
                     exc_info=result,
                 )
+
+    async def _mark_gone_workers_unknown(self, now: dt.datetime) -> None:
+        """Mark a gone Worker's servers unknown when its teardown did not (#4130).
+
+        A session's teardown marks its Worker's servers ``unknown``, but its
+        write can fail, and after a refused registration it is skipped past
+        a bound (issue #4091). Its servers then read their last report, such
+        as ``running``, for as long as the Worker stays away. This runs the
+        same write for a Worker whose session ended at least
+        ``heartbeat_timeout_seconds`` ago with no newer one, so the teardown's
+        own write comes first. A Worker whose heartbeats have lapsed still has
+        its session until the watchdog ends it.
+
+        The write is stamped with the instant the session ended, which comes
+        after every report of that session, so the servers end as the
+        teardown's write would have left them: a stopped intent's release
+        still waits a full grace from the drop. A report of the Worker's next
+        session is stamped later and survives the write (issue #4092), and a
+        repeat of it changes nothing.
+
+        Only a Worker whose servers the write still changes is selected. A
+        Worker that has not registered with this process has no session end
+        and is left to the startup reset, which ran before the first tick.
+        The registry is the process's own, so this assumes one API process,
+        as the teardown does.
+        """
+
+        async with self.uow:
+            worker_ids = await self.uow.servers.workers_with_trusted_observed_state()
+        grace = dt.timedelta(seconds=self.heartbeat_timeout_seconds)
+        for worker_id in worker_ids:
+            ended_at = self.control_plane.worker_session_ended_at(worker_id=worker_id)
+            if ended_at is None or now - ended_at < grace:
+                continue
+            try:
+                async with self.uow:
+                    await self.uow.servers.mark_worker_servers_unknown(
+                        worker_id, ended_at
+                    )
+                    await self.uow.commit()
+            except Exception:  # noqa: BLE001 - never abort the tick
+                _LOG.warning(
+                    "failed to mark the servers of worker %s unknown; retrying "
+                    "next tick",
+                    worker_id.value,
+                    exc_info=True,
+                )
+                continue
+            _LOG.info(
+                "worker %s has had no session since %s and its servers still read "
+                "their last report; marked them unknown",
+                worker_id.value,
+                ended_at.isoformat(),
+            )
 
     def _forgive_settled(
         self, tracked: dict[ServerId, Server | None], now: dt.datetime
@@ -716,9 +786,10 @@ class RunReconcilerTick:
         # verdict: what has happened to the server since is unknown again, so the
         # full grace returns. This is also what keeps a stale entry from ever
         # licensing a short grace on a divergence it says nothing about. A tie counts
-        # as newer: the refusal is recorded strictly after the intent commit it
-        # answers, and the two read the same clock, so equal instants are that same
-        # stop — never a later event the refusal predates.
+        # as newer: the refusal is stamped with the instant its answer was read
+        # (issue #4117), strictly after the intent commit it answers, and the two
+        # read the same clock, so equal instants are that same stop — never a later
+        # event the refusal predates.
         #
         # The one exception (issue #3682): an EXPIRED refusal on a row whose CURRENT
         # observed state is ``running`` is superseded only by a newer intent commit,
@@ -752,10 +823,11 @@ class RunReconcilerTick:
         # Worker (``dropped_at``, the instant it first read disconnected, while it
         # still does) supersedes it too (issue #3963), so only a record made since
         # the drop keeps the short grace: a release of a Worker already gone. The
-        # record carries the instant its write began, when the Worker had already
-        # answered (issue #3981), so a Worker that drops while that write fails is
-        # newer than it. Such a Worker, back within a full grace of the drop, still
-        # gets its final snapshot.
+        # record carries the instant the API read the Worker's answer the write
+        # follows (issue #4117), or, after no answer, the instant its write began
+        # (issue #3981), so a Worker that drops while that write fails is newer
+        # than it. Such a Worker, back within a full grace of the drop, still gets
+        # its final snapshot.
         recorded_at = self.unrecorded_stops.recorded_at(server.id)
         if recorded_at is None:
             return False

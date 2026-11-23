@@ -11,6 +11,7 @@ no database listens.
 
 from __future__ import annotations
 
+import datetime as dt
 import errno
 import logging
 import socket
@@ -31,12 +32,22 @@ from mc_server_dashboard_api.core.adapters.database import (
     DatabaseTimeoutError,
     is_transient_database_error,
 )
+from mc_server_dashboard_api.servers.application.backups import DanglingBackups
 from mc_server_dashboard_api.servers.application.integrity_sweep import SweepSummary
+from mc_server_dashboard_api.servers.domain.backup import (
+    Backup,
+    BackupHealth,
+    BackupId,
+    BackupSource,
+)
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupStorageUnavailableError,
     LifecycleLockLostError,
+    StoreNotOwnedError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
+from mc_server_dashboard_api.storage.adapters import ownership
+from mc_server_dashboard_api.storage.adapters.ownership import OWNER_MARKER
 from tests.core.fakes import (
     RecordingEngines,
     black_hole_database,
@@ -526,3 +537,277 @@ async def test_the_sweep_bounds_each_engines_wait_for_a_free_connection(
         await integrity_sweep_cli.run(load_settings(config_file=None), server_id=None)
 
     assert engines.pool_timeouts() == [0.2, 0.2]
+
+
+# --- --delete-dangling (issue #4107) ---------------------------------------------
+
+_DANGLING_AT = dt.datetime(2026, 10, 15, 12, 19, 36, tzinfo=dt.timezone.utc)
+
+
+def _dangling_row(server_id: ServerId) -> Backup:
+    return Backup(
+        id=BackupId.new(),
+        server_id=server_id,
+        storage_ref=uuid.uuid4().hex,
+        size_bytes=None,
+        source=BackupSource.SCHEDULED,
+        health=BackupHealth.HEALTHY,
+        created_by=None,
+        created_at=_DANGLING_AT,
+    )
+
+
+_NONE_FOUND = DanglingBackups(
+    servers_scanned=0, dangling=(), skipped_store_error=(), skipped_busy=()
+)
+
+
+def _stub_delete_dangling(
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: DanglingBackups | Exception,
+    calls: list[tuple[ServerId | None, bool]] | None = None,
+) -> None:
+    async def _fake_run(
+        _settings: Settings, *, server_id: ServerId | None
+    ) -> SweepSummary:
+        raise AssertionError("--delete-dangling must not run the sweep")
+
+    async def _fake_delete_dangling(
+        _settings: Settings, *, server_id: ServerId | None, apply: bool
+    ) -> DanglingBackups:
+        if calls is not None:
+            calls.append((server_id, apply))
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(integrity_sweep_cli, "run", _fake_run)
+    monkeypatch.setattr(
+        integrity_sweep_cli, "run_delete_dangling", _fake_delete_dangling
+    )
+
+
+def test_delete_dangling_is_a_dry_run_over_every_server_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[ServerId | None, bool]] = []
+    _stub_delete_dangling(monkeypatch, _NONE_FOUND, calls)
+
+    assert integrity_sweep_cli.main(["--delete-dangling"]) == 0
+
+    assert calls == [(None, False)]
+
+
+def test_delete_dangling_applies_only_with_apply_and_takes_a_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sid = uuid.uuid4()
+    calls: list[tuple[ServerId | None, bool]] = []
+    _stub_delete_dangling(monkeypatch, _NONE_FOUND, calls)
+
+    argv = ["--delete-dangling", "--apply", "--server", str(sid)]
+    assert integrity_sweep_cli.main(argv) == 0
+
+    assert calls == [(ServerId(sid), True)]
+
+
+def test_apply_without_delete_dangling_is_a_bad_argument(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Checked before the configuration is read, like any bad argument.
+    monkeypatch.delenv("MCD_API_DATABASE__URL")
+    _stub_delete_dangling(monkeypatch, AssertionError("must not run"))
+
+    assert integrity_sweep_cli.main(["--apply"]) == 2
+
+    assert capsys.readouterr().err == "--apply needs --delete-dangling\n"
+
+
+def test_a_dry_run_lists_each_dangling_row_and_says_nothing_was_deleted(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sid = ServerId.new()
+    row = _dangling_row(sid)
+    found = replace(_NONE_FOUND, servers_scanned=1, dangling=(row,))
+    _stub_delete_dangling(monkeypatch, found)
+
+    assert integrity_sweep_cli.main(["--delete-dangling"]) == 0
+
+    out = capsys.readouterr().out
+    assert "servers scanned: 1\n" in out
+    assert "dangling backup rows (the store reports no archive): 1\n" in out
+    assert (
+        f"  backup {row.id.value} of server {sid.value}, created "
+        f"2026-10-15T12:19:36+00:00, source scheduled\n"
+    ) in out
+    assert "dry run: nothing was deleted" in out
+
+
+def test_an_applied_pass_says_how_many_rows_it_deleted(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sid = ServerId.new()
+    found = replace(
+        _NONE_FOUND,
+        servers_scanned=1,
+        dangling=(_dangling_row(sid), _dangling_row(sid)),
+    )
+    _stub_delete_dangling(monkeypatch, found)
+
+    assert integrity_sweep_cli.main(["--delete-dangling", "--apply"]) == 0
+
+    out = capsys.readouterr().out
+    assert "deleted: 2 (each audited as backup:delete_dangling)" in out
+    assert "dry run" not in out
+
+
+def test_a_row_the_store_could_not_answer_for_exits_1(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The pass completes, but it could not judge every row: exit 1, the store
+    # status of the command, with the row named so the operator re-runs.
+    sid = ServerId.new()
+    row = _dangling_row(sid)
+    busy = _dangling_row(sid)
+    found = replace(
+        _NONE_FOUND,
+        servers_scanned=1,
+        skipped_store_error=(row,),
+        skipped_busy=(busy,),
+    )
+    _stub_delete_dangling(monkeypatch, found)
+
+    assert integrity_sweep_cli.main(["--delete-dangling", "--apply"]) == 1
+
+    out = capsys.readouterr().out
+    assert (
+        "skipped (the store could not say whether the archive exists; re-run once "
+        "it is healthy): 1\n"
+        f"  backup {row.id.value} of server {sid.value}"
+    ) in out
+    assert (
+        f"skipped (server busy; re-run to check them): 1\n  backup {busy.id.value}"
+    ) in out
+
+
+def test_a_busy_row_alone_does_not_fail_the_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    found = replace(_NONE_FOUND, skipped_busy=(_dangling_row(ServerId.new()),))
+    _stub_delete_dangling(monkeypatch, found)
+
+    assert integrity_sweep_cli.main(["--delete-dangling"]) == 0
+
+
+@pytest.mark.parametrize(
+    ("error", "status", "line"),
+    [
+        (
+            StoreNotOwnedError("the marker names another"),
+            2,
+            "dangling backups: refusing to delete: the marker names another\n",
+        ),
+        (
+            LifecycleLockLostError("srv-2"),
+            3,
+            "dangling backups aborted: the lifecycle lock on server srv-2 was lost, "
+            "so the pass stopped. Rows already deleted this run stay deleted, and "
+            "it is safe to re-run.\n",
+        ),
+        (
+            InterfaceError("SELECT 1", None, Exception("connection is closed")),
+            3,
+            "dangling backups aborted: the database failed (InterfaceError: "
+            "connection is closed), so the pass stopped. Rows already deleted this "
+            "run stay deleted, and it is safe to re-run.\n",
+        ),
+    ],
+    ids=["store-not-owned", "lock-lost", "database-failed"],
+)
+def test_a_dangling_pass_that_stops_says_so_in_one_line(
+    error: Exception,
+    status: int,
+    line: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _stub_delete_dangling(monkeypatch, error)
+
+    assert integrity_sweep_cli.main(["--delete-dangling", "--apply"]) == status
+
+    assert capsys.readouterr().err == line
+
+
+def test_a_dangling_pass_lets_an_unexpected_error_propagate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_delete_dangling(monkeypatch, RuntimeError("a bug"))
+
+    with pytest.raises(RuntimeError, match="a bug"):
+        integrity_sweep_cli.main(["--delete-dangling"])
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [None, b'{"installation_id": "00000000-0000-4000-8000-000000000002"}'],
+    ids=["no-marker", "another-installation"],
+)
+async def test_apply_refuses_a_store_not_marked_for_this_database(
+    marker: bytes | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A store that is not this database's answers NotFound for every row, so an
+    # applied pass against it would delete them all. It checks the owner marker
+    # first, before it reads a row.
+    if marker is not None:
+        (tmp_path / OWNER_MARKER).write_bytes(marker)
+    # The real marker, in place of the suite's stand-in (tests/conftest.py).
+    monkeypatch.setattr(
+        "mc_server_dashboard_api.app.FsStoreOwnership", ownership.FsStoreOwnership
+    )
+    monkeypatch.setenv("MCD_API_STORAGE__BACKEND", "fs")
+    monkeypatch.setenv("MCD_API_STORAGE__FS__ROOT", str(tmp_path))
+
+    async def _installation(_factory: object) -> uuid.UUID:
+        return uuid.UUID("00000000-0000-4000-8000-000000000001")
+
+    monkeypatch.setattr(integrity_sweep_cli, "read_installation_id", _installation)
+
+    with pytest.raises(StoreNotOwnedError, match=OWNER_MARKER):
+        await integrity_sweep_cli.run_delete_dangling(
+            load_settings(config_file=None), server_id=None, apply=True
+        )
+
+
+def test_an_outage_reading_the_marker_before_the_pass_stops_it_in_one_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # An applied pass cannot tell whose store it is when the marker read fails,
+    # so it does not start: one line and the store status, not a traceback.
+    class _MarkerReadFails(ownership.FsStoreOwnership):
+        def _read_marker(self) -> bytes | None:
+            raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(
+        "mc_server_dashboard_api.app.FsStoreOwnership", _MarkerReadFails
+    )
+    monkeypatch.setenv("MCD_API_STORAGE__BACKEND", "fs")
+    monkeypatch.setenv("MCD_API_STORAGE__FS__ROOT", str(tmp_path))
+
+    async def _installation(_factory: object) -> uuid.UUID:
+        return uuid.UUID("00000000-0000-4000-8000-000000000001")
+
+    def _no_pass(**_fields: object) -> None:
+        raise AssertionError("the pass must not start")
+
+    monkeypatch.setattr(integrity_sweep_cli, "read_installation_id", _installation)
+    monkeypatch.setattr(integrity_sweep_cli, "DeleteDanglingBackups", _no_pass)
+
+    assert integrity_sweep_cli.main(["--delete-dangling", "--apply"]) == 1
+
+    assert capsys.readouterr().err == (
+        "dangling backups aborted: the store owner marker could not be read "
+        "(OSError: [Errno 5] Input/output error), so the pass stopped. Rows "
+        "already deleted this run stay deleted, and it is safe to re-run.\n"
+    )

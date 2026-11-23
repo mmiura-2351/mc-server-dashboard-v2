@@ -150,6 +150,7 @@ def _to_outcome(result: CommandResult) -> CommandOutcome:
         file_access_reason=_REASON_BY_FLEET_REASON[result.file_access_reason],
         held_generation=result.held_generation,
         swap_began=result.swap_began,
+        answered_at=result.answered_at,
     )
 
 
@@ -298,6 +299,10 @@ class FleetControlPlaneAdapter(ControlPlane):
     def worker_offline_since(self, *, worker_id: WorkerId) -> dt.datetime | None:
         snapshot = self._registry.get(_fleet_worker(worker_id))
         return None if snapshot is None else snapshot.offline_since
+
+    def worker_session_ended_at(self, *, worker_id: WorkerId) -> dt.datetime | None:
+        snapshot = self._registry.get(_fleet_worker(worker_id))
+        return None if snapshot is None else snapshot.disconnected_at
 
     def record_held_generation(
         self, *, worker_id: WorkerId, server_id: ServerId, generation: int
