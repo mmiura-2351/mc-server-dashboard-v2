@@ -806,6 +806,7 @@ the poll cadence; the schedules themselves are per-server rows.
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
 | `schedule.tick_seconds` | `20` | | Loop resolution of the scheduler runner: how often it wakes to poll `next_run_at` over enabled schedules. Fine because a schedule can fire as often as every minute (the domain interval floor), and it must stay well under the runner's fixed 300 s late-run grace so an on-time occurrence is never judged stale. Must be positive and at most 300 (the grace itself): a coarser tick would render every non-backup occurrence perpetually stale, never executed. Player warnings on stop/restart schedules key off this cadence too: their send grace is derived as max(60 s, `tick_seconds`), so warnings are reliable whenever the tick is at most 60. With a coarser tick a warning fires up to one tick late (always strictly before the action), and a warning offset smaller than the tick may be skipped entirely — logged, never silent. |
+| `schedule.shutdown_drain_seconds` | `300` | | How long an API shutdown waits for the scheduler's run in flight, a scheduled backup for one, before it cancels it (issue #4109; see below). `0` cancels at once; must not be negative. Keep it below the api service's `stop_grace_period` in `compose.yaml` (600 s), less the 30 s a cancelled backup may spend deleting its archive and the time open HTTP requests take to end first ([`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md) Section 9). Docker kills the API once the grace runs out, and a kill mid-drain runs no cleanup. A test fails if the default and the 30 s ever reach the compose value. |
 
 **A backup on a server a stop still holds.** A stop keeps its Worker assigned
 until the final snapshot settles, and an archive taken before then would lack
@@ -836,6 +837,27 @@ alone. An occurrence skipped this way takes a pending retry with it only when
 that retry is already due, since it would meet the same hold. A retry not yet
 due stays armed and runs at its own time. The window is kept in memory, so an
 API restart starts it over.
+
+**An API shutdown during a scheduled run** (issue #4109). The shutdown first
+stops the runner taking ticks, then waits up to `schedule.shutdown_drain_seconds`
+for the tick in flight, while the database, the storage and the Worker sessions
+are still up. One INFO line marks the start of the drain and one its end. A run
+that finishes in time is recorded as usual: a backup leaves its archive, its row
+and its run. A tick still running when the drain runs out is cancelled, with one
+WARNING line. Its run is not recorded, so the occurrence is due again on the
+next boot: a backup runs once more, and any other action only within the 300 s
+late-run grace. A backup it cancels leaves no row unless its row's COMMIT was
+already sent:
+
+- Before the COMMIT is sent, the backup deletes the archive it wrote, in a
+  delete shielded from any later cancellation and bounded at 30 s. A delete that
+  fails or runs out is logged, and leaves an archive with no row for the
+  row-less archive reclaim (Section 5.15).
+- During the archive write, there is nothing to delete yet. The object store
+  aborts its upload; on the fs backend the write's thread runs on and still
+  writes the archive, which the reclaim deletes after its grace.
+- Once the COMMIT is sent, the archive is kept, since the COMMIT may have
+  applied.
 
 ### 5.15 Crash-recovery storage sweep
 

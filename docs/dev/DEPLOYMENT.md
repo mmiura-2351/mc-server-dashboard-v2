@@ -1397,6 +1397,44 @@ rebuilds only what changed (api before worker — worker restart bounces running
 servers), starts the stack, stamps the started revision, and runs a post-deploy
 `/api/healthz` check. Use `FORCE=1` to rebuild all components unconditionally.
 
+### An API stop during a scheduled backup
+
+A redeploy stops the `api` container, and a scheduled backup may be running in
+it. The stop goes through these steps, in this order (issue #4109):
+
+1. Docker sends `SIGTERM`. uvicorn stops accepting connections and waits for
+   the HTTP requests still open to end. It has no limit of its own: `serve.py`
+   passes only the bind.
+2. The lifespan shutdown stops the scheduler taking ticks and waits up to
+   `schedule.shutdown_drain_seconds` (300 s by default) for the run in flight.
+   A backup that ends in time is recorded as usual. One INFO line marks the
+   start of the drain and one its end.
+3. A run still going when the drain runs out is cancelled, with one WARNING
+   line. A backup cancelled before its row's COMMIT leaves no row, and spends up
+   to 30 s deleting the archive it wrote; its occurrence runs again on the next
+   boot. The details are in
+   [`../app/CONFIGURATION.md`](../app/CONFIGURATION.md) Section 5.14.
+4. The rest of the teardown runs: the other background tasks, the gRPC server,
+   the engine. It is prompt.
+
+The `api` service's `stop_grace_period` in `compose.yaml` is 600 s, and Docker
+kills the process when it runs out. A kill runs no cleanup. A backup killed
+mid-run leaves no row, since its archive is written before its row, but it can
+leave an archive with no row, which the row-less archive reclaim deletes after
+its grace ([`../app/STORAGE.md`](../app/STORAGE.md) Section 4.3). So the grace has to cover all four steps: the HTTP wait,
+the drain, the 30 s cleanup and the teardown. With the defaults, 300 s of drain
+and 30 s of cleanup leave about 270 s for the HTTP requests of step 1. Keep
+`schedule.shutdown_drain_seconds` below the grace less 30 s if you change
+either, or Docker kills the API mid-drain. A test in the api suite fails if the
+defaults ever reach the compose value. The grace is a ceiling, not a wait: a
+stop with nothing in flight still exits at once.
+
+A backup of a running server starts with a snapshot, which the Worker uploads to
+the API's data-plane URL, served by the same HTTP listener. Step 1 closes that
+listener, so a snapshot upload that has not begun by then cannot reach the API,
+and that backup fails or is cancelled at the end of the drain. A backup of a
+server at rest needs no upload, and only the database and the store.
+
 ### The two deploy records
 
 `make deploy` and `make update` write two gitignored files in the repo root.

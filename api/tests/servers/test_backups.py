@@ -2162,6 +2162,51 @@ async def test_a_create_whose_archive_delete_never_answers_ends_at_the_bound(
     assert record.levelno == logging.WARNING
 
 
+class _DeleteWaitsAfterAnOutage(_WritesThenTakesTheDatabaseDown):
+    """Writes the archive, the database goes down, and the archive delete waits
+    for ``release``."""
+
+    def __init__(self, uow: OutageUnitOfWork) -> None:
+        super().__init__(uow)
+        self.deleting = asyncio.Event()
+        self.release = asyncio.Event()
+        self.done = asyncio.Event()
+
+    async def delete(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> None:
+        self.deleting.set()
+        await self.release.wait()
+        await super().delete(
+            community_id=community_id, server_id=server_id, storage_ref=storage_ref
+        )
+        self.done.set()
+
+
+async def test_a_create_cancelled_while_deleting_after_a_failure_ends_cancelled() -> (
+    None
+):
+    server = _at_rest()
+    uow = _outage_uow(server)
+    archive = _DeleteWaitsAfterAnOutage(uow)
+    create = asyncio.create_task(
+        _make_create(uow, FakeControlPlane(), archive)(
+            community_id=_COMMUNITY, server_id=server.id, source=BackupSource.SCHEDULED
+        )
+    )
+    await archive.deleting.wait()
+
+    create.cancel()
+    # The cancellation ends the create, not the outage that began its cleanup.
+    with pytest.raises(asyncio.CancelledError):
+        await create
+    archive.release.set()
+    async with asyncio.timeout(5):
+        await archive.done.wait()
+
+    assert archive.archives == set()
+
+
 async def test_create_whose_row_cannot_be_recorded_deletes_its_archive() -> None:
     server = _at_rest()
     uow = _outage_uow(server)

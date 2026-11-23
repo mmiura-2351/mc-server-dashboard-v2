@@ -263,20 +263,31 @@ services:
       dockerfile: api/Dockerfile
     image: mcsd-api:dev
     restart: unless-stopped
-    # NO stop_grace_period, and this is the one service where that is the answer
-    # (issue #2934, owner decision 2026-09-23). The worker and the relay each got
-    # a value because each has a FINITE code-level bound to cover — 550 s and
-    # ~40 s. The api has none to match: uvicorn keeps its defaults (serve.py
-    # passes only the bind), so its graceful shutdown waits on in-flight requests
-    # indefinitely, and a data-plane snapshot upload outlives any value worth
-    # setting. There is no number that is "the bound" here, only an arbitrary one.
-    # Nothing durable rides on it either: killing an upload is a failed upload the
-    # Worker re-runs at its next snapshot, and the half-written object is
-    # reclaimed by the app-level multipart sweep plus the bucket's
-    # AbortIncompleteMultipartUpload rule (DEPLOYMENT.md Section 5). The lifespan's
-    # own teardown is prompt: it cancels its background tasks, stops the gRPC
-    # server with grace=None (every RPC aborted immediately, so the long-lived
-    # worker/relay session streams do not hold it) and disposes the engine.
+    # Covers the scheduler's shutdown drain (issue #4109), a FINITE code-level
+    # bound like the worker's 550 s and the relay's ~40 s. The lifespan shutdown
+    # gives the scheduled run in flight, a backup for one, up to
+    # schedule.shutdown_drain_seconds (300 s by default) and cancels it after
+    # that; a backup it cancels spends up to 30 s deleting its archive. A kill
+    # mid-drain runs no cleanup, so the drain plus that bound must stay below
+    # this value, and test_compose_api_stop_grace.py (api/tests) fails if the
+    # defaults ever reach it. Issue #2934 had left the api at Docker's 10 s
+    # default (owner decision 2026-09-23), because there was no bound to cover
+    # then. That reasoning still holds for what runs BEFORE the drain: uvicorn
+    # keeps its defaults (serve.py passes only the bind), so its graceful
+    # shutdown waits on in-flight requests with no limit of its own, and the
+    # drain starts only once they end. That wait now runs out this grace rather
+    # than 10 s: a stop that finds a long request open, such as a data-plane
+    # snapshot upload, can take up to this long. Nothing durable rides on such a
+    # request: a killed upload is a failed upload the Worker re-runs at its next
+    # snapshot, and the half-written object is reclaimed by the app-level
+    # multipart sweep plus the bucket's AbortIncompleteMultipartUpload rule
+    # (DEPLOYMENT.md Section 5). The rest of the lifespan's teardown is prompt:
+    # it cancels its other background tasks, stops the gRPC server with
+    # grace=None (every RPC aborted immediately, so the long-lived worker/relay
+    # session streams do not hold it) and disposes the engine. Like the worker's,
+    # the timer is a ceiling, not a wait: a stop with nothing in flight still
+    # exits at once.
+    stop_grace_period: 600s
     environment:
       # An entry below with a LITERAL value is a pin this deployment owns, not a
       # default: setting that same MCD_API_* name in .env changes nothing,
