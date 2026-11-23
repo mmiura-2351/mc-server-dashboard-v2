@@ -595,11 +595,18 @@ class RunReconcilerTick:
         session is stamped later and survives the write (issue #4092), and a
         repeat of it changes nothing.
 
-        Only a Worker whose servers the write still changes is selected. A
-        Worker that has not registered with this process has no session end
-        and is left to the startup reset, which ran before the first tick.
-        The registry is the process's own, so this assumes one API process,
-        as the teardown does.
+        A Worker is selected while one of its servers reads a state the write
+        changes, neither ``unknown`` nor ``crashed``. A server observed after
+        the session's end keeps it selected, although the write leaves that
+        server as it is. Since reports and answers are stamped as they are read
+        (issues #4117, #4118), only a backwards step of the wall clock between
+        that stamp and the session's end leaves a server so. Each tick then
+        repeats a write that changes nothing and writes no row again (issue
+        #4144). So a mark is logged at INFO only when it changed a server's
+        state, and otherwise once at DEBUG. A Worker that has not registered
+        with this process has no session end and is left to the startup reset,
+        which ran before the first tick. The registry is the process's own, so
+        this assumes one API process, as the teardown does.
         """
 
         async with self.uow:
@@ -611,7 +618,7 @@ class RunReconcilerTick:
                 continue
             try:
                 async with self.uow:
-                    await self.uow.servers.mark_worker_servers_unknown(
+                    marked = await self.uow.servers.mark_worker_servers_unknown(
                         worker_id, ended_at
                     )
                     await self.uow.commit()
@@ -623,11 +630,20 @@ class RunReconcilerTick:
                     exc_info=True,
                 )
                 continue
+            if not marked:
+                _LOG.debug(
+                    "worker %s has had no session since %s; the mark changed none "
+                    "of its servers",
+                    worker_id.value,
+                    ended_at.isoformat(),
+                )
+                continue
             _LOG.info(
-                "worker %s has had no session since %s and its servers still read "
-                "their last report; marked them unknown",
+                "worker %s has had no session since %s and %d of its servers still "
+                "read their last report; marked them unknown",
                 worker_id.value,
                 ended_at.isoformat(),
+                marked,
             )
 
     def _forgive_settled(

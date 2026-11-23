@@ -745,7 +745,7 @@ class SqlAlchemyServerRepository(ServerRepository):
 
     async def mark_worker_servers_unknown(
         self, worker_id: WorkerId, observed_at: dt.datetime
-    ) -> None:
+    ) -> int:
         # A row observed later than this write's stamp is left alone (issue #4092):
         # the disconnected session's own reports were all stamped before it, so a
         # later stamp is a report of the Worker's next session, which this write,
@@ -754,6 +754,12 @@ class SqlAlchemyServerRepository(ServerRepository):
         # the locking read, which re-checks it once a lock is granted, so it holds
         # against a report that commits while this write waits; and it covers both
         # writes below, so the crashed row's stamp never moves back either.
+        # A row this write leaves in its state (unknown, or crashed under a stopped
+        # intent) is written only to move its stamp, so at this very stamp it is
+        # not locked or written again (issue #4144): the reconciler repeats the
+        # write on every tick while a row it keeps leaves the Worker selected. At
+        # an earlier stamp it still takes this one, as the teardown has always
+        # made it do.
         # A crashed row keeps its state (issue #3885), as the startup reset leaves
         # it: the Worker has already forgotten the crashed instance, so the row
         # stays truthful, and its stored crash keeps explaining it.
@@ -769,6 +775,7 @@ class SqlAlchemyServerRepository(ServerRepository):
         # id-ordered locker (mark_sync_pending's FOR KEY SHARE), as the second
         # would ask for a lower id after a higher one.
         crashed = ObservedState.CRASHED.value
+        kept_states = [ObservedState.UNKNOWN.value, crashed]
         locked = (
             await self._session.execute(
                 select(ServerModel.id, ServerModel.observed_state)
@@ -780,7 +787,11 @@ class SqlAlchemyServerRepository(ServerRepository):
                     ),
                     or_(
                         ServerModel.observed_at.is_(None),
-                        ServerModel.observed_at <= observed_at,
+                        ServerModel.observed_at < observed_at,
+                        and_(
+                            ServerModel.observed_at == observed_at,
+                            ServerModel.observed_state.notin_(kept_states),
+                        ),
                     ),
                 )
                 .order_by(ServerModel.id)
@@ -800,6 +811,7 @@ class SqlAlchemyServerRepository(ServerRepository):
                 .where(ServerModel.id.in_(stamped))
                 .values(observed_at=observed_at)
             )
+        return sum(row.observed_state not in kept_states for row in locked)
 
     async def workers_with_trusted_observed_state(self) -> set[WorkerId]:
         stmt = (
