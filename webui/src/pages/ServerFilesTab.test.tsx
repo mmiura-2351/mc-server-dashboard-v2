@@ -1357,6 +1357,88 @@ describe("ServerFilesTab history + rollback", () => {
       screen.queryByRole("button", { name: t("files.history.rollback") }),
     ).not.toBeInTheDocument();
   });
+
+  async function openRollbackConfirm(srv: Record<string, unknown> = {}) {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.includes("/files/history")) {
+        return Promise.resolve({ path: "a.txt", versions: [VID1] });
+      }
+      if (path.includes("/files?path=") && !path.includes("list=")) {
+        return Promise.resolve({
+          path: "a.txt",
+          content_base64: encodeUtf8Base64("hi\n"),
+        });
+      }
+      if (path.includes("/files?path=")) {
+        return Promise.resolve(listing([{ name: "a.txt", kind: "file" }]));
+      }
+      return Promise.resolve(server(srv));
+    });
+    renderPage();
+    await openFiles();
+
+    fireEvent.click(await screen.findByText(/a\.txt/));
+    await screen.findByLabelText(t("files.editorLabel"));
+    fireEvent.click(screen.getByRole("button", { name: t("files.history") }));
+    await screen.findByText(versionDate(VID1).toLocaleString());
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.history.rollback") }),
+    );
+    return screen.getByRole("button", { name: t("files.rollback.confirm") });
+  }
+
+  // A rollback republishes the at-rest copy, so the API refuses it 409
+  // server_not_stopped while the server is not at rest (issue #4147). The
+  // confirm is held with the rollback's own reason, as it is held with the
+  // release reason while a stop's Worker still holds the server (#4003).
+  it.each([
+    [
+      "running",
+      {
+        observed_state: "running",
+        desired_state: "running",
+        assigned_worker_id: "worker-a",
+      },
+    ],
+    [
+      "stopping",
+      {
+        observed_state: "stopping",
+        desired_state: "stopped",
+        assigned_worker_id: "worker-a",
+      },
+    ],
+    [
+      "stopped under a running intent",
+      { observed_state: "stopped", desired_state: "running" },
+    ],
+  ])(
+    "holds the rollback confirm with the stop reason while %s (#4147)",
+    async (_label, srv) => {
+      const confirm = await openRollbackConfirm(srv);
+
+      expect(confirm).toBeDisabled();
+      expect(confirm).toHaveAccessibleDescription(
+        t("files.error.rollbackServerMustBeStopped"),
+      );
+    },
+  );
+
+  // The gate reads the cached state, so a start can race past it. The API's
+  // 409 then names the rollback, not the upload and folder writes (#4147).
+  it("names the rollback when the API refuses it server_not_stopped (#4147)", async () => {
+    mockApi.post.mockRejectedValue(
+      new ApiError(409, { reason: "server_not_stopped" }),
+    );
+    fireEvent.click(await openRollbackConfirm());
+
+    expect(
+      await screen.findByText(t("files.error.rollbackServerMustBeStopped")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("files.error.serverMustBeStopped")),
+    ).not.toBeInTheDocument();
+  });
 });
 
 describe("ServerFilesTab running notice", () => {

@@ -885,6 +885,8 @@ export const ja: Record<TranslationKey, string> = {
   "files.rolledBack": "選択したバージョンにロールバックしました。",
   "files.error.serverMustBeStopped":
     "ファイルのアップロードやフォルダの作成を行う前にサーバーを停止してください。",
+  "files.error.rollbackServerMustBeStopped":
+    "ファイルをロールバックする前にサーバーを停止してください。",
   "files.error.contentDirProtected":
     "このディレクトリは{noun}タブで管理されています。コンテンツの追加・削除は{noun}タブをご利用ください。",
   "files.error.goToContentTab": "{noun}タブへ移動",

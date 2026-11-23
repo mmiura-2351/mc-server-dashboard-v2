@@ -904,7 +904,12 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 - Text files open in an editor (save = versioned write); binary → download
   only. Path breadcrumbs; upload (w/ "extract ZIP" toggle), mkdir, rename,
   delete; search box (`files/search`).
-- History drawer per file: version list → rollback with confirm.
+- History drawer per file: version list → rollback with confirm. A rollback
+  republishes the at-rest copy, so while the server is not at rest (running,
+  transitional or under a running intent) the confirm shows disabled with
+  "Stop the server before rolling back a file". A `409 server_not_stopped`
+  that races past it toasts the same words, not the upload and folder ones
+  (#4147).
 - Edits against a running server show "live working set — may need restart"
   notice (Section 6.9 semantics). Creating a new file works while running too
   (create-through to the live working set).

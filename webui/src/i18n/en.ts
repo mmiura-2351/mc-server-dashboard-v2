@@ -975,6 +975,10 @@ export const en = {
   "files.rolledBack": "Rolled back to the selected version.",
   "files.error.serverMustBeStopped":
     "Stop the server before uploading files or creating folders.",
+  // A rollback republishes the at-rest copy (issue #4147): its own words, not
+  // the upload and folder ones.
+  "files.error.rollbackServerMustBeStopped":
+    "Stop the server before rolling back a file.",
   "files.error.contentDirProtected":
     "This directory is managed by the {noun} tab. Use the {noun} tab to add or remove content.",
   "files.error.goToContentTab": "Go to {noun} tab",
