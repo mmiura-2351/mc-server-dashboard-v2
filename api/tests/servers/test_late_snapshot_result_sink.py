@@ -33,6 +33,9 @@ from mc_server_dashboard_api.servers.adapters.late_snapshot_result_sink import (
 from mc_server_dashboard_api.servers.application.stop_convergence import (
     StopConvergenceGuard,
 )
+from mc_server_dashboard_api.servers.application.unannounced_refusals import (
+    UnannouncedRefusals,
+)
 from mc_server_dashboard_api.servers.application.unrecorded_stops import (
     UnrecordedStops,
 )
@@ -62,6 +65,7 @@ def _exploding_factory() -> NoReturn:  # pragma: no cover - asserts it never ope
 
 def _sink(
     unrecorded_stops: UnrecordedStops | None = None,
+    unannounced_refusals: UnannouncedRefusals | None = None,
 ) -> ServersLateSnapshotResultSink:
     factory = cast(async_sessionmaker[AsyncSession], _exploding_factory)
     return ServersLateSnapshotResultSink(
@@ -70,6 +74,7 @@ def _sink(
         clock=FakeClock(_NOW),
         stop_convergence=StopConvergenceGuard(),
         unrecorded_stops=unrecorded_stops or UnrecordedStops(),
+        unannounced_refusals=unannounced_refusals or UnannouncedRefusals(),
     )
 
 
@@ -225,3 +230,29 @@ async def test_a_late_refusal_reaches_the_use_case_and_holds_the_row(
     assert stored.assigned_worker_id == WorkerId(worker_id)
     assert stored.final_snapshot_refusal is refusal
     assert unrecorded.recorded_at(ServerId(server_id)) == _READ_AT
+
+
+async def test_a_late_release_forgets_the_refusal_owed_its_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Issue #4152: the sink must hand the use case the stops' process-wide
+    # record of a refusal written unannounced, so a late release forgets it.
+    server_id, worker_id = uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_held_server(server_id, worker_id))
+    monkeypatch.setattr(
+        sink_module, "SqlAlchemyUnitOfWork", lambda _factory, _events: uow
+    )
+    refusals = UnannouncedRefusals()
+    refusals.record(ServerId(server_id))
+
+    await _sink(unannounced_refusals=refusals).clear_held_assignment_on_late_snapshot(
+        server_id=str(server_id),
+        worker_id=str(worker_id),
+        code=CommandResultCode.OK,
+        message=None,
+        received_at=_READ_AT,
+    )
+
+    assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id is None
+    assert not refusals.pending(ServerId(server_id))

@@ -10,6 +10,7 @@ covered in the per-adapter files.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import functools
 import gzip
 import hashlib
@@ -2520,6 +2521,27 @@ async def test_delete_backup_is_idempotent(harness: StorageHarness) -> None:
     await harness.storage.delete_backup(community, server, key)
     assert key not in await harness.storage.list_backups(community, server)
     await harness.storage.delete_backup(community, server, key)  # no raise
+
+
+async def test_list_backup_entries_gives_each_archive_its_store_time(
+    harness: StorageHarness,
+) -> None:
+    """The row-less archive reclaim (issue #4106) ages each archive by the time
+    the store gives it: the file's mtime on fs, ``LastModified`` on the object
+    backend."""
+
+    community, server = new_scope()
+    assert await harness.storage.list_backup_entries(community, server) == []
+    await harness.publish(community, server, {"f": b"x"})
+    # A filesystem stamps with a coarser clock than ``now`` reads.
+    before = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=1)
+    key = await harness.storage.create_backup_from_current(community, server)
+    after = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=1)
+
+    entries = await harness.storage.list_backup_entries(community, server)
+
+    assert [entry.key for entry in entries] == [key]
+    assert before <= entries[0].modified_at <= after
 
 
 # --- prune to final snapshot (DeleteServer reclaim, issue #777) -------------

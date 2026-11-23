@@ -94,7 +94,7 @@ class _Captured:
         self.loops: dict[str, Any] = {}
 
     def loop(self, name: str) -> Callable[..., Any]:
-        async def _record(target: Any, *, tick_seconds: float) -> None:
+        async def _record(target: Any, **_kwargs: Any) -> None:
             self.loops[name] = target
 
         return _record

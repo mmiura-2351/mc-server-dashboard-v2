@@ -906,7 +906,8 @@ still raise, as when its answer is lost with the connection or the caller is
 cancelled while awaiting it. The archive is then kept and a WARNING logged, so a
 row that did land keeps its archive. A crash, a delete that fails, or an
 unconfirmed COMMIT that did not apply leaves an archive with no row instead: no
-listing shows it, and the server's delete prunes it (STORAGE.md Section 3.3).
+listing shows it, and the row-less archive reclaim deletes it once it is older
+than its grace (STORAGE.md Section 4.3).
 
 Backups are downloadable and uploadable: download streams the
 archive in its native `tar.gz` form (no recompression); upload validates the

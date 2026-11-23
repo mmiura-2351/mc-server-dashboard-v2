@@ -593,8 +593,21 @@ no archive bytes and does not run the integrity sweep.
 - **`--apply` deletes the row only.** It sends the store no archive delete. A
   row that is truly dangling has no archive to delete. If the store answered
   "not found" for an archive it still holds, the archive stays in the store
-  with no row: no listing shows it, and the server's delete reclaims it
-  (issue #4106 tracks a cleaner for such archives).
+  with no row: no listing shows it. The row-less archive reclaim then deletes
+  it at the next API start or storage sweep pass (STORAGE.md Section 4.3),
+  unless the archive is younger than `storage_sweep.rowless_archive_grace_seconds`
+  (7 days by default). The grace counts from when the store wrote the archive,
+  not from the `--apply`, so the archive of a backup older than the grace gets
+  no window at all. One left under a server that has since been deleted is not
+  reclaimed; issue #4165 tracks those. Copying the archives of the rows the dry
+  run lists out of the store is the only way to keep them. Before the
+  `--apply`, do one of these:
+  - copy them out of `communities/<community-id>/servers/<server-id>/backups/`;
+  - set `storage_sweep.rowless_archive_grace_seconds` above the age of the
+    oldest of them, restart the API, and only then run the `--apply`. A
+    running API keeps the grace it started with. This only delays the
+    reclaim: the archive goes at the first pass after it is older than the
+    new grace. Copy it out within that time.
 - **Each deleted row is audited** as `backup:delete_dangling`, with no actor.
 - **`--apply` checks the store first.** It refuses with exit 2 unless the store
   owner marker names this database's installation (STORAGE.md Section 4.3). A
@@ -712,8 +725,9 @@ them here — each has its own subsection:
   ratio crosses 10% — early enough that the headroom to compact is still
   available. See [Vacuum tuning and manual recovery](#vacuum-tuning-and-manual-recovery)
   above.
-- **App-side periodic sweep.** The API reclaims orphan staging/snapshot prefixes
-  and aborts orphan in-progress multipart uploads on a loop (daily by default,
+- **App-side periodic sweep.** The API reclaims orphan staging/snapshot prefixes,
+  aborts orphan in-progress multipart uploads and reclaims backup archives no
+  row names, once past their grace, on a loop (daily by default,
   `storage_sweep.interval_seconds`). See CONFIGURATION.md
   [Section 5.15](../app/CONFIGURATION.md#515-crash-recovery-storage-sweep).
 
@@ -1924,6 +1938,22 @@ name `compose.yaml` pins — `mcsd` — unless you override it; `docker volume l
 shows the exact names.) The worker scratch dir
 (`MCSD_SCRATCH_DIR`) is a working set rebuilt from the API on demand and does not
 need backing up beyond the persisted `worker-id`.
+
+**Restoring the database.** Stop the API before you replace its database, and
+restore the storage volume from the same backup run, or copy out what the store
+gained since the dump, before the restored database's API starts. The API's GCs
+delete what no row of its database names, and a database restored to an earlier
+point has no row for anything the store gained since, backup archives included.
+Only the newest of those objects are spared, by the safety windows: 1 h for the
+JAR-pool, plugin-cache and resource-pack GCs, and
+`storage_sweep.rowless_archive_grace_seconds` (7 days by default) for backup
+archives. The rest go soon after the first start: the backup archives at the
+start itself, the other objects at each GC's first pass, at most 10 minutes
+later (CONFIGURATION.md Section 5.7; STORAGE.md Section 4.3, under "Cases the
+marker does not cover"). The commands above dump the database before they
+archive the store, so a backup taken between the two is restored with its
+archive but no row, and the reclaim deletes that archive once it is older than
+the grace.
 
 ## 11. Server export / import (ZIP)
 

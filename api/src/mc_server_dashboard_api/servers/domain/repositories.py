@@ -383,10 +383,11 @@ class ServerRepository(abc.ABC):
         when the row changed, which is announced to live subscribers as a status
         event once the transaction commits.
 
-        ``retry`` marks a retry of a late result whose earlier attempt failed.
-        That attempt may have committed with its answer lost, so the same refusal
-        found recorded also counts, under the same guard, and is announced again
-        (issue #4104).
+        ``retry`` marks a write whose earlier attempt failed: a retry of a late
+        result (issue #4104), or the next refused attempt after a write whose
+        COMMIT failed (issue #4152). That attempt may have committed with its
+        answer lost, so the same refusal found recorded also counts, under the
+        same guard, and is announced again.
         """
 
     @abc.abstractmethod

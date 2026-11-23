@@ -36,6 +36,7 @@ from mc_server_dashboard_api.servers.domain.backup_repository import (
 from mc_server_dashboard_api.servers.domain.backup_store import (
     BackupArchiveStore,
     SnapshotScan,
+    StoredArchive,
 )
 from mc_server_dashboard_api.servers.domain.bedrock_tunnel import BedrockTunnelSync
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
@@ -1310,12 +1311,14 @@ class ClearCreationFailsRepository(FakeServerRepository):
 
 class RefusalWriteFailsRepository(FakeServerRepository):
     """Fails the write that records a final-snapshot refusal with each of
-    ``errors`` in turn, then makes it (issue #4103), counting every attempt."""
+    ``errors`` in turn, then makes it (issue #4103), counting every attempt.
+    ``refusal_retries`` is each attempt's ``retry`` (issue #4152)."""
 
     def __init__(self, *errors: Exception) -> None:
         super().__init__()
         self._errors = list(errors)
         self.refusal_writes = 0
+        self.refusal_retries: list[bool] = []
 
     async def set_final_snapshot_refusal(
         self,
@@ -1326,6 +1329,7 @@ class RefusalWriteFailsRepository(FakeServerRepository):
         retry: bool = False,
     ) -> bool:
         self.refusal_writes += 1
+        self.refusal_retries.append(retry)
         if self._errors:
             raise self._errors.pop(0)
         return await super().set_final_snapshot_refusal(
@@ -2146,6 +2150,21 @@ class OutageUnitOfWork(FakeUnitOfWork):
         return self
 
 
+class CommitAnswerLostUnitOfWork(FakeUnitOfWork):
+    """A :class:`FakeUnitOfWork` whose next commit lands and then raises
+    ``lost_answer``, once it is set: a COMMIT whose answer was lost with its
+    connection, or a caller cancelled at its await (issues #4062, #4152). This
+    fake applies a write at once, so the write stands."""
+
+    lost_answer: BaseException | None = None
+
+    async def commit(self) -> None:
+        await super().commit()
+        if self.lost_answer is not None:
+            lost, self.lost_answer = self.lost_answer, None
+            raise lost
+
+
 @dataclass
 class BumpHookStopIntents(StopIntentCounter):
     """A :class:`StopIntentCounter` that runs ``on_bump`` after the next bump."""
@@ -2576,6 +2595,11 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         # assert what the backfill (#661) tolerates: a store outage fails the read
         # (issue #2405), and only a missing archive leaves the row NULL.
         self.size_error: Exception | None = None
+        # What ``list_archives`` lists (issue #4106): each server's archives with
+        # their store times. ``delete`` removes an archive from it too, and a
+        # server in ``list_errors`` fails its listing with that error.
+        self.archive_times: dict[ServerId, dict[str, dt.datetime]] = {}
+        self.list_errors: dict[ServerId, Exception] = {}
         self._counter = 0
 
     async def create_from_current(
@@ -2592,6 +2616,16 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         self, *, community_id: CommunityId, server_id: ServerId
     ) -> list[str]:
         return sorted(self.archives)
+
+    async def list_archives(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> list[StoredArchive]:
+        if server_id in self.list_errors:
+            raise self.list_errors[server_id]
+        return [
+            StoredArchive(storage_ref=ref, modified_at=at)
+            for ref, at in sorted(self.archive_times.get(server_id, {}).items())
+        ]
 
     async def restore(
         self,
@@ -2641,6 +2675,7 @@ class FakeBackupArchiveStore(BackupArchiveStore):
     ) -> None:
         self.events.append((server_id, "delete-archive"))
         self.archives.discard(storage_ref)
+        self.archive_times.get(server_id, {}).pop(storage_ref, None)
         self.bytes_by_ref.pop(storage_ref, None)
         self.deleted.append((server_id, storage_ref))
 
