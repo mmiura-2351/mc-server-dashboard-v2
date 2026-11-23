@@ -2190,6 +2190,7 @@ def get_stop_server(
         bedrock_tunnel_sync=get_bedrock_tunnel_sync(request),
         stop_refusals=request.app.state.stop_dispatch_refusals,
         unrecorded_stops=request.app.state.unrecorded_stops,
+        unannounced_refusals=request.app.state.unannounced_refusals,
         stop_convergence=request.app.state.stop_convergence,
         stop_intents=request.app.state.stop_intents,
     )
@@ -2200,13 +2201,15 @@ def get_release_held_server(request: Request) -> ReleaseHeldServer:
 
     It shares the process-wide stop-convergence exclusion with every stop, so it
     refuses while one of them or a final snapshot is in flight, and publishes
-    its release on the app's event bus.
+    its release on the app's event bus. It forgets the release's server in the
+    stops' record of a refusal written unannounced (issue #4152).
     """
 
     session_factory = create_session_factory(get_engine(request))
     return ReleaseHeldServer(
         uow=ServersUnitOfWork(session_factory, request.app.state.real_time_events),
         stop_convergence=request.app.state.stop_convergence,
+        unannounced_refusals=request.app.state.unannounced_refusals,
     )
 
 

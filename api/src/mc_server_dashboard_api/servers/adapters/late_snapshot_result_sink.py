@@ -37,6 +37,9 @@ from mc_server_dashboard_api.servers.application.lifecycle import StopServer
 from mc_server_dashboard_api.servers.application.stop_convergence import (
     StopConvergenceGuard,
 )
+from mc_server_dashboard_api.servers.application.unannounced_refusals import (
+    UnannouncedRefusals,
+)
 from mc_server_dashboard_api.servers.application.unrecorded_stops import (
     UnrecordedStops,
 )
@@ -82,6 +85,7 @@ class ServersLateSnapshotResultSink(LateSnapshotResultSink):
         clock: Clock,
         stop_convergence: StopConvergenceGuard,
         unrecorded_stops: UnrecordedStops,
+        unannounced_refusals: UnannouncedRefusals,
         real_time_events: RealTimeEvents | None = None,
     ) -> None:
         # A fresh UnitOfWork is built per call so the servicer (no request UoW) never
@@ -103,6 +107,9 @@ class ServersLateSnapshotResultSink(LateSnapshotResultSink):
         # #3441): a release this sink fails to write is the reconciler's to finish,
         # on the short grace.
         self._unrecorded_stops = unrecorded_stops
+        # The stops' process-wide record of a refusal written unannounced (issue
+        # #4152): a late refusal announces it, and a late release forgets it.
+        self._unannounced_refusals = unannounced_refusals
 
     async def clear_held_assignment_on_late_snapshot(
         self,
@@ -124,6 +131,7 @@ class ServersLateSnapshotResultSink(LateSnapshotResultSink):
             clock=self._clock,
             stop_convergence=self._stop_convergence,
             unrecorded_stops=self._unrecorded_stops,
+            unannounced_refusals=self._unannounced_refusals,
         )
         await stop_server.clear_assignment_after_late_snapshot(
             server_id=ServerId(parsed),
