@@ -562,6 +562,153 @@ Work from the cheapest, most-reversible step to the most invasive, and re-check
    > s3.clean.uploads
    ```
 
+#### Repair: dangling backup rows
+
+A backup row whose archive the store does not hold is **dangling**: the Web UI
+lists it, but it cannot be downloaded or restored. Since issue #4086 a create or
+an upload records its row only once its archive is written, but a deployment
+that ran an older release through a storage incident can still hold such rows,
+and nothing removes them on its own. Once the store and the database are healthy
+again (the Recovery steps above), find them with a dry run, then delete them:
+
+```sh
+# 1. List the dangling rows. Nothing is deleted.
+docker compose exec api python -m mc_server_dashboard_api.integrity_sweep_cli \
+  --delete-dangling
+# 2. Delete the rows it listed.
+docker compose exec api python -m mc_server_dashboard_api.integrity_sweep_cli \
+  --delete-dangling --apply
+```
+
+Add `--server <server-uuid>` to either command to check one server only. The
+pass sends one HEAD per backup row, under the server's lifecycle lock; it reads
+no archive bytes and does not run the integrity sweep.
+
+- **Only a "not found" answer marks a row dangling.** A row the store could not
+  answer for (an outage, a timeout, a 5xx) is listed as skipped and is never
+  deleted, and the command exits 1. Re-run it once the store is healthy.
+- **A busy row is skipped.** When another lifecycle operation holds the server
+  past the lock's wait budget, such as a backup delete in flight or a restore,
+  the row is listed as skipped. Re-run to check it.
+- **`--apply` deletes the row only.** It sends the store no archive delete. A
+  row that is truly dangling has no archive to delete. If the store answered
+  "not found" for an archive it still holds, the archive stays in the store
+  with no row: no listing shows it. The row-less archive reclaim then deletes
+  it at the next API start or storage sweep pass (STORAGE.md Section 4.3),
+  unless the archive is younger than `storage_sweep.rowless_archive_grace_seconds`
+  (7 days by default). The grace counts from when the store wrote the archive,
+  not from the `--apply`, so the archive of a backup older than the grace gets
+  no window at all. One left under a server that has since been deleted is not
+  reclaimed; issue #4165 tracks those. Copying the archives of the rows the dry
+  run lists out of the store is the only way to keep them. Before the
+  `--apply`, do one of these:
+  - copy them out of `communities/<community-id>/servers/<server-id>/backups/`;
+  - set `storage_sweep.rowless_archive_grace_seconds` above the age of the
+    oldest of them, restart the API, and only then run the `--apply`. A
+    running API keeps the grace it started with. This only delays the
+    reclaim: the archive goes at the first pass after it is older than the
+    new grace. Copy it out within that time.
+- **Each deleted row is audited** as `backup:delete_dangling`, with no actor.
+- **`--apply` checks the store first.** It refuses with exit 2 unless the store
+  owner marker names this database's installation (STORAGE.md Section 4.3). A
+  store that is not this database's, such as a wrong bucket or fs root, holds
+  none of its archives, so every row would look dangling.
+- **`--apply` checks the store again before each deletion.** If the store stops
+  being this database's mid-pass, as when the fs root's mount drops or the
+  bucket goes, the command stops with exit 2 and the same refusal. The rows it
+  deleted before stay deleted; each is in the log and the audit trail. Fix the
+  store, then re-run.
+- **A marker that cannot be read stops `--apply`.** When the store fails on the
+  marker read, before the pass or before a deletion, the command stops with
+  exit 1 and one line naming the error, and deletes nothing more. Re-run it
+  once the store is healthy.
+
+The other exit statuses are the command's usual ones: 3 when the database failed
+or a lifecycle lock was lost. Rows already deleted stay deleted, so a re-run is
+safe.
+
+**What the marker check does not catch.** In three cases a HEAD can answer "not
+found" for an archive that exists while the marker still names this database's
+installation. `--apply` then deletes the row and keeps the archive:
+
+- **A subtree below the fs root goes missing.** The marker sits at the root
+  only. If `communities/`, or a directory below it, is a mount or a symlink of
+  its own and it drops, the HEADs under it answer "not found" while the marker
+  still reads.
+- **The store flaps.** A store that is away for a row's HEAD and back for the
+  marker read passes the check.
+- **The store is not the API's, but carries its marker.** Examples are the old
+  fs root after a move to the object backend, or a stale copy of the root. This
+  needs a configuration other than the API's; `docker compose exec api` runs the
+  command with the API's own.
+
+The dry run is the safeguard against all three: review its list before you
+apply, as below.
+
+**Worked example: the #4086 rows.** While a store's disk was full (2026-10-14
+to 10-15), one server's backup schedule kept recording rows it could not archive.
+From 2026-10-15 12:19 to 14:09 UTC it wrote 21 `scheduled` rows, about every 5.5
+minutes, each with an unknown size and no archive in the store. The dry run
+lists those rows, newest first:
+
+```text
+servers scanned: <n>
+dangling backup rows (the store reports no archive): 21
+  backup <backup-id> of server <server-id>, created 2026-10-15T14:09:<ss>+00:00, source scheduled
+  ...
+  backup <backup-id> of server <server-id>, created 2026-10-15T12:19:36+00:00, source scheduled
+skipped (the store could not say whether the archive exists; re-run once it is healthy): 0
+skipped (server busy; re-run to check them): 0
+dry run: nothing was deleted. Re-run with --apply to delete the dangling rows listed above.
+```
+
+Before you apply, check that every listed row falls in the incident window and
+belongs to the server whose schedule failed. A row outside the window has lost
+its archive some other way; find out why before you delete it. Then run the
+`--apply` command. It prints the same list and ends with
+`deleted: 21 (each audited as backup:delete_dangling)`. The rows drop out of the
+server's backup list, and retention no longer counts them.
+
+**A row the store cannot size stalls its server's retention.** Before it ranks,
+the retention prune sends a HEAD for each `scheduled` row whose size is unknown.
+If that HEAD keeps failing with anything other than "not found", such as an S3
+`403 AccessDenied` or an fs `EACCES`, the server's prune fails on every run, and
+its scheduled backups are no longer pruned. Each run logs this WARNING, which
+names the backup whose HEAD failed:
+
+```text
+retention prune of server <server-id> stopped before selecting anything: NULL-size scheduled backup <backup-id> (storage_ref <storage-ref>) could not be sized (<error type>: <error>), and the ranking needs its size. The next run retries.
+```
+
+The prune stops at the first HEAD that fails, so other rows of the server may
+fail too once that one is dealt with. `--delete-dangling` cannot clear such a
+row: it lists the row as skipped and exits 1. To find every row the prune sends
+a HEAD for, with the community id its archive's location needs (`mcsd` is the
+`POSTGRES_USER` and `POSTGRES_DB` of `.env`):
+
+```sh
+docker compose exec db psql -U mcsd -d mcsd -c "SELECT b.id, b.storage_ref,
+  b.created_at, s.community_id FROM backup b JOIN server s ON s.id = b.server_id
+  WHERE b.server_id = '<server-id>' AND b.source = 'scheduled'
+  AND b.size_bytes IS NULL"
+```
+
+A row's archive is
+`communities/<community-id>/servers/<server-id>/backups/<storage_ref>.tar.gz`:
+that key in the bucket, or that path under the fs root.
+
+Then do one of the following:
+
+- Fix the store's permission so the HEAD answers again. The next prune sizes
+  the row and runs.
+- If you have confirmed in the store itself that the row's archive is gone,
+  delete the row by hand. This delete is not audited:
+
+  ```sh
+  docker compose exec db psql -U mcsd -d mcsd -c \
+    "DELETE FROM backup WHERE id = '<backup-id>'"
+  ```
+
 #### Steady-state prevention
 
 Three steady-state mechanisms keep the store from filling in normal operation; this
@@ -578,8 +725,9 @@ them here — each has its own subsection:
   ratio crosses 10% — early enough that the headroom to compact is still
   available. See [Vacuum tuning and manual recovery](#vacuum-tuning-and-manual-recovery)
   above.
-- **App-side periodic sweep.** The API reclaims orphan staging/snapshot prefixes
-  and aborts orphan in-progress multipart uploads on a loop (daily by default,
+- **App-side periodic sweep.** The API reclaims orphan staging/snapshot prefixes,
+  aborts orphan in-progress multipart uploads and reclaims backup archives no
+  row names, once past their grace, on a loop (daily by default,
   `storage_sweep.interval_seconds`). See CONFIGURATION.md
   [Section 5.15](../app/CONFIGURATION.md#515-crash-recovery-storage-sweep).
 
@@ -1225,7 +1373,8 @@ for any new code is in place before the worker starts emitting it.
 >     guard has none to compare. Past the grace, the server is released without
 >     the snapshot, and its next start hydrates from the store, losing what the
 >     snapshot owed. A `stop` of that server while the Worker is down releases
->     it at once, without the snapshot (issue #4111). See
+>     nothing: it answers `503 worker_unavailable` and the server stays held
+>     (issue #4111). See
 >     [`../app/CONFIGURATION.md`](../app/CONFIGURATION.md) Section 5.6.
 >   - One that fails any other way, such as the region check's
 >     `TRANSFER_FAILED`, releases the server and keeps the working set, and the
@@ -1789,6 +1938,22 @@ name `compose.yaml` pins — `mcsd` — unless you override it; `docker volume l
 shows the exact names.) The worker scratch dir
 (`MCSD_SCRATCH_DIR`) is a working set rebuilt from the API on demand and does not
 need backing up beyond the persisted `worker-id`.
+
+**Restoring the database.** Stop the API before you replace its database, and
+restore the storage volume from the same backup run, or copy out what the store
+gained since the dump, before the restored database's API starts. The API's GCs
+delete what no row of its database names, and a database restored to an earlier
+point has no row for anything the store gained since, backup archives included.
+Only the newest of those objects are spared, by the safety windows: 1 h for the
+JAR-pool, plugin-cache and resource-pack GCs, and
+`storage_sweep.rowless_archive_grace_seconds` (7 days by default) for backup
+archives. The rest go soon after the first start: the backup archives at the
+start itself, the other objects at each GC's first pass, at most 10 minutes
+later (CONFIGURATION.md Section 5.7; STORAGE.md Section 4.3, under "Cases the
+marker does not cover"). The commands above dump the database before they
+archive the store, so a backup taken between the two is restored with its
+archive but no row, and the reclaim deletes that archive once it is older than
+the grace.
 
 ## 11. Server export / import (ZIP)
 

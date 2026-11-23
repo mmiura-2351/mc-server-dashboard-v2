@@ -125,6 +125,7 @@ class ServersServerStateSink(ServerStateSink):
         server_id: str,
         worker_id: str,
         state: str,
+        observed_at: dt.datetime,
         detail: str = "",
         reason: str = "",
         emitted_at: dt.datetime | None = None,
@@ -177,15 +178,17 @@ class ServersServerStateSink(ServerStateSink):
             applied = await repo.record_observed_state(
                 ServerId(parsed),
                 observed,
-                self._clock.now(),
+                # Stamped as the servicer read the report (issue #4118), not
+                # now: a report of a session a newer one has replaced can be
+                # here still, and stamped now it would land as the freshest.
+                observed_at,
                 unassign=False,
                 # Assert the reporting worker inside the UPDATE's WHERE (issue
                 # #1708): a stop-unassign + re-place to another worker committing
                 # between the snapshot read above and this write must drop this
-                # (freshest-stamped) report instead of overwriting the new
-                # owner's state. Zero rows matched -> applied=False, which also
-                # skips the Bedrock tunnel sync below (a dropped write must not
-                # flip the tunnel).
+                # report instead of overwriting the new owner's state. Zero rows
+                # matched -> applied=False, which also skips the Bedrock tunnel
+                # sync below (a dropped write must not flip the tunnel).
                 expected_worker=WorkerId(parsed_worker),
                 detail=detail,
                 # The servicer maps the wire enum onto these names, "" for an

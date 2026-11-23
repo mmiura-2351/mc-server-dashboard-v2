@@ -27,7 +27,11 @@ import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 import { classifyQueryResult } from "../queryState.ts";
 import { dashboardPath } from "../routes.ts";
 import { ForgeInstallLog } from "./ForgeInstallLog.tsx";
-import { isEulaNotAccepted, lifecycleErrorMessage } from "./lifecycleErrors.ts";
+import {
+  isEulaNotAccepted,
+  lifecycleErrorMessage,
+  releaseErrorMessage,
+} from "./lifecycleErrors.ts";
 import { stripMinecraftCodes } from "./mcFormat.ts";
 import { stampedQueryFn } from "./restReads.ts";
 import { ServerAddressBadges } from "./ServerAddressBadges.tsx";
@@ -43,9 +47,14 @@ import { serverSettingsErrorPresentation } from "./serverSettingsErrorPresentati
 import {
   actionApplies,
   atRest,
+  atRestWriteRefusal,
   converging,
   crashNotRestarted,
+  finalSnapshotRefusal,
+  heldNoticeKey,
   normalizeState,
+  releaseWithoutSnapshotApplies,
+  serverAssignedKey,
   startRefusal,
   statePill,
 } from "./serverState.ts";
@@ -372,6 +381,11 @@ function Header({
   const drifting =
     !notRestarted &&
     converging(state, server.desired_state, server.assigned_worker_id !== null);
+  // The stop's Worker refused the final snapshot and holds the server until a
+  // retry succeeds (#4056): say why, to every reader, in place of the release
+  // wait Start would show (#4057).
+  const refusal = finalSnapshotRefusal(server.final_snapshot_refusal);
+  const heldNoticeId = useId();
 
   return (
     <div className="page-head">
@@ -447,6 +461,16 @@ function Header({
             {statusDetail}
           </div>
         )}
+        {/* The refusal alone shows the notice: the API clears it only
+            together with the assignment, and every release frame, snapshot
+            and read carries both (#4054), so it never shows on a released
+            server. Not a live region, like Start's held note it stands in
+            for (#3818); the converging pill beside it is one. */}
+        {refusal !== null && (
+          <div className="held-notice" id={heldNoticeId}>
+            {t(heldNoticeKey(refusal))}
+          </div>
+        )}
         <div className="sub">
           <span className="badge type">
             {server.server_type} {server.mc_version}
@@ -472,7 +496,12 @@ function Header({
           </span>
         </div>
       </div>
-      <Controls server={server} communityId={communityId} can={can} />
+      <Controls
+        server={server}
+        communityId={communityId}
+        can={can}
+        heldNoticeId={heldNoticeId}
+      />
     </div>
   );
 }
@@ -481,20 +510,26 @@ function Controls({
   server,
   communityId,
   can,
+  heldNoticeId,
 }: {
   server: ServerResponse;
   communityId: string;
   can: Can;
+  // The header's held notice, which Start names as its reason (#4057).
+  heldNoticeId: string;
 }) {
   const { showToast } = useToast();
   const showServerToast = useServerToast();
   const onForbidden = useOnForbidden();
+  const queryClient = useQueryClient();
   const state = normalizeState(server.observed_state);
   const desired = normalizeState(server.desired_state);
   const assigned = server.assigned_worker_id !== null;
+  const refusal = finalSnapshotRefusal(server.final_snapshot_refusal);
   // Start follows the API's start guard, whatever the server reads (#3860).
   // While the stop still holds its Worker, show it disabled, with the reason
-  // (#3818).
+  // (#3818): the header's held notice when the Worker refused the final
+  // snapshot (#4057).
   const startRefused = startRefusal(desired, assigned);
   const startHeld = startRefused === "transition_conflict";
   const startHeldId = useId();
@@ -526,7 +561,11 @@ function Controls({
         setEulaOpen(true);
         return;
       }
-      showServerToast(server, t(lifecycleErrorMessage(error, action)), "error");
+      showServerToast(
+        server,
+        t(lifecycleErrorMessage(error, action, refusal)),
+        "error",
+      );
     },
   });
 
@@ -536,23 +575,62 @@ function Controls({
     onError,
   });
 
-  const pending = lifecycle.isPending || exportMutation.isPending;
+  // The release of a held server without its final snapshot (#4055). Not a
+  // lifecycle verb: it changes no observed state, so there is no optimistic
+  // transition to show, and it is its own route.
+  const release = useMutation({
+    mutationFn: () =>
+      api.post(
+        apiPath(
+          "/api/communities/{community_id}/servers/{server_id}/release-without-snapshot",
+          { community_id: communityId, server_id: server.id },
+        ),
+      ),
+    onError: (error) => {
+      if (onForbidden(error, { server })) {
+        return;
+      }
+      showServerToast(server, t(releaseErrorMessage(error)), "error");
+    },
+    // Settled either way, the server's own answer replaces the cache. A
+    // success stays pending until it lands, as a lifecycle success does
+    // (#3860): until then the cache still shows the server held.
+    onSettled: (_data, error) => {
+      const refetched = Promise.all(
+        [serverKey(communityId, server.id), serversKey(communityId)].map(
+          (queryKey) => queryClient.invalidateQueries({ queryKey }),
+        ),
+      );
+      return error ? undefined : refetched;
+    },
+  });
+
+  const pending =
+    lifecycle.isPending || exportMutation.isPending || release.isPending;
 
   return (
     <>
       <div className="actions">
-        {can("server:start", { serverId: server.id }) && startHeld && (
-          <span className="start-held" id={startHeldId}>
-            {t("serverDetail.startAwaitsRelease")}
-          </span>
-        )}
+        {can("server:start", { serverId: server.id }) &&
+          startHeld &&
+          refusal === null && (
+            <span className="start-held" id={startHeldId}>
+              {t("serverDetail.startAwaitsRelease")}
+            </span>
+          )}
         {can("server:start", { serverId: server.id }) &&
           startRefused !== "invalid_transition" && (
             <button
               type="button"
               className="btn success"
               disabled={pending || startHeld}
-              aria-describedby={startHeld ? startHeldId : undefined}
+              aria-describedby={
+                startHeld
+                  ? refusal !== null
+                    ? heldNoticeId
+                    : startHeldId
+                  : undefined
+              }
               onClick={() => lifecycle.mutate({ action: "start" })}
             >
               {t(
@@ -572,6 +650,13 @@ function Controls({
                   query: force ? "force=true" : undefined,
                 })
               }
+            />
+          )}
+        {can("server:stop", { serverId: server.id }) &&
+          releaseWithoutSnapshotApplies(state, desired, assigned, refusal) && (
+            <ReleaseControl
+              disabled={pending}
+              onRelease={() => release.mutate()}
             />
           )}
         {can("server:restart", { serverId: server.id }) &&
@@ -635,6 +720,72 @@ function Controls({
             {t("serverDetail.eulaDialog.link")}
           </a>
         </p>
+      </Modal>
+    </>
+  );
+}
+
+// Release a held server without its final snapshot (#4055, #4057). Its own
+// button and dialog, beside the Stop control and never in its menu: Stop's
+// force means "kill now" only (owner decision on #3701), while this gives up
+// the progression since the last snapshot, so its dialog says what it gives up
+// (WEBUI_SPEC.md 2.3) instead of the force-stop warning.
+function ReleaseControl({
+  disabled,
+  onRelease,
+}: {
+  disabled: boolean;
+  onRelease: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+
+  // Cancel takes the default focus. This runs after the Modal's own effect,
+  // which moves focus to the dialog: a child's effects run first.
+  useEffect(() => {
+    if (open) {
+      cancelRef.current?.focus();
+    }
+  }, [open]);
+
+  return (
+    <>
+      <button
+        type="button"
+        className="btn danger"
+        disabled={disabled}
+        onClick={() => setOpen(true)}
+      >
+        {t("serverDetail.release.button")}
+      </button>
+      <Modal
+        open={open}
+        title={t("serverDetail.release.dialogTitle")}
+        onClose={() => setOpen(false)}
+        footer={
+          <>
+            <button
+              ref={cancelRef}
+              type="button"
+              className="btn ghost"
+              onClick={() => setOpen(false)}
+            >
+              {t("common.cancel")}
+            </button>
+            <button
+              type="button"
+              className="btn danger"
+              onClick={() => {
+                setOpen(false);
+                onRelease();
+              }}
+            >
+              {t("serverDetail.release.confirm")}
+            </button>
+          </>
+        }
+      >
+        <p>{t("serverDetail.release.dialogBody")}</p>
       </Modal>
     </>
   );
@@ -1520,6 +1671,19 @@ function Settings({
   // with the reason, while the live cache shows a Worker assigned.
   const deleteHeld = server.assigned_worker_id !== null;
   const deleteHeldId = useId();
+  // A hold the Worker's refusal of the final snapshot keeps, with no bound,
+  // names that refusal (#4057).
+  const refusal = finalSnapshotRefusal(server.final_snapshot_refusal);
+  // A save that rewrites server.properties is refused the same way while a
+  // stopped server's Worker is still assigned (#3998): hold Save, with the
+  // reason. Not while it runs: a safe-keys-only edit passes then (#115).
+  const saveHeld =
+    atRestWriteRefusal(
+      normalizeState(server.observed_state),
+      server.desired_state,
+      server.assigned_worker_id !== null,
+    ) === "server_assigned";
+  const saveHeldId = useId();
   const canExport = can("file:read", { serverId: server.id });
 
   const onError = (error: unknown) => {
@@ -1529,6 +1693,7 @@ function Settings({
     // Slug-specific errors land inline on the field rather than as toasts.
     const { target, key } = serverSettingsErrorPresentation(
       error instanceof ApiError ? error.reason : undefined,
+      refusal,
     );
     if (target === "slug") {
       setSlugError(t(key));
@@ -1758,6 +1923,11 @@ function Settings({
         </label>
         <ConfigEditor rows={rows} disabled={!canUpdate} onChange={setRows} />
         <p className="field-hint">{t("serverDetail.settings.atRestHint")}</p>
+        {saveHeld && (
+          <p className="field-hint" id={saveHeldId}>
+            {t(serverAssignedKey(refusal))}
+          </p>
+        )}
         <button
           type="button"
           className="btn primary"
@@ -1766,8 +1936,10 @@ function Settings({
             !memoryLimitOk ||
             !cpuAllocationOk ||
             !slugOk ||
-            save.isPending
+            save.isPending ||
+            saveHeld
           }
+          aria-describedby={saveHeld ? saveHeldId : undefined}
           onClick={() => save.mutate()}
         >
           {t("serverDetail.settings.save")}
@@ -1811,7 +1983,11 @@ function Settings({
               <div className="desc">{t("serverDetail.danger.deleteDesc")}</div>
               {deleteHeld && (
                 <div className="field-hint" id={deleteHeldId}>
-                  {t("serverDetail.danger.deleteAwaitsRelease")}
+                  {t(
+                    refusal === null
+                      ? "serverDetail.danger.deleteAwaitsRelease"
+                      : serverAssignedKey(refusal),
+                  )}
                 </div>
               )}
             </div>

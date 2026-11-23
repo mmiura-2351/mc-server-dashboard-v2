@@ -21,11 +21,12 @@ import asyncio
 import datetime as dt
 import gzip
 import io
+import logging
 import tarfile
 import threading
 import tracemalloc
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 
 import pytest
@@ -85,12 +86,16 @@ from tests.servers.executor_starvation import (
     assert_default_executor_free,
 )
 from tests.servers.fakes import (
+    DatabaseOutageError,
     FakeBackupArchiveStore,
     FakeBackupRepository,
     FakeClock,
     FakeControlPlane,
     FakeServerRepository,
     FakeUnitOfWork,
+    HangingSizeStore,
+    OutageUnitOfWork,
+    SessionTrackingUnitOfWork,
 )
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -486,7 +491,7 @@ async def test_list_backfills_null_size_when_archive_exists() -> None:
     persisted = await uow.backups.get_by_id(backup.id)
     assert persisted is not None
     assert persisted.size_bytes == 42
-    # The backfill committed the write inside the open uow (the fake makes
+    # The backfill committed the write in a unit of work of its own (the fake makes
     # update_size visible regardless, so only the commit count proves the durability).
     assert uow.commits == 1
 
@@ -554,6 +559,47 @@ async def test_server_statistics_backfills_null_size_into_total() -> None:
     # longer counted as unknown.
     assert stats.total_bytes == 15
     assert stats.unknown_size_count == 0
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        pytest.param(ListBackups, id="list"),
+        pytest.param(ServerBackupStatistics, id="statistics"),
+    ],
+)
+async def test_a_hanging_size_probe_holds_no_unit_of_work_open(
+    read: type[ListBackups] | type[ServerBackupStatistics],
+) -> None:
+    # The backfill's size probe is a storage HEAD, which can hang for as long as
+    # the store's timeouts allow. It runs with no unit of work open, so a hanging
+    # HEAD keeps no pool connection checked out (issue #4107); the size is then
+    # written in a short unit of work of its own.
+    server = _at_rest()
+    uow = SessionTrackingUnitOfWork()
+    uow.servers.seed(server)
+    archive = HangingSizeStore()
+    backup = _seed_null_size_row(
+        uow.backups, archive, server.id, storage_ref="legacy", archive_bytes=b"x" * 42
+    )
+
+    reading = asyncio.create_task(
+        read(uow=uow, backup_store=archive)(
+            community_id=_COMMUNITY, server_id=server.id
+        )
+    )
+    try:
+        await archive.probing.wait()
+        open_while_probing = uow.open
+    finally:
+        archive.release.set()
+    await reading
+
+    assert open_while_probing is False
+    persisted = await uow.backups.get_by_id(backup.id)
+    assert persisted is not None
+    assert persisted.size_bytes == 42
+    assert uow.commits == 1
 
 
 async def test_list_fails_when_the_store_is_unavailable() -> None:
@@ -1809,128 +1855,468 @@ def _valid_tar_gz() -> bytes:
     return _targz({"server.properties": b"motd=test"})
 
 
-# --- Row-before-archive ordering (#1707) ------------------------------------
+# --- Archive-before-row ordering (issue #4086) -------------------------------
+#
+# A backup row is recorded only once its archive exists, with its size; a failure
+# after the archive and before the row's COMMIT is sent deletes it again (the
+# tests at the end of this section pin what happens after). On 2026-10-15 a
+# create that committed its row first left 21 rows with no archive behind: the
+# store refused each archive and the database went down with it, so no row could
+# be deleted again.
 
 
-async def test_create_commits_row_before_archive_write() -> None:
-    """The metadata row is committed BEFORE the archive is written (#1707).
+class _FailsAndTakesTheDatabaseDown(FakeBackupArchiveStore):
+    """The store refuses the archive, and the database goes down with it."""
 
-    The ordering prevents orphaned archives on crash: a crash between the row
-    commit and the archive write leaves a dangling row (detectable, self-healing),
-    never an orphaned archive with no row to find it by.
-    """
-    server = _at_rest()
-    repo = FakeServerRepository()
-    repo.seed(server)
-    uow = FakeUnitOfWork(servers=repo)
-    archive = FakeBackupArchiveStore()
-    # Record the commit count at the moment create_from_current runs.
-    commits_at_archive_write: list[int] = []
-    _original_create = archive.create_from_current.__func__  # type: ignore[attr-defined]
+    def __init__(self, uow: OutageUnitOfWork) -> None:
+        super().__init__()
+        self._uow = uow
 
-    async def _recording_create(
-        self: FakeBackupArchiveStore,
+    async def create_from_current(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> None:
+        self._uow.down = True
+        raise BackupStorageUnavailableError(str(server_id.value))
+
+    async def store(
+        self,
         *,
         community_id: CommunityId,
         server_id: ServerId,
+        stream: AsyncIterator[bytes],
         storage_ref: str,
     ) -> None:
-        commits_at_archive_write.append(uow.commits)
-        await _original_create(
-            self,
+        self._uow.down = True
+        raise BackupStorageUnavailableError(str(server_id.value))
+
+
+class _WritesThenTakesTheDatabaseDown(FakeBackupArchiveStore):
+    """The store writes the archive, then the database goes down."""
+
+    def __init__(self, uow: OutageUnitOfWork) -> None:
+        super().__init__()
+        self._uow = uow
+
+    async def create_from_current(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> None:
+        await super().create_from_current(
+            community_id=community_id, server_id=server_id, storage_ref=storage_ref
+        )
+        self._uow.down = True
+
+    async def store(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        stream: AsyncIterator[bytes],
+        storage_ref: str,
+    ) -> None:
+        await super().store(
             community_id=community_id,
             server_id=server_id,
+            stream=stream,
+            storage_ref=storage_ref,
+        )
+        self._uow.down = True
+
+
+class _ArchiveDeleteFails(_WritesThenTakesTheDatabaseDown):
+    async def delete(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> None:
+        raise BackupStorageUnavailableError(str(server_id.value))
+
+
+class _Hangs(FakeBackupArchiveStore):
+    """The archive write (``hang_in="write"``) or the size read never returns."""
+
+    def __init__(self, hang_in: str) -> None:
+        super().__init__()
+        self._hang_in = hang_in
+        self.entered = asyncio.Event()
+
+    async def _hang(self, at: str) -> None:
+        if at == self._hang_in:
+            self.entered.set()
+            await asyncio.Event().wait()
+
+    async def create_from_current(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> None:
+        await self._hang("write")
+        await super().create_from_current(
+            community_id=community_id, server_id=server_id, storage_ref=storage_ref
+        )
+
+    async def store(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        stream: AsyncIterator[bytes],
+        storage_ref: str,
+    ) -> None:
+        await self._hang("write")
+        await super().store(
+            community_id=community_id,
+            server_id=server_id,
+            stream=stream,
             storage_ref=storage_ref,
         )
 
-    import types
-
-    archive.create_from_current = types.MethodType(_recording_create, archive)  # type: ignore[method-assign]
-    create = _make_create(uow, FakeControlPlane(), archive)
-
-    await create(
-        community_id=_COMMUNITY,
-        server_id=server.id,
-        source=BackupSource.MANUAL,
-    )
-
-    # The row was committed (at least once) before the archive write.
-    assert commits_at_archive_write[0] >= 1
-
-
-async def test_create_failure_compensates_committed_row() -> None:
-    """A failed archive write deletes the committed row (#1707).
-
-    If create_from_current raises, the already-committed row is deleted so
-    repeated failures (e.g. scheduler retries) do not accumulate dangling rows.
-    """
-    server = _at_rest()
-    repo = FakeServerRepository()
-    repo.seed(server)
-    uow = FakeUnitOfWork(servers=repo)
-    archive = FakeBackupArchiveStore(missing=True)
-    create = _make_create(uow, FakeControlPlane(), archive)
-
-    with pytest.raises(BackupNotFoundError):
-        await create(
-            community_id=_COMMUNITY,
-            server_id=server.id,
-            source=BackupSource.MANUAL,
+    async def size(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> int:
+        await self._hang("size")
+        return await super().size(
+            community_id=community_id, server_id=server_id, storage_ref=storage_ref
         )
 
-    # No dangling row left behind.
-    assert await uow.backups.list_for_server(server.id) == []
+
+async def _cancel_once_entered(
+    task: asyncio.Task[Backup], entered: asyncio.Event
+) -> None:
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
-async def test_upload_commits_row_before_archive_write() -> None:
-    """UploadBackup commits the metadata row BEFORE storing the archive (#1707)."""
+def _outage_uow(server: Server) -> OutageUnitOfWork:
+    uow = OutageUnitOfWork()
+    uow.servers.seed(server)
+    return uow
+
+
+def _upload_of(uow: FakeUnitOfWork, archive: FakeBackupArchiveStore) -> UploadBackup:
+    return UploadBackup(uow=uow, backup_store=archive, clock=FakeClock(_NOW))
+
+
+async def test_create_writes_its_archive_before_its_row() -> None:
     server = _at_rest()
-    repo = FakeServerRepository()
-    repo.seed(server)
-    uow = FakeUnitOfWork(servers=repo)
+    uow = _outage_uow(server)
     archive = FakeBackupArchiveStore()
-    commits_at_store: list[int] = []
-    _original_store = archive.store.__func__  # type: ignore[attr-defined]
+    archive.events = uow.backups.events
 
-    async def _recording_store(self: FakeBackupArchiveStore, **kwargs: object) -> None:
-        commits_at_store.append(uow.commits)
-        await _original_store(self, **kwargs)
-
-    import types
-
-    archive.store = types.MethodType(_recording_store, archive)  # type: ignore[method-assign]
-    upload = UploadBackup(uow=uow, backup_store=archive, clock=FakeClock(_NOW))
-
-    await upload(
-        community_id=_COMMUNITY,
-        server_id=server.id,
-        content=_valid_tar_gz(),
-        created_by=uuid.uuid4(),
+    await _make_create(uow, FakeControlPlane(), archive)(
+        community_id=_COMMUNITY, server_id=server.id, source=BackupSource.MANUAL
     )
 
-    assert commits_at_store[0] >= 1
+    assert uow.backups.events == [
+        (server.id, "create-archive"),
+        (server.id, "add-row"),
+    ]
 
 
-async def test_upload_failure_compensates_committed_row() -> None:
-    """A failed store write deletes the committed row (#1707)."""
+async def test_create_inserts_its_row_with_the_archive_size() -> None:
     server = _at_rest()
-    repo = FakeServerRepository()
-    repo.seed(server)
-    uow = FakeUnitOfWork(servers=repo)
+    uow = _outage_uow(server)
     archive = FakeBackupArchiveStore()
+    inserted: list[int | None] = []
+    insert = uow.backups.add
 
-    async def _failing_store(**_kwargs: object) -> None:
-        msg = "disk full"
-        raise OSError(msg)
+    async def _recording_add(backup: Backup) -> None:
+        inserted.append(backup.size_bytes)
+        await insert(backup)
 
-    archive.store = _failing_store  # type: ignore[method-assign]
-    upload = UploadBackup(uow=uow, backup_store=archive, clock=FakeClock(_NOW))
+    uow.backups.add = _recording_add  # type: ignore[method-assign]
 
-    with pytest.raises(OSError, match="disk full"):
-        await upload(
+    await _make_create(uow, FakeControlPlane(), archive)(
+        community_id=_COMMUNITY, server_id=server.id, source=BackupSource.MANUAL
+    )
+
+    # No reader ever sees the row without its size.
+    assert inserted == [len(b"archive-bytes")]
+
+
+async def test_create_whose_cleanup_cannot_reach_the_database_leaves_no_row() -> None:
+    server = _at_rest()
+    uow = _outage_uow(server)
+    archive = _FailsAndTakesTheDatabaseDown(uow)
+
+    with pytest.raises(BackupStorageUnavailableError):
+        await _make_create(uow, FakeControlPlane(), archive)(
             community_id=_COMMUNITY,
             server_id=server.id,
-            content=_valid_tar_gz(),
+            source=BackupSource.SCHEDULED,
         )
 
-    assert await uow.backups.list_for_server(server.id) == []
+    assert uow.backups.by_id == {}
+    assert archive.deleted == []
+
+
+async def test_a_create_cancelled_mid_archive_leaves_no_row() -> None:
+    server = _at_rest()
+    uow = _outage_uow(server)
+    archive = _Hangs("write")
+    create = _make_create(uow, FakeControlPlane(), archive)
+
+    await _cancel_once_entered(
+        asyncio.create_task(
+            create(
+                community_id=_COMMUNITY,
+                server_id=server.id,
+                source=BackupSource.SCHEDULED,
+            )
+        ),
+        archive.entered,
+    )
+
+    assert uow.backups.by_id == {}
+
+
+async def test_a_create_cancelled_after_its_archive_deletes_it() -> None:
+    server = _at_rest()
+    uow = _outage_uow(server)
+    archive = _Hangs("size")
+    create = _make_create(uow, FakeControlPlane(), archive)
+
+    await _cancel_once_entered(
+        asyncio.create_task(
+            create(
+                community_id=_COMMUNITY,
+                server_id=server.id,
+                source=BackupSource.SCHEDULED,
+            )
+        ),
+        archive.entered,
+    )
+
+    assert uow.backups.by_id == {}
+    assert archive.created == [server.id]
+    assert archive.archives == set()
+
+
+async def test_create_whose_row_cannot_be_recorded_deletes_its_archive() -> None:
+    server = _at_rest()
+    uow = _outage_uow(server)
+    archive = _WritesThenTakesTheDatabaseDown(uow)
+
+    with pytest.raises(DatabaseOutageError):
+        await _make_create(uow, FakeControlPlane(), archive)(
+            community_id=_COMMUNITY, server_id=server.id, source=BackupSource.MANUAL
+        )
+
+    assert uow.backups.by_id == {}
+    assert archive.created == [server.id]
+    assert archive.archives == set()
+
+
+async def test_an_archive_that_cannot_be_deleted_is_logged_not_raised(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    server = _at_rest()
+    uow = _outage_uow(server)
+    archive = _ArchiveDeleteFails(uow)
+
+    # The failure that stopped the backup is the one raised, not the delete's.
+    with pytest.raises(DatabaseOutageError):
+        await _make_create(uow, FakeControlPlane(), archive)(
+            community_id=_COMMUNITY, server_id=server.id, source=BackupSource.MANUAL
+        )
+
+    (record,) = [r for r in caplog.records if r.name == backups_module.__name__]
+    assert record.levelno == logging.WARNING
+
+
+async def test_upload_stores_its_archive_before_its_row() -> None:
+    server = _at_rest()
+    uow = _outage_uow(server)
+    archive = FakeBackupArchiveStore()
+    archive.events = uow.backups.events
+
+    await _upload_of(uow, archive)(
+        community_id=_COMMUNITY, server_id=server.id, content=_valid_tar_gz()
+    )
+
+    assert uow.backups.events == [
+        (server.id, "store-archive"),
+        (server.id, "add-row"),
+    ]
+
+
+async def test_upload_whose_cleanup_cannot_reach_the_database_leaves_no_row() -> None:
+    server = _at_rest()
+    uow = _outage_uow(server)
+    archive = _FailsAndTakesTheDatabaseDown(uow)
+
+    with pytest.raises(BackupStorageUnavailableError):
+        await _upload_of(uow, archive)(
+            community_id=_COMMUNITY, server_id=server.id, content=_valid_tar_gz()
+        )
+
+    assert uow.backups.by_id == {}
+    assert archive.deleted == []
+
+
+async def test_an_upload_cancelled_mid_store_leaves_no_row() -> None:
+    server = _at_rest()
+    uow = _outage_uow(server)
+    archive = _Hangs("write")
+    upload = _upload_of(uow, archive)
+
+    await _cancel_once_entered(
+        asyncio.create_task(
+            upload(
+                community_id=_COMMUNITY,
+                server_id=server.id,
+                content=_valid_tar_gz(),
+            )
+        ),
+        archive.entered,
+    )
+
+    assert uow.backups.by_id == {}
+
+
+async def test_upload_whose_row_cannot_be_recorded_deletes_its_archive() -> None:
+    server = _at_rest()
+    uow = _outage_uow(server)
+    archive = _WritesThenTakesTheDatabaseDown(uow)
+
+    with pytest.raises(DatabaseOutageError):
+        await _upload_of(uow, archive)(
+            community_id=_COMMUNITY, server_id=server.id, content=_valid_tar_gz()
+        )
+
+    assert uow.backups.by_id == {}
+    assert archive.stored == [server.id]
+    assert archive.archives == set()
+
+
+# Once the row's COMMIT is sent, its outcome is unknown: a COMMIT can apply and
+# still raise. Deleting the archive then could leave the row without it, so the
+# archive is kept and a WARNING logged (review r1 of PR #4119).
+
+
+class _CommitAnswerLost(FakeUnitOfWork):
+    """The COMMIT applies, and its answer is lost with the connection."""
+
+    async def commit(self) -> None:
+        await super().commit()
+        raise ConnectionError("connection lost after the COMMIT was sent")
+
+
+class _HangsInCommit(FakeUnitOfWork):
+    """The COMMIT applies, and its answer never arrives."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+
+    async def commit(self) -> None:
+        await super().commit()
+        self.entered.set()
+        await asyncio.Event().wait()
+
+
+class _ExitFailsAfterCommit(FakeUnitOfWork):
+    """The commit returns, and leaving its block (the rollback, the close) fails."""
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        if self.commits:
+            raise ConnectionError("connection lost while closing the session")
+
+
+class _HangsInInsert(FakeBackupRepository):
+    """The row's INSERT never returns, so its COMMIT is never sent."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+
+    async def add(self, backup: Backup) -> None:
+        self.entered.set()
+        await asyncio.Event().wait()
+
+
+async def _back_up(
+    kind: str, uow: FakeUnitOfWork, archive: FakeBackupArchiveStore, server: Server
+) -> Backup:
+    if kind == "create":
+        return await _make_create(uow, FakeControlPlane(), archive)(
+            community_id=_COMMUNITY, server_id=server.id, source=BackupSource.MANUAL
+        )
+    return await _upload_of(uow, archive)(
+        community_id=_COMMUNITY, server_id=server.id, content=_valid_tar_gz()
+    )
+
+
+_KINDS = pytest.mark.parametrize("kind", ["create", "upload"])
+
+
+@_KINDS
+async def test_a_backup_whose_commit_answer_is_lost_keeps_its_archive(
+    kind: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    server = _at_rest()
+    uow = _CommitAnswerLost()
+    uow.servers.seed(server)
+    archive = FakeBackupArchiveStore()
+
+    with pytest.raises(ConnectionError):
+        await _back_up(kind, uow, archive, server)
+
+    (row,) = uow.backups.by_id.values()
+    assert archive.archives == {row.storage_ref}
+    (record,) = [r for r in caplog.records if r.name == backups_module.__name__]
+    assert record.levelno == logging.WARNING
+    assert [record.__dict__[k] for k in ("server_id", "storage_ref", "backup_id")] == [
+        str(server.id.value),
+        row.storage_ref,
+        str(row.id.value),
+    ]
+
+
+@_KINDS
+async def test_a_backup_cancelled_inside_its_commit_keeps_its_archive(
+    kind: str,
+) -> None:
+    server = _at_rest()
+    uow = _HangsInCommit()
+    uow.servers.seed(server)
+    archive = FakeBackupArchiveStore()
+
+    await _cancel_once_entered(
+        asyncio.create_task(_back_up(kind, uow, archive, server)), uow.entered
+    )
+
+    (row,) = uow.backups.by_id.values()
+    assert archive.archives == {row.storage_ref}
+
+
+@_KINDS
+async def test_a_backup_whose_block_exit_fails_after_its_commit_keeps_its_archive(
+    kind: str,
+) -> None:
+    server = _at_rest()
+    uow = _ExitFailsAfterCommit()
+    uow.servers.seed(server)
+    archive = FakeBackupArchiveStore()
+
+    with pytest.raises(ConnectionError):
+        await _back_up(kind, uow, archive, server)
+
+    (row,) = uow.backups.by_id.values()
+    assert archive.archives == {row.storage_ref}
+
+
+@_KINDS
+async def test_a_backup_cancelled_before_its_commit_is_sent_deletes_its_archive(
+    kind: str,
+) -> None:
+    server = _at_rest()
+    backups = _HangsInInsert()
+    uow = FakeUnitOfWork(backups=backups)
+    uow.servers.seed(server)
+    archive = FakeBackupArchiveStore()
+
+    await _cancel_once_entered(
+        asyncio.create_task(_back_up(kind, uow, archive, server)), backups.entered
+    )
+
+    assert backups.by_id == {}
+    assert len(archive.deleted) == 1
+    assert archive.archives == set()

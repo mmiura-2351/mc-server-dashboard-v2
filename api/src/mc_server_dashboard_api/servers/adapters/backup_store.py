@@ -41,6 +41,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from mc_server_dashboard_api.servers.domain.backup_store import (
     BackupArchiveStore,
     SnapshotScan,
+    StoredArchive,
 )
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
@@ -133,6 +134,20 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
             # DELETE would surface as 503 or 500 depending on which call lost.
             raise BackupStorageUnavailableError(str(server_id.value)) from exc
         return [k.value for k in keys]
+
+    async def list_archives(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> list[StoredArchive]:
+        community, server = _scope(community_id, server_id)
+        try:
+            entries = await self._storage.list_backup_entries(community, server)
+        except StorageUnavailableError as exc:
+            # As list_archive_refs: the reclaim reads the typed error (#4106).
+            raise BackupStorageUnavailableError(str(server_id.value)) from exc
+        return [
+            StoredArchive(storage_ref=e.key.value, modified_at=e.modified_at)
+            for e in entries
+        ]
 
     async def restore(
         self,

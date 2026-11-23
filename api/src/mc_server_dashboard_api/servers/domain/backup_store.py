@@ -16,8 +16,10 @@ layer.
 from __future__ import annotations
 
 import abc
+import datetime as dt
 import enum
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -45,6 +47,19 @@ class SnapshotScan(enum.Enum):
     """
 
 
+@dataclass(frozen=True)
+class StoredArchive:
+    """One archive the store holds, and when the store last wrote it (issue #4106).
+
+    ``modified_at`` is the store's own time for the archive, timezone-aware UTC:
+    the file's mtime on fs, the object's ``LastModified`` on the object backend.
+    The row-less archive reclaim reads it as the archive's age.
+    """
+
+    storage_ref: str
+    modified_at: dt.datetime
+
+
 class BackupArchiveStore(abc.ABC):
     """Port: the backup layer's seam to the authoritative-copy archive store."""
 
@@ -54,13 +69,11 @@ class BackupArchiveStore(abc.ABC):
     ) -> None:
         """Archive the authoritative ``current/`` under the given ref (FR-BAK-1).
 
-        The caller pre-generates the ref and commits the metadata row first (#1707),
-        then writes the archive. A crash after the row commit but before the archive
-        write leaves a dangling row (detectable, self-healing), never an orphaned
-        archive with no row. Raises :class:`BackupNotFoundError` if nothing is
-        published to archive, and :class:`BackupTooLargeError`, writing nothing,
-        if the working set's archive would be past the decompressed-size cap
-        (#3859).
+        The caller pre-generates the ref, writes the archive, and only then records
+        its metadata row (issue #4086), so no row is recorded ahead of its archive.
+        Raises :class:`BackupNotFoundError` if nothing is published to archive, and
+        :class:`BackupTooLargeError`, writing nothing, if the working set's archive
+        would be past the decompressed-size cap (#3859).
         """
 
     @abc.abstractmethod
@@ -72,6 +85,17 @@ class BackupArchiveStore(abc.ABC):
         Returns every ref that has a physical archive, regardless of whether a
         metadata row exists. Used by ``DeleteServer`` to prune orphaned archives
         that have no row (issue #1707).
+        """
+
+    @abc.abstractmethod
+    async def list_archives(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> list[StoredArchive]:
+        """List every archive on storage with its store time (issue #4106).
+
+        The same archives :meth:`list_archive_refs` lists, each with the time
+        the row-less archive reclaim ages it by. Raises
+        :class:`BackupStorageUnavailableError` when the store cannot list them.
         """
 
     @abc.abstractmethod
@@ -213,10 +237,8 @@ class BackupArchiveStore(abc.ABC):
     ) -> None:
         """Store an uploaded archive verbatim under the given ref (issue #281).
 
-        The caller pre-generates the ref and commits the metadata row first (#1707),
-        then stores the archive bytes. A crash after the row commit but before the
-        store write leaves a dangling row (detectable, self-healing), never an
-        orphaned archive with no row.
+        The caller pre-generates the ref, stores the archive bytes, and only then
+        records its metadata row (issue #4086), as for :meth:`create_from_current`.
         """
 
     @abc.abstractmethod

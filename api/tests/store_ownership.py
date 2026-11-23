@@ -43,6 +43,9 @@ class FakeStoreOwnership:
     async def refusal(self) -> str | None:
         return self.refusal_reason
 
+    async def refusal_for(self, installation_id: uuid.UUID) -> str | None:
+        return self.refusal_reason
+
     def refusal_blocking(self) -> str | None:
         return self.refusal_reason
 

@@ -31,7 +31,7 @@ dependencies = [
     # well outside the 7-day cooldown (Section 3); cap the next major. The floor
     # is a security floor: every release below 4.14.2 carries published
     # advisories (#3325).
-    "anyio>=4.14.2,<5",                 # 2026-07-12
+    "anyio>=4.16.0,<5",                 # 2026-07-12
     # WebSocket protocol implementation for uvicorn (#507). Bare uvicorn ships no
     # WS library, so its auto-selector resolves AutoWebSocketsProtocol to None and
     # silently downgrades every WS upgrade to plain HTTP — the live /events
@@ -114,7 +114,7 @@ dependencies = [
 dev = [
     # Keep the reviewed ruff 0.17 line; later 0.x lines need explicit review.
     "ruff>=0.17.4,<0.18",
-    "mypy>=2.1.0,<3",
+    "mypy>=2.4.1,<3",
     "pytest>=9.0.3,<10",
     "import-linter>=2.11,<3",
     # Control-plane codegen. grpcio-tools bundles protoc + the python/grpc
@@ -140,7 +140,7 @@ dev = [
     # Parallel test execution in CI (issue #1144). 3.6.1 (2024-12-28) is well
     # outside the 7-day cooldown (Section 3); cap the next major (dev tooling,
     # Section 1).
-    "pytest-xdist>=3.6.1,<4",
+    "pytest-xdist>=3.8.0,<4",
 ]
 
 [build-system]

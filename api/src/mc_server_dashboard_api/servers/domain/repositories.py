@@ -239,7 +239,7 @@ class ServerRepository(abc.ABC):
         assigned to that worker (an unassigned row never matches). The
         control-plane sink asserts the reporting worker here so a stop-unassign
         + re-place committing between its snapshot read and this write cannot
-        let the stale worker's (freshest-stamped) report overwrite the new
+        let the stale worker's report overwrite the new
         owner's state. API-driven convergence writers do not assert a worker:
         they converge their own dispatch outcome, not a worker's report.
 
@@ -369,17 +369,25 @@ class ServerRepository(abc.ABC):
         self,
         server_id: ServerId,
         worker_id: WorkerId,
-        refusal: FinalSnapshotRefusal | None,
+        refusal: FinalSnapshotRefusal,
+        *,
+        retry: bool = False,
     ) -> bool:
-        """Record how ``worker_id`` last answered the stop's final snapshot (#4054).
+        """Record how ``worker_id`` refused the stop's final snapshot (#4054).
 
-        ``refusal`` is the refusal that keeps the Worker assigned, or ``None``
-        once a later attempt was not refused. The write lands only while the
-        row is ``desired_state=stopped`` and still assigned to ``worker_id``,
-        so it never marks a row a release or a start has moved on. Every
-        release clears the value with the assignment. Returns ``True`` when the
-        row changed, which is announced to live subscribers as a status event
-        once the transaction commits.
+        ``refusal`` is the refusal that keeps the Worker assigned. Nothing here
+        clears it: only a release does, with the assignment, and a retry left
+        unanswered keeps it (issue #4111). The write lands only while the row is
+        ``desired_state=stopped`` and still assigned to ``worker_id``, so it
+        never marks a row a release or a start has moved on. Returns ``True``
+        when the row changed, which is announced to live subscribers as a status
+        event once the transaction commits.
+
+        ``retry`` marks a write whose earlier attempt failed: a retry of a late
+        result (issue #4104), or the next refused attempt after a write whose
+        COMMIT failed (issue #4152). That attempt may have committed with its
+        answer lost, so the same refusal found recorded also counts, under the
+        same guard, and is announced again.
         """
 
     @abc.abstractmethod
@@ -399,6 +407,17 @@ class ServerRepository(abc.ABC):
         stamp included (issue #4092): that is a report of the Worker's next
         session, made after the disconnect, which this write must not
         overwrite when it lands late.
+        """
+
+    @abc.abstractmethod
+    async def workers_with_trusted_observed_state(self) -> set[WorkerId]:
+        """Return each Worker assigned a server observed neither unknown nor crashed.
+
+        The servers whose state :meth:`mark_worker_servers_unknown` changes. The
+        reconciler makes that write for a Worker whose session ended a grace
+        ago (issue #4130), and only for one listed here: once its servers all
+        read ``unknown`` or ``crashed``, the write has nothing left to change
+        and is not made again on every tick.
         """
 
     @abc.abstractmethod

@@ -20,12 +20,17 @@ state per the 6.9 table:
 - **anything else** (starting/stopping/restarting/crashed, or a desired/observed
   mismatch) -> :class:`BackupUnsettledError` (409): neither source is well-defined.
 
-Each create commits a :class:`Backup` metadata row (source manual or scheduled,
-the archive ref, the actor) **before** writing the archive (#1707) — a crash
-after the row commit but before the archive write leaves a dangling row
-(detectable via the lazy size backfill and health sweep), never an orphaned
-archive with no row to find it by.  The archive size is backfilled once the
-archive lands (the lazy path legacy rows already use, #661).
+Each create writes the archive **before** it records its :class:`Backup` metadata
+row (source manual or scheduled, the archive ref, its size, the actor), and an
+upload stores its archive the same way (issue #4086). The row is inserted with
+its size in one transaction, so no row is recorded ahead of its archive. A
+failure after the archive write and before the row's COMMIT is sent, a
+cancellation included, deletes the archive again (best effort). Once the COMMIT
+is sent, its outcome is unknown, since a COMMIT can apply and still raise: the
+archive is kept and a WARNING logged. A crash, a delete that fails, or an
+unconfirmed COMMIT that did not apply leaves an archive with no row: no listing
+shows it, and the row-less archive reclaim deletes it after its grace (issue
+#4106, ``rowless_archive_gc``).
 
 Restore requires the server **at rest** (FR-BAK-4): a hot replacement of a live
 working set is unsafe, so a running server is 409. Restore republishes the
@@ -34,11 +39,14 @@ next start with no extra work (hydrate reads ``current``).
 
 Delete removes both the archive and the metadata row. Ordering: the **archive is
 deleted first, the metadata row last** — so a crash between the two leaves a
-metadata row whose archive is already gone (a dangling-pointer row, harmless and
-fixable: delete is idempotent and re-running it removes the row), never a metadata
-row deleted while its archive lingers as an unreferenced orphan with no row to find
-it by. ``delete_backup`` on Storage is idempotent, so the archive delete is safe to
-retry.
+metadata row whose archive is already gone (a dangling-pointer row), never a
+metadata row deleted while its archive lingers as an unreferenced orphan with no
+row to find it by. The dangling row is fixable, not harmless: delete is idempotent
+and re-running it removes the row, but until then it is listed as a backup that
+cannot be downloaded or restored, and retention ranks it by its health like a row
+with an archive while its size is recorded (only a NULL size ranks behind, issue
+#4105), so a scheduled one can keep a slot a real backup needed. ``delete_backup``
+on Storage is idempotent, so the archive delete is safe to retry.
 """
 
 from __future__ import annotations
@@ -67,6 +75,7 @@ from mc_server_dashboard_api.archive_member import (
 from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
 from mc_server_dashboard_api.audit.domain.operations import (
     BACKUP_DELETE,
+    BACKUP_DELETE_DANGLING,
     TARGET_BACKUP,
 )
 from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
@@ -124,9 +133,11 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidBackupArchiveError,
     InvalidRetentionPolicyError,
     PluginReconcileIncompleteError,
+    ServerBusyError,
     ServerFileNotFoundError,
     ServerNotFoundError,
     ServerNotStoppedError,
+    StoreNotOwnedError,
     UnsupportedPluginServerTypeError,
     WorkingSetSeedFailedError,
 )
@@ -149,6 +160,7 @@ from mc_server_dashboard_api.servers.domain.server_properties import (
     apply_platform_properties,
     new_rcon_password,
 )
+from mc_server_dashboard_api.servers.domain.store_ownership import StoreOwnership
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -232,64 +244,115 @@ class CreateBackup:
                 # that snapshot, so archiving it now would miss it (issue #3998).
                 raise server.not_quiescent_error(BackupUnsettledError)
 
-            # Commit the metadata row BEFORE writing the archive (#1707): a crash
-            # after the row commit but before the archive write leaves a dangling
-            # row (detectable, self-healing via the lazy size backfill and health
-            # sweep), never an orphaned archive with no row to find it by. The
-            # storage_ref is pre-generated so the row can reference it before the
-            # archive exists; size_bytes starts NULL and is backfilled once the
-            # archive lands (the same lazy path legacy rows already use, #661).
+            # Write the archive BEFORE recording its row (issue #4086), so no row
+            # is recorded ahead of its archive. A failure after the write and
+            # before the row's COMMIT is sent deletes the archive again (best
+            # effort, :func:`_discard_archive`); after it, the archive is kept.
             storage_ref = uuid.uuid4().hex
-            backup = Backup(
-                id=BackupId.new(),
-                server_id=server_id,
-                storage_ref=storage_ref,
-                size_bytes=None,
-                source=source,
-                # Healthy by construction: ``create_from_current`` runs through the
-                # integrity gate (#749), which refuses to archive a corrupt working
-                # set — so reaching here means the archived contents were sound
-                # (#742).
-                health=BackupHealth.HEALTHY,
-                created_by=created_by,
-                created_at=self.clock.now(),
-            )
-            # The lock may have been lost during the snapshot (issue #3927). The row
-            # and the archive written right behind it are one guarded write; the
-            # check stays outside the compensation below, which must not run for
-            # a holder that knows it lost the lock.
+            created_at = self.clock.now()
+            # The lock may have been lost during the snapshot (issue #3927).
             await lock.ensure_held()
-            async with self.uow:
-                await self.uow.backups.add(backup)
-                await self.uow.commit()
             # Both the at-rest path and the running path (after the snapshot just
             # published) archive the authoritative copy (Section 6.9, FR-BAK-2).
-            # If the archive write fails, compensate by deleting the committed
-            # row so repeated failures (e.g. scheduler retries) do not accumulate
-            # dangling rows.
-            try:
-                await self.backup_store.create_from_current(
-                    community_id=community_id,
-                    server_id=server_id,
-                    storage_ref=storage_ref,
-                )
-            except Exception:
-                async with self.uow:
-                    await self.uow.backups.delete(backup.id)
-                    await self.uow.commit()
-                raise
-            # Record the archive size now that it exists (#281). The row was
-            # committed with NULL; update it in place.
-            size_bytes = await self.backup_store.size(
+            await self.backup_store.create_from_current(
                 community_id=community_id,
                 server_id=server_id,
                 storage_ref=storage_ref,
             )
-            backup.size_bytes = size_bytes
-            async with self.uow:
-                await self.uow.backups.update_size(backup.id, size_bytes)
-                await self.uow.commit()
+            commit_sent = False
+            try:
+                backup = Backup(
+                    id=BackupId.new(),
+                    server_id=server_id,
+                    storage_ref=storage_ref,
+                    size_bytes=await self.backup_store.size(
+                        community_id=community_id,
+                        server_id=server_id,
+                        storage_ref=storage_ref,
+                    ),
+                    source=source,
+                    # Healthy by construction: ``create_from_current`` runs through
+                    # the integrity gate (#749), which refuses to archive a corrupt
+                    # working set — so reaching here means the archived contents
+                    # were sound (#742).
+                    health=BackupHealth.HEALTHY,
+                    created_by=created_by,
+                    created_at=created_at,
+                )
+                # The archive write can take minutes; check again before the row.
+                await lock.ensure_held()
+                async with self.uow:
+                    # The savepoint sends the INSERT, so a refused one raises
+                    # here, before the COMMIT is sent.
+                    async with self.uow.savepoint():
+                        await self.uow.backups.add(backup)
+                    commit_sent = True
+                    await self.uow.commit()
+            except BaseException:
+                if commit_sent:
+                    _keep_unconfirmed_archive(backup)
+                else:
+                    await _discard_archive(
+                        self.backup_store,
+                        community_id=community_id,
+                        server_id=server_id,
+                        storage_ref=storage_ref,
+                    )
+                raise
             return backup
+
+
+async def _discard_archive(
+    backup_store: BackupArchiveStore,
+    *,
+    community_id: CommunityId,
+    server_id: ServerId,
+    storage_ref: str,
+) -> None:
+    """Delete an archive whose row was not recorded (issue #4086).
+
+    Only for a failure before the row's COMMIT is sent: after it the row may
+    stand, and :func:`_keep_unconfirmed_archive` keeps the archive. Best effort: a
+    delete that fails is logged and the caller's own failure is raised. The
+    archive left behind has no row, so no listing shows it, and the row-less
+    archive reclaim deletes it after its grace (issue #4106). It runs without a
+    lifecycle-lock check: the ref is new, so nothing else can be using the
+    archive.
+    """
+
+    try:
+        await backup_store.delete(
+            community_id=community_id,
+            server_id=server_id,
+            storage_ref=storage_ref,
+        )
+    except Exception:
+        _LOG.warning(
+            "could not delete the archive of a backup whose row was not recorded",
+            exc_info=True,
+            extra={"server_id": str(server_id.value), "storage_ref": storage_ref},
+        )
+
+
+def _keep_unconfirmed_archive(backup: Backup) -> None:
+    """Keep the archive of a row whose COMMIT was sent but not confirmed.
+
+    A COMMIT can apply and still raise: its answer lost with the connection, a
+    cancellation while awaiting it, or a failure leaving the block after it. The
+    row may stand, and deleting its archive would leave it without one, the row
+    issue #4086 removes. So the archive is kept and logged. If the COMMIT did not
+    apply, the archive has no row, so no listing shows it, and the row-less
+    archive reclaim deletes it after its grace (issue #4106).
+    """
+
+    _LOG.warning(
+        "kept the archive of a backup whose row commit was not confirmed",
+        extra={
+            "server_id": str(backup.server_id.value),
+            "storage_ref": backup.storage_ref,
+            "backup_id": str(backup.id.value),
+        },
+    )
 
 
 class _NullAuthorDirectory(BackupAuthorDirectory):
@@ -346,9 +409,9 @@ class ListBackups:
         async with self.uow:
             await _load(self.uow, community_id, server_id)
             rows = await self.uow.backups.list_for_server(server_id)
-            rows = await _backfill_null_sizes(
-                self.uow, self.backup_store, community_id, server_id, rows
-            )
+        rows = await _backfill_null_sizes(
+            self.uow, self.backup_store, community_id, server_id, rows
+        )
         author_ids = {row.created_by for row in rows if row.created_by is not None}
         usernames = await self.users.usernames_for(list(author_ids))
         return [
@@ -948,8 +1011,9 @@ class DeleteBackup:
     """Delete a backup's archive then its metadata row (backup:delete).
 
     Archive first, metadata last (see module docstring): a crash between the two
-    leaves a metadata row whose archive is gone (harmless, re-deletable), never an
-    orphaned archive with no row to find it by. Storage delete is idempotent.
+    leaves a metadata row whose archive is gone (re-deletable, but not harmless
+    until then), never an orphaned archive with no row to find it by. Storage
+    delete is idempotent.
     """
 
     uow: UnitOfWork
@@ -1000,9 +1064,12 @@ async def _delete_archive_then_row(
     The single delete path (epic #649 constraint): :class:`DeleteBackup` and the
     retention prune (:class:`PruneScheduledBackups`, issue #1841) both run
     through here, each under the per-server lifecycle lock it already holds.
+    The dangling-row repair (:class:`DeleteDanglingBackups`) deletes the row
+    only, of a backup whose archive the store reports missing (issue #4158).
     The archive delete is idempotent, so a crash between the two leaves a
-    harmless re-deletable dangling row, never an orphaned archive. Both run only
-    once ``lock`` confirms the lifecycle lock is still held (issue #3927).
+    re-deletable dangling row (not harmless until then, see the module
+    docstring), never an orphaned archive. Both run only once ``lock`` confirms
+    the lifecycle lock is still held (issue #3927).
     """
 
     await lock.ensure_held()
@@ -1024,6 +1091,15 @@ class PruneScheduledBackups:
     scheduled rows the pure :func:`backups_to_prune` selection names — manual /
     uploaded / event rows are never candidates. A server without a policy (or,
     defensively, with a malformed persisted one) is a no-op.
+
+    Before the selection ranks them, the scheduled rows with a NULL
+    ``size_bytes`` are sized the way the listing sizes them
+    (:func:`_backfill_null_sizes`, issue #4107), with no unit of work open, and
+    their sizes recorded: a legacy row whose archive exists then ranks as the
+    sized row it is. A row whose archive the store reports missing stays NULL,
+    so it ranks last. Any other store failure stops the prune before it selects
+    or deletes anything, with a WARNING that names the backup, rather than rank
+    on partial information; the next run retries.
 
     Runs under the same per-server :class:`LifecycleLock` that
     :class:`RestoreBackup` / :class:`DeleteBackup` hold, so a backup can never
@@ -1063,7 +1139,30 @@ class PruneScheduledBackups:
                     server_id.value,
                 )
                 return []
-            pruned = backups_to_prune(policy, rows, self.clock.now())
+            scheduled = [b for b in rows if b.source is BackupSource.SCHEDULED]
+            sizes: dict[BackupId, int] = {}
+            # One row at a time, so the WARNING names the backup the store
+            # failed on: the error itself may name no key (issue #4158).
+            for backup in scheduled:
+                try:
+                    sizes |= await _probe_null_sizes(
+                        self.backup_store, community_id, server_id, [backup]
+                    )
+                except Exception as exc:
+                    _LOG.warning(
+                        "retention prune of server %s stopped before selecting "
+                        "anything: NULL-size scheduled backup %s (storage_ref "
+                        "%s) could not be sized (%s: %s), and the ranking needs "
+                        "its size. The next run retries.",
+                        server_id.value,
+                        backup.id.value,
+                        backup.storage_ref,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    raise
+            await _record_sizes(self.uow, sizes)
+            pruned = backups_to_prune(policy, scheduled, self.clock.now())
             for backup in pruned:
                 await _delete_archive_then_row(
                     self.uow,
@@ -1094,6 +1193,168 @@ class PruneScheduledBackups:
                     )
                 )
             return pruned
+
+
+@dataclass(frozen=True)
+class DanglingBackups:
+    """What a :class:`DeleteDanglingBackups` pass found (issue #4107).
+
+    ``dangling`` holds the rows whose archive the store reported missing, which
+    an applied pass deleted. ``skipped_store_error`` holds the rows whose size
+    HEAD failed any other way, which got no verdict, and ``skipped_busy`` the
+    rows whose server's lifecycle lock stayed held past its wait budget. A
+    re-run checks both kinds of skipped row again.
+    """
+
+    servers_scanned: int
+    dangling: tuple[Backup, ...]
+    skipped_store_error: tuple[Backup, ...]
+    skipped_busy: tuple[Backup, ...]
+
+
+@dataclass(frozen=True)
+class DeleteDanglingBackups:
+    """List, and with ``apply`` delete, backup rows whose archive is gone (#4107).
+
+    A dangling row is one whose archive HEAD (the store's ``size``) answers
+    NotFound. Such a row is listed as a backup but cannot be downloaded or
+    restored; the #4086 leak left them, and nothing else removes them. Every row
+    of every server (or of ``server_id``'s) is checked, whatever its size.
+
+    Each row is checked under its server's lifecycle lock, taken per row as the
+    integrity sweep takes it (issue #3220): a delete holds the lock from its
+    archive removal to its row removal, so under it a row is never seen
+    mid-delete. The row is re-read under the lock, so one deleted since the
+    listing is passed over. A row whose lock stays busy past the wait budget is
+    skipped. Only a NotFound answer is a verdict: a HEAD that fails any other
+    way (an outage, a timeout, a 5xx) skips the row, which is never deleted on
+    it.
+
+    With ``apply``, each dangling row is deleted in the same hold, once the
+    lock is confirmed still held. Only the row is deleted; the store is sent no
+    archive delete (issue #4158). A true dangling row has no archive to delete,
+    and a NotFound that was false, from a store that flapped, would take the
+    real archive with the row. A false one instead leaves the archive in the
+    store with no row: no listing shows it, and the row-less archive reclaim
+    deletes it once it is older than the grace (issue #4106). The grace counts
+    from the archive's write, so an old backup's archive goes at the next pass.
+    Each deletion is audited post-commit as ``backup:delete_dangling`` with
+    ``actor_id``, ``None`` when run headless, as the sweep audits its verdicts.
+
+    Before each deletion, in the same hold, ``ownership`` is asked whether the
+    store is still this database's (STORAGE.md Section 4.3). A store that stops
+    being it mid-pass, an fs root whose mount drops or a bucket that goes,
+    answers NotFound for every later HEAD, whether the archive exists or not.
+    A refusal stops the pass with :class:`StoreNotOwnedError`; the rows already
+    deleted stay deleted.
+    """
+
+    uow: UnitOfWork
+    backup_store: BackupArchiveStore
+    audit: AuditRecorder
+    ownership: StoreOwnership
+    lifecycle_lock: LifecycleLock = NullLifecycleLock()
+
+    async def __call__(
+        self,
+        *,
+        apply: bool,
+        server_id: ServerId | None = None,
+        actor_id: uuid.UUID | None = None,
+    ) -> DanglingBackups:
+        async with self.uow:
+            if server_id is None:
+                servers = await self.uow.servers.list_all()
+            else:
+                found = await self.uow.servers.get_by_id(server_id)
+                servers = [] if found is None else [found]
+        dangling: list[Backup] = []
+        skipped_store_error: list[Backup] = []
+        skipped_busy: list[Backup] = []
+        for server in servers:
+            async with self.uow:
+                rows = await self.uow.backups.list_for_server(server.id)
+            for listed in rows:
+                try:
+                    async with self.lifecycle_lock.hold(server.id) as lock:
+                        async with self.uow:
+                            backup = await self.uow.backups.get_by_id(listed.id)
+                        if backup is None:
+                            continue
+                        try:
+                            await self.backup_store.size(
+                                community_id=server.community_id,
+                                server_id=server.id,
+                                storage_ref=backup.storage_ref,
+                            )
+                        except BackupNotFoundError:
+                            pass
+                        except Exception:  # noqa: BLE001 - no answer is no verdict
+                            _LOG.warning(
+                                "dangling backups: backup %s of server %s skipped: "
+                                "the store could not say whether its archive "
+                                "exists; re-run once the store is healthy",
+                                backup.id.value,
+                                server.id.value,
+                                exc_info=True,
+                            )
+                            skipped_store_error.append(backup)
+                            continue
+                        else:
+                            continue  # the archive exists
+                        dangling.append(backup)
+                        if apply:
+                            await self._delete(lock, server, backup, actor_id)
+                except ServerBusyError:
+                    _LOG.info(
+                        "dangling backups: backup %s skipped, server %s is busy "
+                        "(another lifecycle operation holds it); re-run to "
+                        "check it",
+                        listed.id.value,
+                        server.id.value,
+                    )
+                    skipped_busy.append(listed)
+        return DanglingBackups(
+            servers_scanned=len(servers),
+            dangling=tuple(dangling),
+            skipped_store_error=tuple(skipped_store_error),
+            skipped_busy=tuple(skipped_busy),
+        )
+
+    async def _delete(
+        self,
+        lock: HeldLifecycleLock,
+        server: Server,
+        backup: Backup,
+        actor_id: uuid.UUID | None,
+    ) -> None:
+        # A store that stops being this database's mid-pass answers NotFound for
+        # every later HEAD, so the marker is checked again before each deletion.
+        refusal = await self.ownership.refusal()
+        if refusal is not None:
+            raise StoreNotOwnedError(refusal)
+        # The row only: a NotFound that was false, from a store that flapped,
+        # would take the real archive with the row (issue #4158).
+        await lock.ensure_held()
+        async with self.uow:
+            await self.uow.backups.delete(backup.id)
+            await self.uow.commit()
+        _LOG.info(
+            "dangling backups: deleted backup %s of server %s, whose archive the "
+            "store reports missing",
+            backup.id.value,
+            server.id.value,
+        )
+        await self.audit.record(
+            AuditEvent(
+                operation=BACKUP_DELETE_DANGLING,
+                outcome=Outcome.SUCCESS,
+                actor_id=actor_id,
+                community_id=server.community_id.value,
+                target_type=TARGET_BACKUP,
+                target_id=backup.id.value,
+            )
+        )
 
 
 @dataclass(frozen=True)
@@ -1379,19 +1640,19 @@ class UploadBackup:
             max_decompressed_bytes=self.max_decompressed_bytes,
         )
 
-        # Hold the per-server lifecycle lock across the server check, the row
-        # commit and the archive write, as CreateBackup does (issue #3219). Without
-        # it a DeleteServer / DeleteBackup landing between the commit and the write
-        # removes the row, and the write then lands an archive no delete saw while
-        # this returns a backup that no longer exists. The body is already fully
-        # received, so the lock never waits on the client's network.
+        # Hold the per-server lifecycle lock across the server check, the archive
+        # write and the row commit, as CreateBackup does (issue #3219). Without it
+        # a DeleteServer landing between the check and the write prunes the
+        # server's storage and removes it, and the write then lands an archive no
+        # delete saw. The body is already fully received, so the lock never waits
+        # on the client's network.
         async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 await _load(self.uow, community_id, server_id)
 
-            # Commit the metadata row BEFORE writing the archive (#1707): same
-            # ordering rationale as CreateBackup — a dangling row is detectable and
-            # self-healing, an orphaned archive is not.
+            # Store the archive BEFORE recording its row, as CreateBackup does
+            # (issue #4086). The archive is stored verbatim, so its size is the
+            # body's and needs no read back.
             storage_ref = uuid.uuid4().hex
             backup = Backup(
                 id=BackupId.new(),
@@ -1406,24 +1667,35 @@ class UploadBackup:
                 created_by=created_by,
                 created_at=self.clock.now(),
             )
-            # One guarded write for the row and the archive behind it, checked
-            # outside the compensation below, as in CreateBackup (issue #3927).
+            # Each guarded write is checked right before it, as in CreateBackup
+            # (issue #3927).
             await lock.ensure_held()
-            async with self.uow:
-                await self.uow.backups.add(backup)
-                await self.uow.commit()
-            # If the store write fails, compensate by deleting the committed row.
+            await self.backup_store.store(
+                community_id=community_id,
+                server_id=server_id,
+                stream=_chunked(content),
+                storage_ref=storage_ref,
+            )
+            commit_sent = False
             try:
-                await self.backup_store.store(
-                    community_id=community_id,
-                    server_id=server_id,
-                    stream=_chunked(content),
-                    storage_ref=storage_ref,
-                )
-            except Exception:
+                await lock.ensure_held()
                 async with self.uow:
-                    await self.uow.backups.delete(backup.id)
+                    # As in CreateBackup: a refused INSERT raises before the
+                    # COMMIT is sent.
+                    async with self.uow.savepoint():
+                        await self.uow.backups.add(backup)
+                    commit_sent = True
                     await self.uow.commit()
+            except BaseException:
+                if commit_sent:
+                    _keep_unconfirmed_archive(backup)
+                else:
+                    await _discard_archive(
+                        self.backup_store,
+                        community_id=community_id,
+                        server_id=server_id,
+                        storage_ref=storage_ref,
+                    )
                 raise
             return backup
 
@@ -1454,9 +1726,9 @@ class ServerBackupStatistics:
         async with self.uow:
             await _load(self.uow, community_id, server_id)
             rows = await self.uow.backups.list_for_server(server_id)
-            rows = await _backfill_null_sizes(
-                self.uow, self.backup_store, community_id, server_id, rows
-            )
+        rows = await _backfill_null_sizes(
+            self.uow, self.backup_store, community_id, server_id, rows
+        )
         return _aggregate(rows)
 
 
@@ -1486,14 +1758,19 @@ async def _backfill_null_sizes(
 ) -> list[Backup]:
     """Compute + persist ``size_bytes`` for legacy NULL rows whose archive exists.
 
-    The lazy backfill on read (issue #661). Only NULL-size rows trigger a store
-    call, and the persisted value makes it one-time per row. Runs inside the
-    caller's open unit of work; the returned ``rows`` carry any computed size so
-    the listing/total reflect it immediately.
+    The lazy backfill on read (issue #661), whose two halves the retention prune
+    also runs before it ranks (issue #4107). Only NULL-size rows trigger a store
+    call, and the persisted value makes it one-time per row. The caller has
+    closed its unit of work: each store call is a HEAD that can take as long as
+    the store's timeouts allow, so none runs with a session open, which would
+    keep a pool connection checked out for that long (issue #4107). The sizes
+    are then written in a short unit of work of their own, opened only when
+    there is one to write. The returned ``rows`` carry any computed size so the
+    listing/total reflect it immediately.
 
-    **Only a missing archive is tolerated** (``BackupNotFoundError``, the
-    dangling-row case create is designed to leave behind): that row keeps its NULL
-    size and the remaining rows are still backfilled. **Everything else propagates
+    **Only a missing archive is tolerated** (``BackupNotFoundError``, a row left
+    dangling before creates wrote the archive first, issue #4086): its NULL size
+    stays and the remaining rows are still backfilled. **Everything else propagates
     and fails the read** (issue #2405), where a bare ``except Exception`` used to
     degrade it to a success with null sizes. A null size is indistinguishable from a
     genuinely unrecorded one, so nothing in a degraded response identified it as
@@ -1514,7 +1791,24 @@ async def _backfill_null_sizes(
     covers closing that gap for all of them at once.
     """
 
-    changed = False
+    await _record_sizes(
+        uow, await _probe_null_sizes(backup_store, community_id, server_id, rows)
+    )
+    return rows
+
+
+async def _probe_null_sizes(
+    backup_store: BackupArchiveStore,
+    community_id: CommunityId,
+    server_id: ServerId,
+    rows: list[Backup],
+) -> dict[BackupId, int]:
+    """HEAD each NULL-size row, set the size on the row, and return the sizes.
+
+    The store half of :func:`_backfill_null_sizes`, run with no unit of work open.
+    """
+
+    sizes: dict[BackupId, int] = {}
     for row in rows:
         if row.size_bytes is None:
             try:
@@ -1525,12 +1819,21 @@ async def _backfill_null_sizes(
                 )
             except BackupNotFoundError:
                 continue
-            await uow.backups.update_size(row.id, size_bytes)
-            row.size_bytes = size_bytes
-            changed = True
-    if changed:
-        await uow.commit()
-    return rows
+            row.size_bytes = sizes[row.id] = size_bytes
+    return sizes
+
+
+async def _record_sizes(uow: UnitOfWork, sizes: dict[BackupId, int]) -> None:
+    """Write ``sizes`` in a short unit of work, opened only when there is one.
+
+    The database half of :func:`_backfill_null_sizes`.
+    """
+
+    if sizes:
+        async with uow:
+            for backup_id, size_bytes in sizes.items():
+                await uow.backups.update_size(backup_id, size_bytes)
+            await uow.commit()
 
 
 def _aggregate(rows: list[Backup]) -> BackupStatistics:

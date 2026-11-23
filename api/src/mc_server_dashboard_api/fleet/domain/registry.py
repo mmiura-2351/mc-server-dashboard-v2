@@ -61,6 +61,11 @@ class WorkerSnapshot:
     # The instant ``status`` first read OFFLINE, or ``None`` while the Worker is
     # live (``Worker.offline_since``, issue #3963).
     offline_since: dt.datetime | None
+    # The instant the Worker's current session ended, as its teardown or the
+    # refusal of its registration marked it disconnected, or ``None`` while
+    # that session is current: a heartbeat lapse alone does not set it
+    # (``Worker.disconnected_at``, issue #4130).
+    disconnected_at: dt.datetime | None
     assigned_count: int
 
 

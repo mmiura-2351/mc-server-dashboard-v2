@@ -8,8 +8,9 @@ attempt.
 
 A COMMIT whose answer is lost with its connection fails the attempt as an
 outage although it applied (issue #4062). The held retry then finds the row
-already at the reported state, or already released, and still publishes the
-frame the lost attempt would have published.
+already at the reported state, or already released, or holding the refusal it
+records (issue #4104), and still publishes the frame the lost attempt would have
+published.
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set; skipped otherwise (TESTING.md
 Section 5). The real sinks write through a proxy that holds back the COMMIT's
@@ -47,13 +48,28 @@ from mc_server_dashboard_api.servers.adapters.late_snapshot_result_sink import (
 from mc_server_dashboard_api.servers.adapters.server_state_sink import (
     ServersServerStateSink,
 )
+from mc_server_dashboard_api.servers.adapters.unit_of_work import (
+    SqlAlchemyUnitOfWork,
+)
+from mc_server_dashboard_api.servers.application.lifecycle import StopServer
 from mc_server_dashboard_api.servers.application.stop_convergence import (
     StopConvergenceGuard,
+)
+from mc_server_dashboard_api.servers.application.unannounced_refusals import (
+    UnannouncedRefusals,
 )
 from mc_server_dashboard_api.servers.application.unrecorded_stops import (
     UnrecordedStops,
 )
-from mc_server_dashboard_api.servers.domain.value_objects import ObservedState
+from mc_server_dashboard_api.servers.domain.control_plane import (
+    CommandOutcome,
+    CommandStatus,
+)
+from mc_server_dashboard_api.servers.domain.errors import FinalSnapshotRefusedError
+from mc_server_dashboard_api.servers.domain.value_objects import (
+    FinalSnapshotRefusal,
+    ObservedState,
+)
 from mcsd.controlplane.v1 import control_plane_pb2 as pb
 from tests.fleet.fakes import FakeClock, FakeDatabasePing
 from tests.fleet.test_grpc_session import (
@@ -164,7 +180,7 @@ async def test_a_commit_answered_after_the_deadline_still_reaches_subscribers(
     watching = world.watch(server)
     h = _Harness(
         InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
-        FakeClock(_T0),
+        world.fleet_clock(),
         state_sink=_RealWriteSink(sink),
         database_ping=FakeDatabasePing(reachable=True),
     )
@@ -178,6 +194,8 @@ async def test_a_commit_answered_after_the_deadline_still_reaches_subscribers(
         await call.done_writing()
     finally:
         await h.stop()
+        if h.servicer is not None:
+            await h.servicer.drain_teardowns()
         await engine.dispose()
         listener.close()
         for writer in proxy.writers:
@@ -295,7 +313,7 @@ async def test_a_report_whose_commit_answer_was_lost_reaches_subscribers(
         )
         h = _Harness(
             InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
-            FakeClock(_T0),
+            world.fleet_clock(),
             state_sink=_RealWriteSink(sink),
             database_ping=FakeDatabasePing(reachable=True),
         )
@@ -329,7 +347,7 @@ async def test_a_repeated_report_through_the_servicer_publishes_nothing(
     watching = world.watch(server)
     h = _Harness(
         InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
-        FakeClock(_T0),
+        world.fleet_clock(),
         state_sink=_RealWriteSink(world.sink()),
     )
     try:
@@ -367,6 +385,7 @@ async def test_a_late_snapshot_release_whose_commit_answer_was_lost_is_announced
                 clock=world.clock,
                 stop_convergence=StopConvergenceGuard(),
                 unrecorded_stops=UnrecordedStops(),
+                unannounced_refusals=UnannouncedRefusals(),
                 real_time_events=world.bus,
             )
         )
@@ -420,6 +439,7 @@ async def test_a_retry_that_changes_the_state_publishes_one_frame(
         worker_id=_WORKER_ID,
         state="running",
         retry=True,
+        observed_at=world.clock.now(),
     )
 
     assert [event.payload for event in await _received(watching)] == [
@@ -442,6 +462,7 @@ async def test_a_retry_that_makes_the_release_publishes_one_frame(
         clock=world.clock,
         stop_convergence=StopConvergenceGuard(),
         unrecorded_stops=UnrecordedStops(),
+        unannounced_refusals=UnannouncedRefusals(),
         real_time_events=world.bus,
     )
     watching = world.watch(server)
@@ -451,6 +472,7 @@ async def test_a_retry_that_makes_the_release_publishes_one_frame(
         worker_id=_WORKER_ID,
         code=CommandResultCode.OK,
         message=None,
+        received_at=world.clock.now(),
         retry=True,
     )
 
@@ -477,6 +499,7 @@ async def test_a_retry_leaves_a_row_another_worker_holds(
         clock=world.clock,
         stop_convergence=StopConvergenceGuard(),
         unrecorded_stops=UnrecordedStops(),
+        unannounced_refusals=UnannouncedRefusals(),
         real_time_events=world.bus,
     )
     watching = world.watch(server)
@@ -486,6 +509,7 @@ async def test_a_retry_leaves_a_row_another_worker_holds(
         worker_id=_WORKER_ID,
         code=CommandResultCode.TRANSFER_FAILED,
         message="upload aborted by transfer bound",
+        received_at=world.clock.now(),
         retry=True,
     )
 
@@ -494,3 +518,170 @@ async def test_a_retry_leaves_a_row_another_worker_holds(
     assert row.assigned_worker_id.value == holder
     assert await _received(watching) == []
     assert _late_releases(caplog) == []
+
+
+# --- A retry of a late refusal after a lost COMMIT answer (issue #4104) -------
+
+_BUSY_REFUSAL = {"final_snapshot_refusal": "busy"}
+
+
+def _late_sink(world: _World) -> ServersLateSnapshotResultSink:  # noqa: F811
+    return ServersLateSnapshotResultSink(
+        create_session_factory(world.engine),
+        control_plane=FakeControlPlane(),
+        clock=world.clock,
+        stop_convergence=StopConvergenceGuard(),
+        unrecorded_stops=UnrecordedStops(),
+        unannounced_refusals=UnannouncedRefusals(),
+        real_time_events=world.bus,
+    )
+
+
+async def _late_refusal(
+    sink: ServersLateSnapshotResultSink, server_id: str, *, retry: bool
+) -> None:
+    await sink.clear_held_assignment_on_late_snapshot(
+        server_id=server_id,
+        worker_id=_WORKER_ID,
+        code=CommandResultCode.BUSY,
+        message="a leftover container may still run",
+        received_at=_T0,
+        retry=retry,
+    )
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_late_refusal_whose_commit_answer_was_lost_is_announced(
+    world: _World,  # noqa: F811
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The first attempt recorded the refusal, and its answer was lost. The held
+    # retry finds the refusal recorded and still announces it, so the live page
+    # shows the hold without a reload.
+    caplog.set_level(logging.INFO, logger=_GRPC_SERVER_LOGGER)
+    server = await _wedged_stop(world, uuid.UUID(_WORKER_ID), "stopped")
+    watching = world.watch(server)
+    async with _first_commit_answer_lost() as (proxy, engine):
+        state = ControlPlaneState(
+            late_snapshot_sink=ServersLateSnapshotResultSink(
+                create_session_factory(engine),
+                control_plane=FakeControlPlane(),
+                clock=world.clock,
+                stop_convergence=StopConvergenceGuard(),
+                unrecorded_stops=UnrecordedStops(),
+                unannounced_refusals=UnannouncedRefusals(),
+                real_time_events=world.bus,
+            )
+        )
+        h = _Harness(
+            InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+            FakeClock(_T0),
+            control_plane=state,
+            database_ping=FakeDatabasePing(reachable=True),
+        )
+        try:
+            call = await _registered(await h.start())
+            # An abandoned final snapshot of this session, as above.
+            state.register_pending(
+                "snapshot-1",
+                WorkerId(_WORKER_ID),
+                snapshot_server_id=str(server.id.value),
+            )
+            state.discard_pending("snapshot-1")
+            await call.write(
+                pb.WorkerMessage(
+                    correlation_id="snapshot-1",
+                    command_result=pb.CommandResult(
+                        success=False,
+                        error=pb.CommandError(code=pb.COMMAND_ERROR_CODE_BUSY),
+                    ),
+                )
+            )
+            await _wait_until(
+                lambda: _logged(caplog, _HOLD_APPLIED), "the result was not applied"
+            )
+            frames = [event.payload for event in await _received(watching)]
+            await call.done_writing()
+        finally:
+            await h.stop()
+
+    row = await _load(world.engine, server.id)
+    assert row is not None and row.assigned_worker_id is not None
+    assert row.assigned_worker_id.value == uuid.UUID(_WORKER_ID)
+    assert row.final_snapshot_refusal is FinalSnapshotRefusal.BUSY
+    assert proxy.cuts == 1
+    assert _applied_attempts(caplog) == [2]
+    assert frames == [_BUSY_REFUSAL]
+
+
+async def test_a_first_late_refusal_the_row_already_holds_publishes_nothing(
+    world: _World,  # noqa: F811
+) -> None:
+    # A first attempt is no retry: a late refusal that finds the same refusal
+    # recorded changes nothing and stages no frame.
+    server = await _wedged_stop(world, uuid.UUID(_WORKER_ID), "stopped")
+    sink = _late_sink(world)
+    await _late_refusal(sink, str(server.id.value), retry=False)
+    watching = world.watch(server)
+
+    await _late_refusal(sink, str(server.id.value), retry=False)
+
+    assert await _received(watching) == []
+
+
+async def test_a_retry_that_records_the_refusal_publishes_one_frame(
+    world: _World,  # noqa: F811
+) -> None:
+    # The refusal a retry repeats did not land: the retry records it, and
+    # stages its one frame, not a second for being a retry.
+    server = await _wedged_stop(world, uuid.UUID(_WORKER_ID), "stopped")
+    watching = world.watch(server)
+
+    await _late_refusal(_late_sink(world), str(server.id.value), retry=True)
+
+    assert [event.payload for event in await _received(watching)] == [_BUSY_REFUSAL]
+    row = await _load(world.engine, server.id)
+    assert row is not None
+    assert row.final_snapshot_refusal is FinalSnapshotRefusal.BUSY
+
+
+# --- An in-time refusal after a lost COMMIT answer (issue #4152) --------------
+
+
+async def test_an_in_time_refusal_whose_commit_answer_was_lost_is_announced_once(
+    world: _World,  # noqa: F811
+) -> None:
+    # The stale-stop arm's snapshot is refused, and the COMMIT of the refusal it
+    # records lands with its answer lost: nothing is published. The next
+    # refused attempt finds the refusal recorded and announces it all the same,
+    # and the one after it publishes nothing.
+    server = await _wedged_stop(world, uuid.UUID(_WORKER_ID), "stopped")
+    frames: list[list[object]] = []
+    async with _first_commit_answer_lost() as (proxy, engine):
+        stop = StopServer(
+            uow=SqlAlchemyUnitOfWork(create_session_factory(engine), world.bus),
+            control_plane=FakeControlPlane(
+                outcomes={"snapshot": CommandOutcome(status=CommandStatus.BUSY)}
+            ),
+            clock=world.clock,
+        )
+        for attempt in range(3):
+            watching = world.watch(server)
+            with pytest.raises(FinalSnapshotRefusedError):
+                await stop.clear_stale_assignment(
+                    community_id=world.community,
+                    server_id=server.id,
+                    worker_connected=True,
+                )
+            frames.append([event.payload for event in await _received(watching)])
+            if attempt == 0:
+                # The cut answer was the refusal's COMMIT, which landed.
+                assert proxy.cuts == 1
+                row = await _load(world.engine, server.id)
+                assert row is not None
+                assert row.final_snapshot_refusal is FinalSnapshotRefusal.BUSY
+
+    assert frames == [[], [_BUSY_REFUSAL], []]
+    row = await _load(world.engine, server.id)
+    assert row is not None and row.assigned_worker_id is not None
+    assert row.assigned_worker_id.value == uuid.UUID(_WORKER_ID)
