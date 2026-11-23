@@ -211,7 +211,7 @@ jobs:
           printf '{"identities":[{"name":"ci","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","Write","List","Tagging"]}]}' \
             mcsdaccess mcsdsecret > "$RUNNER_TEMP/seaweedfs/s3.json"
 
-          # chrislusf/seaweedfs:4.53 (pushed 2026-11-08, outside the cooldown) —
+          # chrislusf/seaweedfs:4.54 (pushed 2026-11-16, outside the cooldown) —
           # the version compose.yaml pins, so CI exercises the backend the
           # deployment actually runs. Digest-pinned per docs/dev/DEPENDENCIES.md
           # (pinning + 7-day cooldown). Dependabot cannot see a digest pinned
@@ -225,7 +225,7 @@ jobs:
           docker run -d --name seaweedfs -p 127.0.0.1:8333:8333 \
             -v "$RUNNER_TEMP/seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro" \
             --entrypoint weed \
-            chrislusf/seaweedfs@sha256:ccad23e18639c8b98cee17e7100b95830a06077b56d8e5b006d6dcf8ec5e94a0 \
+            chrislusf/seaweedfs@sha256:4b42c212543a0acd4c0e675215ecdcaf62a186ef98def76c7e12701871222d15 \
             server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
 
           # /status returns 200 once the S3 gateway is serving (no auth needed) —
