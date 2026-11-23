@@ -229,13 +229,15 @@ export function useServerEvents(
     setStatusDetail("");
     const key = serverKey(communityId, serverId);
 
-    // The live observed and desired states, assignment, last crash and
-    // whether the reconciler leaves it alone, not yet superseded by a REST
-    // read, each stamped with when it was received (#3213). They are stamped
-    // apart, as different frames carry them (#3428, #3818, #3281).
+    // The live observed and desired states, assignment, final-snapshot
+    // refusal, last crash and whether the reconciler leaves it alone, not yet
+    // superseded by a REST read, each stamped with when it was received
+    // (#3213). They are stamped apart, as different frames carry them (#3428,
+    // #3818, #4054, #3281).
     let observed: { value: string; at: number } | null = null;
     let desired: { value: string; at: number } | null = null;
     let assigned: { value: string | null; at: number } | null = null;
+    let refusal: { value: string | null; at: number } | null = null;
     let crash: { value: Crash; at: number } | null = null;
     let notRestarted: { value: boolean; at: number } | null = null;
 
@@ -251,6 +253,7 @@ export function useServerEvents(
           | "observed_state"
           | "desired_state"
           | "assigned_worker_id"
+          | "final_snapshot_refusal"
           | "crash_reason"
           | "crash_detail"
           | "crash_not_restarted"
@@ -282,6 +285,9 @@ export function useServerEvents(
         if (assigned !== null && assigned.at < readStartedAt) {
           assigned = null;
         }
+        if (refusal !== null && refusal.at < readStartedAt) {
+          refusal = null;
+        }
         if (crash !== null && crash.at < readStartedAt) {
           crash = null;
         }
@@ -292,6 +298,7 @@ export function useServerEvents(
           ...(observed !== null && { observed_state: observed.value }),
           ...(desired !== null && { desired_state: desired.value }),
           ...(assigned !== null && { assigned_worker_id: assigned.value }),
+          ...(refusal !== null && { final_snapshot_refusal: refusal.value }),
           ...(crash !== null && crashFields(crash.value)),
           ...(notRestarted !== null && {
             crash_not_restarted: notRestarted.value,
@@ -310,6 +317,14 @@ export function useServerEvents(
     const applyAssigned = (workerId: string | null) => {
       assigned = { value: workerId, at: stamp() };
       patch({ assigned_worker_id: workerId });
+    };
+
+    // Why the Worker a stop still holds refused its final snapshot, or `null`
+    // once it is released (#4054): the held notice and the release without
+    // the snapshot follow it (#4057).
+    const applyRefusal = (value: string | null) => {
+      refusal = { value, at: stamp() };
+      patch({ final_snapshot_refusal: value });
     };
 
     // The last crash (#3281), which the crash banner explains: a crashed
@@ -357,6 +372,9 @@ export function useServerEvents(
         if (frame.assignedWorkerId !== undefined) {
           applyAssigned(frame.assignedWorkerId);
         }
+        if (frame.finalSnapshotRefusal !== undefined) {
+          applyRefusal(frame.finalSnapshotRefusal);
+        }
         if (frame.state !== undefined) {
           applyState(frame.state);
           // The API stores this report's reason and detail as the last
@@ -379,6 +397,9 @@ export function useServerEvents(
         }
         if (frame.assignedWorkerId !== undefined) {
           applyAssigned(frame.assignedWorkerId);
+        }
+        if (frame.finalSnapshotRefusal !== undefined) {
+          applyRefusal(frame.finalSnapshotRefusal);
         }
         applyState(frame.state);
         if (frame.crash !== undefined) {

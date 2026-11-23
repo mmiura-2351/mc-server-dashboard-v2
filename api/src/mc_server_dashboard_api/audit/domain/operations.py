@@ -129,6 +129,12 @@ SNAPSHOT_QUARANTINE: Final = "snapshot:quarantine"
 # world can still be force-restored, an unreadable archive cannot — so the trail
 # keeps them queryable apart. Same actor and target rules as above.
 BACKUP_MARK_UNREADABLE: Final = "backup:mark_unreadable"
+# The same command, run with ``--delete-dangling --apply``, deleting a backup row
+# whose archive the store reports missing (issue #4107). A separate operation
+# from ``backup:delete`` because that one, with no actor, is also what a
+# retention prune writes, and this code is what names the operator's repair in
+# the trail. Same actor and target rules as above.
+BACKUP_DELETE_DANGLING: Final = "backup:delete_dangling"
 
 # File upload / download / rename / delete / mkdir / search (FR-FILE-*, issue
 # #259) plus write / rollback (issue #263). Recorded under the file:edit /

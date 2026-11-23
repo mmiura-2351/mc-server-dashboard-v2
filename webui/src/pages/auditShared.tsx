@@ -58,6 +58,8 @@ const OPERATION_LABEL_KEY: Record<string, TranslationKey> = {
   "server:stop": "communitySettings.audit.op.server:stop",
   "server:restart": "communitySettings.audit.op.server:restart",
   "server:command": "communitySettings.audit.op.server:command",
+  "server:release_without_snapshot":
+    "communitySettings.audit.op.server:release_without_snapshot",
   "server:export": "communitySettings.audit.op.server:export",
   "server:import": "communitySettings.audit.op.server:import",
   "backup:create": "communitySettings.audit.op.backup:create",

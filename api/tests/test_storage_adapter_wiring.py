@@ -56,7 +56,7 @@ async def test_the_app_builds_one_storage_adapter_for_every_caller(
 
     swept: list[object] = []
 
-    async def _capture(sweep: object, *, tick_seconds: float) -> None:
+    async def _capture(sweep: object, **_kwargs: object) -> None:
         swept.append(sweep)
 
     _use_backend(backend, tmp_path, monkeypatch)

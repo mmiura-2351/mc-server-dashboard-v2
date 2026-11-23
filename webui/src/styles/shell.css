@@ -913,6 +913,13 @@ body.col-resizing {
 .crash-detail-label {
   font-weight: 600;
 }
+/* A stop's Worker refused the final snapshot and holds the server (#4057). */
+.held-notice {
+  font-size: 12px;
+  color: var(--amber);
+  margin-top: calc(-1 * var(--space-2));
+  margin-bottom: var(--space-2);
+}
 .install-log-view {
   margin: 4px 0 0;
   color: var(--text);
@@ -1238,6 +1245,27 @@ button.link:focus-visible {
   align-items: center;
   gap: 10px;
   margin-bottom: 14px;
+}
+/* Keep-all retention warning on the Backups and Schedules tabs (#4084). */
+.unbounded-backups-warning {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+  padding: 8px 12px;
+  border: 1px solid var(--pill-transition-border);
+  border-radius: var(--radius-sm);
+  background: var(--pill-transition-bg);
+  color: var(--amber);
+  font-size: 13px;
+}
+/* The schedule dialog's retention step: what keep-last N deletes at once
+ * (#4084), above the acknowledgement that gates Create. */
+.schedule-prune-warning {
+  margin: 0 0 4px;
+  font-size: 12px;
+  color: var(--red);
 }
 /* Scheduled-backup settings card: the moved-to-Schedules note plus the
  * retention policy editor (#1843), both backup:schedule-gated. */

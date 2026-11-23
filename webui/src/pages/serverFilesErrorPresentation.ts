@@ -44,6 +44,10 @@ export function fileOperationErrorPresentation(
           return { key: "files.error.serverMustBeStopped" };
         case "server_busy":
           return { key: "files.error.serverBusy" };
+        // A write the stop's Worker still holds the server for (#3998):
+        // waiting for the release is the remedy, not stopping it (#4003).
+        case "server_assigned":
+          return { key: "common.serverAssigned" };
         default:
           return { key: "files.error.conflict" };
       }
@@ -140,6 +144,22 @@ export function fileSaveErrorPresentation(
     default:
       return undefined;
   }
+}
+
+/**
+ * Select the toast a failed rollback shows in place of the operation's, or
+ * `undefined` when it shows the operation's (issue #4147). A rollback refused
+ * because the server is not stopped names the rollback, not the upload and
+ * folder writes the operation's wording is about.
+ */
+export function fileRollbackErrorPresentation(
+  error: unknown,
+): FileErrorPresentation | undefined {
+  return error instanceof ApiError &&
+    error.status === 409 &&
+    error.reason === "server_not_stopped"
+    ? { key: "files.error.rollbackServerMustBeStopped" }
+    : undefined;
 }
 
 /**

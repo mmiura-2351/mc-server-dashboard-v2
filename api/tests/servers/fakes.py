@@ -7,6 +7,7 @@ with`` blocks and tracks commits.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import io
 import uuid
@@ -35,6 +36,7 @@ from mc_server_dashboard_api.servers.domain.backup_repository import (
 from mc_server_dashboard_api.servers.domain.backup_store import (
     BackupArchiveStore,
     SnapshotScan,
+    StoredArchive,
 )
 from mc_server_dashboard_api.servers.domain.bedrock_tunnel import BedrockTunnelSync
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
@@ -1150,16 +1152,18 @@ class FakeServerRepository(ServerRepository):
         self,
         server_id: ServerId,
         worker_id: WorkerId,
-        refusal: FinalSnapshotRefusal | None,
+        refusal: FinalSnapshotRefusal,
+        *,
+        retry: bool = False,
     ) -> bool:
         # Mirror the real adapter's guard (issue #4054): only a stop still
-        # holding worker_id, and only a change counts.
+        # holding worker_id, and only a change counts, unless a retry (#4104).
         server = self.by_id.get(server_id)
         if (
             server is None
             or server.desired_state is not DesiredState.STOPPED
             or server.assigned_worker_id != worker_id
-            or server.final_snapshot_refusal is refusal
+            or (server.final_snapshot_refusal is refusal and not retry)
         ):
             return False
         server.final_snapshot_refusal = refusal
@@ -1179,6 +1183,15 @@ class FakeServerRepository(ServerRepository):
             elif server.desired_state is DesiredState.STOPPED:
                 # A crash under a stopped intent keeps its crash, stamped anew.
                 server.observed_at = observed_at
+
+    async def workers_with_trusted_observed_state(self) -> set[WorkerId]:
+        return {
+            server.assigned_worker_id
+            for server in self.by_id.values()
+            if server.assigned_worker_id is not None
+            and server.observed_state
+            not in (ObservedState.UNKNOWN, ObservedState.CRASHED)
+        }
 
     async def reset_unverifiable_observed_states(self, observed_at: dt.datetime) -> int:
         non_terminal = (
@@ -1294,6 +1307,34 @@ class ClearCreationFailsRepository(FakeServerRepository):
         if self._errors:
             raise self._errors.pop(0)
         await super().clear_creation_incomplete(server_id)
+
+
+class RefusalWriteFailsRepository(FakeServerRepository):
+    """Fails the write that records a final-snapshot refusal with each of
+    ``errors`` in turn, then makes it (issue #4103), counting every attempt.
+    ``refusal_retries`` is each attempt's ``retry`` (issue #4152)."""
+
+    def __init__(self, *errors: Exception) -> None:
+        super().__init__()
+        self._errors = list(errors)
+        self.refusal_writes = 0
+        self.refusal_retries: list[bool] = []
+
+    async def set_final_snapshot_refusal(
+        self,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        refusal: FinalSnapshotRefusal,
+        *,
+        retry: bool = False,
+    ) -> bool:
+        self.refusal_writes += 1
+        self.refusal_retries.append(retry)
+        if self._errors:
+            raise self._errors.pop(0)
+        return await super().set_final_snapshot_refusal(
+            server_id, worker_id, refusal, retry=retry
+        )
 
 
 class FakeBackupRepository(BackupRepository):
@@ -1955,7 +1996,8 @@ class FakeScheduleRunRepository(ScheduleRunRepository):
         self.rows.append(self._copy(run))
 
     async def add(self, run: ScheduleRun) -> None:
-        self.rows.append(self._copy(run))
+        if all(r.id != run.id for r in self.rows):
+            self.rows.append(self._copy(run))
 
     async def list_for_schedule(self, schedule_id: ScheduleId) -> list[ScheduleRun]:
         return sorted(
@@ -2062,6 +2104,67 @@ class ExitHookUnitOfWork(FakeUnitOfWork):
             on_exit()
 
 
+class SessionTrackingUnitOfWork(FakeUnitOfWork):
+    """A :class:`FakeUnitOfWork` that knows whether one of its blocks is open.
+
+    The real adapter opens a session on entry, and the session holds a pool
+    connection from its first statement until the block exits, so a store call
+    made inside a block keeps that connection checked out for as long as the call
+    takes (issue #4107). ``open`` says whether a block is open now. Entering a
+    block while one is open fails: the real adapter keeps a single session, which
+    a nested entry would replace and leak.
+    """
+
+    open = False
+
+    async def __aenter__(self) -> "SessionTrackingUnitOfWork":
+        assert not self.open, "a unit-of-work block was entered inside another"
+        self.open = True
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.open = False
+
+
+class DatabaseOutageError(ConnectionError):
+    """What :class:`OutageUnitOfWork` raises while its database is down."""
+
+
+class OutageUnitOfWork(FakeUnitOfWork):
+    """A :class:`FakeUnitOfWork` whose database can go down (issue #4086).
+
+    While ``down`` is set, opening a block raises :class:`DatabaseOutageError`, so
+    nothing in the block runs: a seam for a database that fails before any COMMIT
+    is sent. It does not model the real adapter, which opens a block without
+    touching the database; there the fault lands on the first statement, for a
+    backup's row the INSERT its savepoint sends. The fault is at the entry rather
+    than in ``commit``: this fake applies an add or a delete at once, so a failing
+    commit would not undo it.
+    """
+
+    down = False
+
+    async def __aenter__(self) -> "OutageUnitOfWork":
+        if self.down:
+            raise DatabaseOutageError("database unreachable")
+        return self
+
+
+class CommitAnswerLostUnitOfWork(FakeUnitOfWork):
+    """A :class:`FakeUnitOfWork` whose next commit lands and then raises
+    ``lost_answer``, once it is set: a COMMIT whose answer was lost with its
+    connection, or a caller cancelled at its await (issues #4062, #4152). This
+    fake applies a write at once, so the write stands."""
+
+    lost_answer: BaseException | None = None
+
+    async def commit(self) -> None:
+        await super().commit()
+        if self.lost_answer is not None:
+            lost, self.lost_answer = self.lost_answer, None
+            raise lost
+
+
 @dataclass
 class BumpHookStopIntents(StopIntentCounter):
     """A :class:`StopIntentCounter` that runs ``on_bump`` after the next bump."""
@@ -2164,6 +2267,7 @@ class FakeControlPlane(ControlPlane):
         connected: dict[WorkerId, bool] | None = None,
         held: dict[tuple[WorkerId, ServerId], int] | None = None,
         offline_since: dict[WorkerId, dt.datetime] | None = None,
+        session_ended_at: dict[WorkerId, dt.datetime] | None = None,
         hydrate_timeout_seconds: float = 600.0,
     ) -> None:
         self._place_to = place_to
@@ -2186,6 +2290,10 @@ class FakeControlPlane(ControlPlane):
         # The instant each Worker first read disconnected (issue #3963); a Worker
         # absent here reads None, as one that never registered with this process.
         self.offline_since = offline_since or {}
+        # The instant each Worker's session ended (issue #4130); a Worker absent
+        # here reads None, as one whose session is current or that never
+        # registered with this process.
+        self.session_ended_at = session_ended_at or {}
         # Held-working-set generation map for the skip-hydrate decision (issue #763);
         # a (worker, server) pair absent here returns None (NOT held), so the default
         # is to hydrate.
@@ -2230,11 +2338,15 @@ class FakeControlPlane(ControlPlane):
     def worker_offline_since(self, *, worker_id: WorkerId) -> dt.datetime | None:
         return self.offline_since.get(worker_id)
 
+    def worker_session_ended_at(self, *, worker_id: WorkerId) -> dt.datetime | None:
+        return self.session_ended_at.get(worker_id)
+
     def end_session(self, worker_id: WorkerId, *, at: dt.datetime) -> None:
-        """``worker_id``'s session ends at ``at`` (issue #3963)."""
+        """``worker_id``'s session ends at ``at`` (issues #3963, #4130)."""
 
         self._connected[worker_id] = False
         self.offline_since[worker_id] = at
+        self.session_ended_at[worker_id] = at
 
     def record_held_generation(
         self, *, worker_id: WorkerId, server_id: ServerId, generation: int
@@ -2455,9 +2567,10 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         # sweep probe and restore (#3230) raise BackupUnreadableError. Distinct from
         # ``corrupt_refs`` — the bytes are gone, not the world.
         self.unreadable_refs: set[str] = set()
-        # refs whose probe hits a backend outage (#2371): the probe raises
-        # BackupStorageUnavailableError, which is a verdict about the STORE, not
-        # about the archive, so the sweep must not classify the row from it.
+        # refs whose probe hits a backend outage (#2371): the probe and the size
+        # HEAD (#4107) raise BackupStorageUnavailableError, which is a verdict
+        # about the STORE, not about the archive, so no caller may classify the
+        # row from it.
         self.unavailable_refs: set[str] = set()
         # The sweep (#744) snapshot fsck: corrupt-region count of each server's
         # published ``current``; a server absent here has no published snapshot, so
@@ -2482,6 +2595,11 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         # assert what the backfill (#661) tolerates: a store outage fails the read
         # (issue #2405), and only a missing archive leaves the row NULL.
         self.size_error: Exception | None = None
+        # What ``list_archives`` lists (issue #4106): each server's archives with
+        # their store times. ``delete`` removes an archive from it too, and a
+        # server in ``list_errors`` fails its listing with that error.
+        self.archive_times: dict[ServerId, dict[str, dt.datetime]] = {}
+        self.list_errors: dict[ServerId, Exception] = {}
         self._counter = 0
 
     async def create_from_current(
@@ -2498,6 +2616,16 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         self, *, community_id: CommunityId, server_id: ServerId
     ) -> list[str]:
         return sorted(self.archives)
+
+    async def list_archives(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> list[StoredArchive]:
+        if server_id in self.list_errors:
+            raise self.list_errors[server_id]
+        return [
+            StoredArchive(storage_ref=ref, modified_at=at)
+            for ref, at in sorted(self.archive_times.get(server_id, {}).items())
+        ]
 
     async def restore(
         self,
@@ -2547,6 +2675,7 @@ class FakeBackupArchiveStore(BackupArchiveStore):
     ) -> None:
         self.events.append((server_id, "delete-archive"))
         self.archives.discard(storage_ref)
+        self.archive_times.get(server_id, {}).pop(storage_ref, None)
         self.bytes_by_ref.pop(storage_ref, None)
         self.deleted.append((server_id, storage_ref))
 
@@ -2607,9 +2736,34 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         self.size_calls.append(storage_ref)
         if self.size_error is not None:
             raise self.size_error
+        if storage_ref in self.unavailable_refs:
+            raise BackupStorageUnavailableError(storage_ref)
         if storage_ref not in self.archives:
             raise BackupNotFoundError(storage_ref)
         return len(self.bytes_by_ref[storage_ref])
+
+
+class HangingSizeStore(FakeBackupArchiveStore):
+    """A :class:`FakeBackupArchiveStore` whose ``size`` probe hangs (issue #4107).
+
+    ``size`` is the storage HEAD, which can take as long as the store's timeouts
+    and retries allow. Each call sets ``probing`` and then waits for ``release``
+    before answering, so a test can look at what the caller holds while it waits.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.probing = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def size(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> int:
+        self.probing.set()
+        await self.release.wait()
+        return await super().size(
+            community_id=community_id, server_id=server_id, storage_ref=storage_ref
+        )
 
 
 class FakeCatalogProvider(CatalogProvider):

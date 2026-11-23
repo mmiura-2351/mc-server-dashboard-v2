@@ -54,14 +54,16 @@ interface ProblemDetails {
   permission?: string;
   key?: string;
   worker_state?: string;
+  detail?: string;
 }
 
 /**
  * Pull a string-valued member out of a problem+json body. The UI branches on
  * `reason` and renders the members some reasons carry — `permission` on a 403
  * denial, `key` on a 422 `platform_managed_key` refusal, `worker_state` on a
- * lifecycle 503 `worker_unavailable` (AUTH_API.md 2); anything that is not a
- * problem+json object yields `undefined`.
+ * lifecycle 503 `worker_unavailable` (AUTH_API.md 2) — and branches on whether
+ * a held stop's 503 carries a `detail`; anything that is not a problem+json
+ * object yields `undefined`.
  */
 function readProblemString(
   body: unknown,
@@ -96,6 +98,13 @@ export class ApiError extends Error {
    * undefined when the API cannot tell, and on other responses.
    */
   readonly workerState: string | undefined;
+  /**
+   * The RFC 9457 `detail` member. The UI does not render it (the API words it
+   * in English only); of the lifecycle 503s, only a stop of a server held by a
+   * refused final snapshot carries one (issue #4111), and the UI branches on
+   * that (issue #4057). Undefined when the body omits it.
+   */
+  readonly detail: string | undefined;
 
   constructor(
     readonly status: number,
@@ -107,6 +116,7 @@ export class ApiError extends Error {
     this.permission = readProblemString(body, "permission");
     this.key = readProblemString(body, "key");
     this.workerState = readProblemString(body, "worker_state");
+    this.detail = readProblemString(body, "detail");
   }
 }
 

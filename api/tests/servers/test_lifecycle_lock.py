@@ -1072,7 +1072,7 @@ async def test_create_backup_that_lost_the_lock_writes_no_row_and_no_archive() -
     assert (server.id, "create-archive") not in lock.events
 
 
-async def test_create_backup_confirms_the_lock_right_before_its_row_and_archive() -> (
+async def test_create_backup_confirms_the_lock_right_before_its_archive_and_row() -> (
     None
 ):
     server, repo, lock = _seeded()
@@ -1090,11 +1090,29 @@ async def test_create_backup_confirms_the_lock_right_before_its_row_and_archive(
         lifecycle_lock=lock,
     )(community_id=_COMMUNITY, server_id=server.id, source=BackupSource.MANUAL)
 
-    # The row and the archive written behind it are one guarded write.
-    _assert_checked_right_before(lock.events, server.id, "add-row")
-    assert lock.events.index((server.id, "add-row")) + 1 == lock.events.index(
-        (server.id, "create-archive")
-    )
+    # The archive write can take minutes, so the row behind it is checked again.
+    _assert_checked_right_before(lock.events, server.id, "create-archive", "add-row")
+
+
+async def test_create_backup_that_lost_the_lock_mid_archive_deletes_it() -> None:
+    server, repo, lock = _seeded()
+    archive = FakeBackupArchiveStore()
+    backups = FakeBackupRepository()
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+    lock.checks_before_loss = 1
+
+    with pytest.raises(LifecycleLockLostError):
+        await CreateBackup(
+            uow=uow,
+            backup_store=archive,
+            snapshot_server=SnapshotServer(uow=uow, control_plane=FakeControlPlane()),
+            clock=FakeClock(_NOW),
+            lifecycle_lock=lock,
+        )(community_id=_COMMUNITY, server_id=server.id, source=BackupSource.MANUAL)
+
+    assert backups.by_id == {}
+    assert archive.created == [server.id]
+    assert archive.archives == set()
 
 
 async def test_upload_backup_that_lost_the_lock_writes_no_row_and_no_archive() -> None:
@@ -1115,6 +1133,44 @@ async def test_upload_backup_that_lost_the_lock_writes_no_row_and_no_archive() -
 
     assert backups.by_id == {}
     assert (server.id, "store-archive") not in lock.events
+
+
+async def test_upload_backup_confirms_the_lock_right_before_its_archive_and_row() -> (
+    None
+):
+    server, repo, lock = _seeded()
+    archive = FakeBackupArchiveStore()
+    backups = FakeBackupRepository()
+    archive.events = lock.events
+    backups.events = lock.events
+
+    await UploadBackup(
+        uow=FakeUnitOfWork(servers=repo, backups=backups),
+        backup_store=archive,
+        clock=FakeClock(_NOW),
+        lifecycle_lock=lock,
+    )(community_id=_COMMUNITY, server_id=server.id, content=_targz())
+
+    _assert_checked_right_before(lock.events, server.id, "store-archive", "add-row")
+
+
+async def test_upload_backup_that_lost_the_lock_mid_store_deletes_it() -> None:
+    server, repo, lock = _seeded()
+    archive = FakeBackupArchiveStore()
+    backups = FakeBackupRepository()
+    lock.checks_before_loss = 1
+
+    with pytest.raises(LifecycleLockLostError):
+        await UploadBackup(
+            uow=FakeUnitOfWork(servers=repo, backups=backups),
+            backup_store=archive,
+            clock=FakeClock(_NOW),
+            lifecycle_lock=lock,
+        )(community_id=_COMMUNITY, server_id=server.id, content=_targz())
+
+    assert backups.by_id == {}
+    assert archive.stored == [server.id]
+    assert archive.archives == set()
 
 
 async def _allow(_perm: str) -> bool:

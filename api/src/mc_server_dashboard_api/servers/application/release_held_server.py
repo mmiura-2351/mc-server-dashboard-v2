@@ -12,7 +12,9 @@ It releases nothing else. A row held for another reason (a snapshot not
 answered yet, a session that ended, a disconnected Worker's grace) records no
 refusal and may still get its snapshot, so it is refused. So is a row whose
 stop convergence or final snapshot is in flight: releasing under an upload that
-may still publish is the #847 race.
+may still publish is the #847 race. A refused row whose retry was then left
+unanswered keeps its refusal, and stays releasable once nothing is in flight
+(issue #4111): that retry did not settle the snapshot it is held for.
 
 It touches only the database (PM ruling 3(a) on #3697) and sends the Worker no
 command. What it leaves behind:
@@ -33,6 +35,9 @@ from dataclasses import dataclass
 
 from mc_server_dashboard_api.servers.application.stop_convergence import (
     StopConvergenceGuard,
+)
+from mc_server_dashboard_api.servers.application.unannounced_refusals import (
+    UnannouncedRefusals,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
@@ -55,11 +60,14 @@ class ReleaseHeldServer:
 
     ``stop_convergence`` is the process-wide exclusion every stop convergence
     holds (``stop_convergence.py``), so the release refuses while one of them,
-    or a final snapshot of the server, is in flight.
+    or a final snapshot of the server, is in flight. ``unannounced_refusals``
+    is the stops' process-wide record of a refusal written unannounced
+    (``unannounced_refusals.py``), which the release forgets.
     """
 
     uow: UnitOfWork
     stop_convergence: StopConvergenceGuard
+    unannounced_refusals: UnannouncedRefusals
 
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId
@@ -92,6 +100,9 @@ class ReleaseHeldServer:
                 if not released:
                     raise LifecycleTransitionConflictError(str(server_id.value))
                 await self.uow.commit()
+        # Its frame clears the refusal, so no later refusal is owed one for a
+        # write whose COMMIT failed (issue #4152).
+        self.unannounced_refusals.forget(server_id)
         # The release wrote these, and nothing else (issue #4056).
         server.assigned_worker_id = None
         server.awaiting_hydrate = False

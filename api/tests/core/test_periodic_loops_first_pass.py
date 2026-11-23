@@ -98,8 +98,15 @@ _EARLY_LOOPS = [
     ),
 ]
 
+
+async def _no_reclaim() -> None:
+    return None
+
+
 _STORAGE_SWEEP = pytest.param(
-    lambda on_pass, tick: run_storage_sweep_loop(on_pass, tick_seconds=tick),
+    lambda on_pass, tick: run_storage_sweep_loop(
+        on_pass, reclaim_rowless_archives=_no_reclaim, tick_seconds=tick
+    ),
     id="storage-sweep",
 )
 
@@ -143,7 +150,9 @@ async def test_storage_sweep_loop_waits_one_interval_before_its_first_pass(
     monkeypatch.setattr(asyncio, "sleep", sleep)
     counter = _PassCounter()
     task = asyncio.create_task(
-        run_storage_sweep_loop(counter.count, tick_seconds=_DAILY)
+        run_storage_sweep_loop(
+            counter.count, reclaim_rowless_archives=_no_reclaim, tick_seconds=_DAILY
+        )
     )
 
     await sleep.parked.wait()

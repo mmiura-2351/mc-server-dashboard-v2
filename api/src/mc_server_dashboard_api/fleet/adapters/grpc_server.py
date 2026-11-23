@@ -155,7 +155,10 @@ _FIRST_ATTEMPT_TIMEOUT_SECONDS = 3.0
 # UNAVAILABLE, which the Worker retries with backoff, and a lookup sends the ack
 # with no ids, as on any of its failures. Both are reads, so the cancel abandons no
 # write. A read cancelled on a stalled connection returns once SQLAlchemy has given
-# that connection 2 s to close, so the answer leaves within 12 s.
+# that connection 2 s to close, so the answer leaves within 12 s. The teardown of a
+# refused registration bounds its mark-unknown write by the same value (issue
+# #4091). That cancel does abandon a write: the teardown logs it as skipped, though
+# a commit already sent may still land, its status frames unpublished.
 _REGISTRATION_DATABASE_TIMEOUT_SECONDS = 10.0
 
 # Backpressure limit on the queue between the inbound reader task and the
@@ -168,6 +171,9 @@ _REGISTRATION_DATABASE_TIMEOUT_SECONDS = 10.0
 # #4028). A bounded queue keeps a burst from consuming unbounded memory; the
 # size is generous enough that a healthy processor never blocks the reader.
 _INBOUND_QUEUE_MAXSIZE = 1024
+
+# A queued message, with the instant the reader read it (issue #4118).
+_Received = tuple[pb.WorkerMessage, dt.datetime]
 
 _DRIVER_BY_KIND: dict[int, DriverKind] = {
     pb.EXECUTION_DRIVER_KIND_CONTAINER: DriverKind.CONTAINER,
@@ -304,7 +310,7 @@ class _Hold:
     to status frames.
     """
 
-    def __init__(self, queue: asyncio.Queue[pb.WorkerMessage | None]) -> None:
+    def __init__(self, queue: asyncio.Queue[_Received | None]) -> None:
         self._queue = queue
         self.active = False
         self.logs = 0
@@ -320,11 +326,11 @@ class _Hold:
         self.active = True
         kept = []
         while not self._queue.empty():
-            message = self._queue.get_nowait()
-            if message is None or not self.drop(message):
-                kept.append(message)
-        for message in kept:
-            self._queue.put_nowait(message)
+            item = self._queue.get_nowait()
+            if item is None or not self.drop(item[0]):
+                kept.append(item)
+        for item in kept:
+            self._queue.put_nowait(item)
 
     def drop(self, message: pb.WorkerMessage) -> bool:
         """Count ``message`` and return True if it is dropped during a hold."""
@@ -502,6 +508,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         outbound: asyncio.Queue[pb.ApiMessage] | None = None
         reader: asyncio.Future[None] | None = None
         watchdog: asyncio.Future[None] | None = None
+        refused = False
         # The teardown owns everything from the registry write on (issue #3555):
         # a cancel or abort before the stream is serving (during the rebuild or
         # the held-server lookup below) must still offline the Worker and mark
@@ -525,6 +532,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
                     extra={"worker_id": worker_id.value},
                 )
                 self._registry.mark_disconnected(worker_id, session)
+                refused = True
                 await context.abort(
                     grpc.StatusCode.UNAVAILABLE,
                     "the database did not answer the registration in time",
@@ -536,6 +544,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
                     exc_info=True,
                 )
                 self._registry.mark_disconnected(worker_id, session)
+                refused = True
                 await context.abort(
                     grpc.StatusCode.UNAVAILABLE,
                     "assignment rebuild failed during registration",
@@ -631,7 +640,9 @@ class WorkerSessionServicer(WorkerServiceServicer):
             # EOF has already started this teardown; awaited here, it would cut
             # the mark-unknown write and the log line, with only a DEBUG trace.
             teardown = asyncio.ensure_future(
-                self._teardown(worker_id, session, outbound, reader, watchdog)
+                self._teardown(
+                    worker_id, session, outbound, reader, watchdog, refused=refused
+                )
             )
             self._teardowns[teardown] = worker_id
             teardown.add_done_callback(self._forget_teardown)
@@ -648,11 +659,15 @@ class WorkerSessionServicer(WorkerServiceServicer):
         outbound: asyncio.Queue[pb.ApiMessage] | None,
         reader: asyncio.Future[None] | None,
         watchdog: asyncio.Future[None] | None,
+        *,
+        refused: bool,
     ) -> None:
         """Finish a Session whose stream ended (FR-WRK-4, CONTROL_PLANE.md 4.4).
 
         ``outbound``, ``reader`` and ``watchdog`` are ``None`` when the Session
-        ended after registering but before it opened them.
+        ended after registering but before it opened them. ``refused`` is set
+        when the Session ended because its registration was refused with
+        ``UNAVAILABLE``.
         """
 
         # Retrieve the reader's outcome so a transport error it raised is not
@@ -707,11 +722,31 @@ class WorkerSessionServicer(WorkerServiceServicer):
         # later than its stamp. The reader has finished above, so this
         # session's own reports are all stamped earlier and still marked.
         if self._registry.is_current_session(worker_id, session):
+            # After a refused registration the write is bounded as the
+            # registration's database work is (issue #4091). That Worker is
+            # alive and retries, and each refusal's write would otherwise hold a
+            # pool connection for the driver's bounds while the database stalls.
+            # Its session carried no reports, and its next accepted registration
+            # re-establishes its state, so a write past the bound is skipped.
+            # Any other ending keeps its write unbounded: that Worker may never
+            # come back, and its servers would keep reading as last reported.
+            # Entering the bound does not suspend, so the write is still entered
+            # with no await after the check.
             # Logged here rather than raised: once the RPC's cancel has broken
             # the shield, nothing awaits this task's outcome.
             try:
-                await self._state_sink.mark_worker_servers_unknown(
-                    worker_id=worker_id.value
+                async with asyncio.timeout(
+                    _REGISTRATION_DATABASE_TIMEOUT_SECONDS if refused else None
+                ):
+                    await self._state_sink.mark_worker_servers_unknown(
+                        worker_id=worker_id.value
+                    )
+            except TimeoutError:
+                _LOG.warning(
+                    "the database did not answer the refused registration's "
+                    "mark-unknown within %.1fs; skipping it",
+                    _REGISTRATION_DATABASE_TIMEOUT_SECONDS,
+                    extra={"worker_id": worker_id.value},
                 )
             except Exception:
                 _LOG.error(
@@ -737,7 +772,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         lines and metrics are dropped instead of queued (:class:`_Hold`).
         """
 
-        queue: asyncio.Queue[pb.WorkerMessage | None] = asyncio.Queue(
+        queue: asyncio.Queue[_Received | None] = asyncio.Queue(
             maxsize=_INBOUND_QUEUE_MAXSIZE
         )
         # Set at a clean EOF: the session is ending, so a held message gets one
@@ -749,17 +784,22 @@ class WorkerSessionServicer(WorkerServiceServicer):
         )
         try:
             async for message in request_iterator:
+                # Stamped as it is read, before any await (issue #4118). The
+                # stamp rides the message to its write, retries included, and
+                # the monotonic guard orders the write by it. A message still
+                # being written when a newer session registers is stamped
+                # before that session's reports and its teardown's write, so it
+                # lands behind them however late it lands.
+                received_at = self._clock.now()
                 if processor.done():
                     await processor  # propagate cap-trip
                     return
                 if _is_heartbeat(message):
-                    self._registry.record_heartbeat(
-                        worker_id, session, self._clock.now()
-                    )
+                    self._registry.record_heartbeat(worker_id, session, received_at)
                     continue
                 if hold.drop(message):
                     continue
-                await queue.put(message)
+                await queue.put((message, received_at))
             stream_ended.set()
             await queue.put(None)  # sentinel for clean EOF
             await processor
@@ -781,7 +821,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         self,
         worker_id: WorkerId,
         session: SessionToken,
-        queue: asyncio.Queue[pb.WorkerMessage | None],
+        queue: asyncio.Queue[_Received | None],
         stream_ended: asyncio.Event,
         hold: _Hold,
     ) -> None:
@@ -797,9 +837,10 @@ class WorkerSessionServicer(WorkerServiceServicer):
 
         consecutive_failures = 0
         while self._registry.is_current_session(worker_id, session):
-            message = await queue.get()
-            if message is None:
+            item = await queue.get()
+            if item is None:
                 return
+            message, received_at = item
             # The get may have waited for the message.
             if not self._registry.is_current_session(worker_id, session):
                 break
@@ -816,7 +857,9 @@ class WorkerSessionServicer(WorkerServiceServicer):
             # failure is allowed to propagate, ending the session so teardown
             # marks the worker disconnected. Any success resets the streak.
             try:
-                await self._handle_held(worker_id, session, message, stream_ended, hold)
+                await self._handle_held(
+                    worker_id, session, message, received_at, stream_ended, hold
+                )
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -847,6 +890,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         worker_id: WorkerId,
         session: SessionToken,
         message: pb.WorkerMessage,
+        received_at: dt.datetime,
         stream_ended: asyncio.Event,
         hold: _Hold,
     ) -> None:
@@ -862,7 +906,8 @@ class WorkerSessionServicer(WorkerServiceServicer):
         error is the message's own, and holding it would block the queue for good.
         Each retry is handled as one (:meth:`_handle`'s ``retry``): a failed
         attempt may have committed, so its retry publishes the frame of a write
-        it finds already made (issue #4062).
+        it finds already made (issue #4062). Every attempt carries the message's
+        ``received_at``, so a retry never stamps it later (issue #4118).
         However the hold ends, one WARNING counts the log lines and metrics
         dropped meanwhile, those purged from the queue as it started included,
         if any (issue #4028). The hold also starts while a first attempt is
@@ -877,7 +922,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         )
         try:
             try:
-                await self._handle(worker_id, message)
+                await self._handle(worker_id, message, received_at)
             except Exception as exc:
                 if (
                     not is_transient_database_error(exc)
@@ -925,7 +970,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
                     return
                 attempts += 1
                 try:
-                    await self._handle(worker_id, message, retry=True)
+                    await self._handle(worker_id, message, received_at, retry=True)
                 except Exception as exc:
                     if last:
                         _LOG.info(
@@ -1100,13 +1145,20 @@ class WorkerSessionServicer(WorkerServiceServicer):
         return worker_id, first.correlation_id, session, checked_ids
 
     async def _handle(
-        self, worker_id: WorkerId, message: pb.WorkerMessage, *, retry: bool = False
+        self,
+        worker_id: WorkerId,
+        message: pb.WorkerMessage,
+        received_at: dt.datetime,
+        *,
+        retry: bool = False,
     ) -> None:
-        """Apply ``message``; ``retry`` when an earlier attempt of it failed.
+        """Apply ``message``, read at ``received_at``; ``retry`` when an earlier
+        attempt of it failed.
 
         That attempt may have committed with its answer lost, so a retry tells
         the sinks to publish the frame of a write they find already made (issue
-        #4062).
+        #4062). A status change is stamped ``received_at`` (issue #4118), and a
+        command result carries it to the write it converges (issue #4117).
         """
 
         payload = message.WhichOneof("payload")
@@ -1119,7 +1171,11 @@ class WorkerSessionServicer(WorkerServiceServicer):
             # through the late-snapshot sink (issue #891); the common match path is
             # still synchronous dict work that returns without awaiting.
             await self._control_plane.resolve(
-                message.correlation_id, worker_id, message.command_result, retry=retry
+                message.correlation_id,
+                worker_id,
+                message.command_result,
+                received_at=received_at,
+                retry=retry,
             )
             return
         if payload != "event":
@@ -1131,7 +1187,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         event = message.event.WhichOneof("event")
         if event == "status_change":
             await self._reconcile_status(
-                worker_id, message.event, emitted_at, retry=retry
+                worker_id, message.event, emitted_at, received_at, retry=retry
             )
         elif event == "log_line":
             self._relay_log(message.event, emitted_at)
@@ -1143,6 +1199,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         worker_id: WorkerId,
         event: pb.Event,
         emitted_at: dt.datetime | None,
+        received_at: dt.datetime,
         *,
         retry: bool,
     ) -> None:
@@ -1157,6 +1214,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
             server_id=event.server_id,
             worker_id=worker_id.value,
             state=state,
+            observed_at=received_at,
             detail=event.status_change.detail,
             reason=_CRASH_REASON_BY_PROTO.get(event.status_change.crash_reason, ""),
             emitted_at=emitted_at,
