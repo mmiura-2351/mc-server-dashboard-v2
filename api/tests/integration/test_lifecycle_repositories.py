@@ -530,7 +530,10 @@ async def test_sink_records_observed_state_from_assigned_worker(
         factory, clock=FakeClock(_NOW), real_time_events=InProcessRealTimeEvents()
     )
     await sink.record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker), state="running"
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state="running",
+        observed_at=_NOW,
     )
 
     async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
@@ -563,7 +566,10 @@ async def test_sink_drops_status_from_non_owning_worker(engine: AsyncEngine) -> 
     )
     # A report from a worker that does not own the server is dropped, not applied.
     await sink.record_observed_state(
-        server_id=str(server_id.value), worker_id=str(intruder), state="crashed"
+        server_id=str(server_id.value),
+        worker_id=str(intruder),
+        state="crashed",
+        observed_at=_NOW,
     )
 
     async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
@@ -651,7 +657,10 @@ async def test_sink_drops_stale_worker_report_racing_a_reassignment(
     )
     # Stale worker A reports a state B's server is not in; it must not land.
     await sink.record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker_a), state="crashed"
+        server_id=str(server_id.value),
+        worker_id=str(worker_a),
+        state="crashed",
+        observed_at=_NOW,
     )
 
     async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
@@ -694,7 +703,10 @@ async def test_sink_keeps_assignment_when_owning_worker_reports_stopped_under_st
         factory, clock=FakeClock(_NOW), real_time_events=InProcessRealTimeEvents()
     )
     await sink.record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker), state="stopped"
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state="stopped",
+        observed_at=_NOW,
     )
 
     async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
@@ -729,7 +741,10 @@ async def test_sink_keeps_assignment_when_owning_worker_reports_stopped_under_ru
         factory, clock=FakeClock(_NOW), real_time_events=InProcessRealTimeEvents()
     )
     await sink.record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker), state="stopped"
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state="stopped",
+        observed_at=_NOW,
     )
 
     async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
@@ -764,7 +779,10 @@ async def test_sink_keeps_assignment_for_non_stopped_reports_under_desired_stopp
         factory, clock=FakeClock(_NOW), real_time_events=InProcessRealTimeEvents()
     )
     await sink.record_observed_state(
-        server_id=str(server_id.value), worker_id=str(worker), state=state
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state=state,
+        observed_at=_NOW,
     )
 
     async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:

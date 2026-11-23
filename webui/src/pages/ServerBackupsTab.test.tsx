@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -21,7 +22,7 @@ import { setAccessToken } from "../auth/tokenStore.ts";
 import { ToastProvider } from "../components/Toast.tsx";
 import { t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
-import { installMockWebSocket } from "../test/mockWebSocket.ts";
+import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
 import { ServerDetailPage } from "./ServerDetailPage.tsx";
 
 const CID = "c1";
@@ -114,15 +115,16 @@ const STATS = {
   oldest: "2026-06-04T00:00:00Z",
 };
 
-// Route api.get by path: server detail, backups list, statistics. Per-endpoint
-// (never a catch-all reject, #2247/#2359/#2525): `listError` / `statsError`
-// reject only their own endpoint so the other two keep resolving — the server
-// detail query must still succeed for the tab to mount.
+// Route api.get by path: server detail, backups list, statistics, schedules.
+// Per-endpoint (never a catch-all reject, #2247/#2359/#2525): `listError` /
+// `statsError` reject only their own endpoint so the others keep resolving —
+// the server detail query must still succeed for the tab to mount.
 function routeGet(
   opts: {
     srv?: Record<string, unknown>;
     backups?: Record<string, unknown>[];
     stats?: typeof STATS;
+    schedules?: Record<string, unknown>[];
     listError?: unknown;
     statsError?: unknown;
   } = {},
@@ -131,6 +133,9 @@ function routeGet(
   const list = { backups: opts.backups ?? [backup()] };
   const stats = opts.stats ?? STATS;
   mockApi.get.mockImplementation((path: string) => {
+    if (path.endsWith("/schedules")) {
+      return Promise.resolve(opts.schedules ?? []);
+    }
     if (path.endsWith("/backups/statistics")) {
       return opts.statsError !== undefined
         ? Promise.reject(opts.statsError)
@@ -522,7 +527,13 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
   });
 
   it("restores after typed confirm when stopped", async () => {
-    routeGet({ srv: { observed_state: "stopped", desired_state: "stopped" } });
+    routeGet({
+      srv: {
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      },
+    });
     mockApi.post.mockResolvedValue(undefined);
     await openBackups();
 
@@ -548,7 +559,11 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
 
   it("gates a quarantined restore behind acknowledgement and sends force=true (#745)", async () => {
     routeGet({
-      srv: { observed_state: "stopped", desired_state: "stopped" },
+      srv: {
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      },
       backups: [backup({ health: "quarantined" })],
     });
     mockApi.post.mockResolvedValue(undefined);
@@ -585,7 +600,11 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
 
   it("offers no restore for an unreadable backup, even when stopped (#2374)", async () => {
     routeGet({
-      srv: { observed_state: "stopped", desired_state: "stopped" },
+      srv: {
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      },
       backups: [backup({ health: "unreadable" })],
     });
     await openBackups();
@@ -608,7 +627,11 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
 
   it("restores a healthy backup without force and with no extra acknowledgement", async () => {
     routeGet({
-      srv: { observed_state: "stopped", desired_state: "stopped" },
+      srv: {
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      },
       backups: [backup({ health: "healthy" })],
     });
     mockApi.post.mockResolvedValue(undefined);
@@ -718,7 +741,13 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
   });
 
   it("surfaces a 409 server_not_stopped specifically on restore", async () => {
-    routeGet({ srv: { observed_state: "stopped", desired_state: "stopped" } });
+    routeGet({
+      srv: {
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      },
+    });
     mockApi.post.mockRejectedValue(
       new ApiError(409, { reason: "server_not_stopped" }),
     );
@@ -745,6 +774,78 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
     expect(
       screen.getByPlaceholderText(t("backups.restoreDialog.phrase")),
     ).toHaveValue("RESTORE");
+  });
+});
+
+// A stop holds its Worker until the final snapshot settles, and the API
+// refuses a restore until the release (409 server_assigned, #3998): the server
+// reads stopped, so the confirm is held, with the reason (#4003).
+describe("ServerBackupsTab restore of a stopped server its Worker still holds", () => {
+  const held = {
+    observed_state: "stopped",
+    desired_state: "stopped",
+    assigned_worker_id: "worker-a",
+  };
+
+  async function openRestoreAndType() {
+    await openBackups();
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("backups.restore") }),
+    );
+    fireEvent.change(
+      screen.getByPlaceholderText(t("backups.restoreDialog.phrase")),
+      { target: { value: "RESTORE" } },
+    );
+    return screen.getByRole("button", {
+      name: t("backups.restoreDialog.confirm"),
+    });
+  }
+
+  it("holds the confirm with the reason", async () => {
+    routeGet({ srv: held });
+    const confirm = await openRestoreAndType();
+
+    expect(confirm).toBeDisabled();
+    expect(confirm).toHaveAccessibleDescription(t("common.serverAssigned"));
+  });
+
+  // A refusal hold has no bound, so the reason names the refusal (#4057).
+  it("names the refusal a held server is held for", async () => {
+    routeGet({ srv: { ...held, final_snapshot_refusal: "busy" } });
+    const confirm = await openRestoreAndType();
+
+    expect(confirm).toBeDisabled();
+    expect(confirm).toHaveAccessibleDescription(t("common.serverHeld.busy"));
+  });
+
+  it("frees the confirm on the release frame", async () => {
+    routeGet({ srv: held });
+    mockApi.post.mockResolvedValue(undefined);
+    const confirm = await openRestoreAndType();
+    expect(confirm).toBeDisabled();
+
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        JSON.stringify({
+          stream: "status",
+          ts: "t",
+          payload: { assigned_worker_id: null },
+        }),
+      );
+    });
+
+    // The frame alone frees it: every REST read still answers worker-a.
+    await waitFor(() => expect(confirm).toBeEnabled());
+    expect(
+      screen.queryByText(t("common.serverAssigned")),
+    ).not.toBeInTheDocument();
+    fireEvent.click(confirm);
+    await waitFor(() =>
+      expect(mockApi.post).toHaveBeenCalledWith(
+        `/api/communities/${CID}/servers/${SID}/backups/${BID}/restore`,
+      ),
+    );
   });
 });
 
@@ -1164,5 +1265,203 @@ describe("ServerBackupsTab retention editor (#1843)", () => {
     expect(
       await screen.findByText(t("backups.retention.error.invalid")),
     ).toBeInTheDocument();
+  });
+});
+
+describe("ServerBackupsTab keep-all retention warning (#4084)", () => {
+  // The fields the warning reads, plus those the Schedules tab's row renders.
+  function schedule(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "sch1",
+      server_id: SID,
+      name: "nightly backup",
+      action: "backup",
+      enabled: true,
+      cron: null,
+      interval_seconds: 3600,
+      timezone: "UTC",
+      next_run_at: null,
+      last_run_at: null,
+      ...overrides,
+    };
+  }
+  const warning = () =>
+    screen.queryByText(t("backups.retention.unboundedWarning"));
+  const setBelow = () =>
+    screen.queryByText(t("backups.retention.unboundedSetBelow"));
+  const KEEP_ALL = { backup_retention: null };
+
+  // Re-route the reads and refetch every query, as a later visit would.
+  async function reload(
+    queryClient: QueryClient,
+    opts: Parameters<typeof routeGet>[0],
+  ) {
+    routeGet(opts);
+    await act(() => queryClient.invalidateQueries());
+  }
+
+  it("warns only while an enabled backup schedule runs with no retention", async () => {
+    routeGet({ srv: KEEP_ALL, schedules: [schedule()] });
+    const { queryClient } = await openBackups();
+    expect(
+      await screen.findByText(t("backups.retention.unboundedWarning")),
+    ).toBeInTheDocument();
+
+    // A disabled backup schedule takes no backups.
+    await reload(queryClient, {
+      srv: KEEP_ALL,
+      schedules: [schedule({ enabled: false })],
+    });
+    await waitFor(() => expect(warning()).not.toBeInTheDocument());
+
+    // A retention policy bounds what an enabled one keeps.
+    await reload(queryClient, { srv: KEEP_ALL, schedules: [schedule()] });
+    expect(
+      await screen.findByText(t("backups.retention.unboundedWarning")),
+    ).toBeInTheDocument();
+    await reload(queryClient, {
+      srv: { backup_retention: { keep_last: 7 } },
+      schedules: [schedule()],
+    });
+    await waitFor(() => expect(warning()).not.toBeInTheDocument());
+
+    // An enabled schedule of another action takes no backups.
+    await reload(queryClient, { srv: KEEP_ALL, schedules: [schedule()] });
+    expect(
+      await screen.findByText(t("backups.retention.unboundedWarning")),
+    ).toBeInTheDocument();
+    await reload(queryClient, {
+      srv: KEEP_ALL,
+      schedules: [schedule({ action: "restart" })],
+    });
+    await waitFor(() => expect(warning()).not.toBeInTheDocument());
+  });
+
+  it("points a member who can set retention at the editor below", async () => {
+    routeGet({ srv: KEEP_ALL, schedules: [schedule()] });
+    await openBackups();
+
+    expect(
+      await screen.findByText(t("backups.retention.unboundedWarning")),
+    ).toBeInTheDocument();
+    expect(setBelow()).toBeInTheDocument();
+  });
+
+  it("still warns a member who cannot set retention, without the pointer", async () => {
+    mockCan = (code) => code !== "backup:schedule";
+    routeGet({ srv: KEEP_ALL, schedules: [schedule()] });
+    await openBackups();
+
+    expect(
+      await screen.findByText(t("backups.retention.unboundedWarning")),
+    ).toBeInTheDocument();
+    expect(setBelow()).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText(t("backups.retention.modeLabel")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("is the tab the Schedules tab's warning links to", async () => {
+    routeGet({ srv: KEEP_ALL, schedules: [schedule()] });
+    renderPage();
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("tab", { name: t("serverDetail.tab.schedules") }),
+    );
+    fireEvent.click(
+      await screen.findByRole("link", {
+        name: t("schedules.retentionWarning.link"),
+      }),
+    );
+
+    expect(
+      screen.getByRole("tab", { name: t("serverDetail.tab.backups") }),
+    ).toHaveAttribute("aria-selected", "true");
+    expect(
+      await screen.findByLabelText(t("backups.retention.modeLabel")),
+    ).toBeInTheDocument();
+  });
+
+  it("reads no schedules and shows no warning without schedule:read", async () => {
+    mockCan = (code) => code !== "schedule:read";
+    routeGet({ srv: KEEP_ALL, schedules: [schedule()] });
+    await openBackups();
+
+    expect((await screen.findAllByText("1.5 GiB")).length).toBe(2);
+    expect(
+      mockApi.get.mock.calls.some((call) =>
+        (call[0] as string).endsWith("/schedules"),
+      ),
+    ).toBe(false);
+    expect(warning()).not.toBeInTheDocument();
+  });
+
+  // The Schedules tab's create dialog sets the policy; the server read that
+  // follows is what clears the warning. The fixture flips inside the PUT, so
+  // the dialog's own read before the PUT still finds no policy.
+  async function createWithDefaultRetention(onPut: () => Promise<unknown>) {
+    routeGet({ srv: KEEP_ALL, schedules: [schedule()] });
+    mockApi.post.mockImplementation((path: string) =>
+      Promise.resolve(
+        path.includes("/preview")
+          ? { next_runs: [] }
+          : schedule({ id: "sch2", name: "hourly backup" }),
+      ),
+    );
+    mockApi.put.mockImplementation(() => {
+      routeGet({
+        srv: { backup_retention: { keep_last: 7 } },
+        schedules: [
+          schedule(),
+          schedule({ id: "sch2", name: "hourly backup" }),
+        ],
+      });
+      return onPut();
+    });
+    renderPage();
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("tab", { name: t("serverDetail.tab.schedules") }),
+    );
+    expect(
+      await screen.findByText(t("backups.retention.unboundedWarning")),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: t("schedules.create") }),
+    );
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.nameLabel")), {
+      target: { value: "hourly backup" },
+    });
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.actionLabel")), {
+      target: { value: "backup" },
+    });
+    const create = screen.getByRole("button", {
+      name: t("schedules.dialog.create"),
+    });
+    // The fixture's one manual backup leaves nothing to prune, so no
+    // confirmation is asked for once the list is read.
+    await waitFor(() => expect(create).toBeEnabled());
+    fireEvent.click(create);
+  }
+
+  it("clears the Schedules tab's warning once its create step sets the policy", async () => {
+    await createWithDefaultRetention(() => Promise.resolve({ keep_last: 7 }));
+
+    expect(await screen.findByText("hourly backup")).toBeInTheDocument();
+    await waitFor(() => expect(warning()).not.toBeInTheDocument());
+    expect(mockApi.put).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears the warning when a retention write that reported failure had landed", async () => {
+    // The response was lost after the API stored the policy.
+    await createWithDefaultRetention(() =>
+      Promise.reject(new TypeError("Failed to fetch")),
+    );
+
+    expect(
+      await screen.findByText(t("schedules.error.retentionNotSet")),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(warning()).not.toBeInTheDocument());
+    expect(mockApi.put).toHaveBeenCalledTimes(1);
   });
 });

@@ -460,15 +460,15 @@ assigned Worker.
 | `game_port` | integer nullable | the Minecraft game port, assigned at create from the configured range (CONFIGURATION.md Section 5.8) and **unique deployment-wide**. Nullable at the schema level only: every API path (create, import) assigns a port, so a row without a tracked port can arise only outside the API (direct SQL); such a row is excluded from the taken-port set, and Postgres treats `NULL`s as distinct so they never collide |
 | `bedrock_port` | integer nullable | the server's public Bedrock **UDP** port, allocated from the dedicated UDP window (CONFIGURATION.md Section 5.8) when Geyser is detected among the server's plugins and released (`NULL`) on Geyser uninstall; a server delete drops the row and with it the port. **Unique deployment-wide.** Non-`NULL` *is* the Bedrock-enabled state — there is no separate boolean |
 | `slug` | text | the relay hostname prefix (RELAY.md Section 3), e.g. `k7m2p9`. Auto-generated at create as a 6-character random lowercase-alphanumeric string (`[a-z0-9]{6}`) unless supplied, and **unique deployment-wide** (the hostname namespace is global). Renameable via the server update PATCH; released slugs are immediately reusable (RELAY.md Section 16). Validated as a lowercase DNS label (`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`) with a reserved-word list (`www`, `api`, `relay`, …). NOT NULL: every row carries one |
-| `backup_retention` | jsonb nullable | the scheduled-backup retention policy: `{"keep_last": N}` (keep the newest N, N ≥ 1) **or** `{"daily": D, "weekly": W, "monthly": M}` (keep the newest scheduled backup per UTC calendar day / ISO week / calendar month over those windows; each ≥ 0, at least one > 0). Rows whose `health` is `healthy`, `unknown` or `unreadable` are chosen as keepers first; a `quarantined` row keeps only a slot or bucket no non-quarantined row is left to fill (Section 8). `NULL` means no retention — scheduled backups accumulate unbounded. Applies **only** to `source = scheduled` backup rows (Section 8); manual / uploaded / event rows are never auto-pruned. Validated in the domain (`RetentionPolicy`), not by a CHECK — the free-form `config` posture |
+| `backup_retention` | jsonb nullable | the scheduled-backup retention policy: `{"keep_last": N}` (keep the newest N, N ≥ 1) **or** `{"daily": D, "weekly": W, "monthly": M}` (keep the newest scheduled backup per UTC calendar day / ISO week / calendar month over those windows; each ≥ 0, at least one > 0). Rows are chosen as keepers in three ranks: first those whose `size_bytes` is recorded and whose `health` is `healthy`, `unknown` or `unreadable`, then a `quarantined` row whose `size_bytes` is recorded, then a row whose `size_bytes` is NULL, whatever its `health`; a row keeps only a slot or bucket no row of a rank above it is left to fill (Section 8). `NULL` means no retention — scheduled backups accumulate unbounded. Applies **only** to `source = scheduled` backup rows (Section 8); manual / uploaded / event rows are never auto-pruned. Validated in the domain (`RetentionPolicy`), not by a CHECK — the free-form `config` posture |
 | `desired_state` | text | what the operator wants: `running` / `stopped` (CHECK enum) |
 | `observed_state` | text | last state reported by the Worker: `starting` / `running` / `stopping` / `stopped` / `restarting` / `crashed` / `unknown` (CHECK enum) |
-| `observed_at` | timestamptz nullable | when `observed_state` was last updated |
+| `observed_at` | timestamptz nullable | when `observed_state` was last updated; for a Worker's report, when it reached the API ([`CONTROL_PLANE.md`](CONTROL_PLANE.md) Section 4.2) |
 | `assigned_worker_id` | uuid nullable | the assigned Worker (FR-WRK-3); **no FK** — there is no `worker` table (Section 7). A soft reference to the in-memory fleet registry; kept when the Worker disconnects, and cleared when a stop releases the server or a failed start is undone (FR-WRK-4) |
 | `crash_reason` | text nullable | the last crash's reason as the Worker classified it: `forge_install_failed` / `forge_install_out_of_memory` / `forge_install_java_incompatible` (CHECK enum, mirroring the control-plane `CrashReason`, [`CONTROL_PLANE.md`](CONTROL_PLANE.md) Section 6). `NULL` for an unclassified crash, and whenever `observed_state` is not `crashed` |
 | `crash_detail` | text nullable | the last crash's free-text detail from the Worker, bounded to **4 KiB** of UTF-8: a longer one is cut on a character boundary and ends ` … [truncated]`, and NUL is dropped. `NULL` when the Worker sent none, and whenever `observed_state` is not `crashed` |
 | `awaiting_hydrate` | boolean, default `false` | whether the assigned Worker is not known to hold the store's working set (issue #3890). Set by the write that places the server on a Worker for a start, and by a start re-sent to that Worker before it hydrates it (issue #4024), which puts back the value it found when that hydrate cannot have replaced the Worker's working set: it was refused before the pull, its transfer failed before the swap, as the Worker said (issue #4041), or it was never sent (best effort when a stop or drain withdrew the start: the stop may read the mark first). Cleared by that start once that Worker holds the store's working set (its hydrate succeeded, or the generation it holds is at least the store's), guarded on the placement it read so a newer placement keeps its own mark, when it reports the server `running`, and with the assignment by every release. While set, nothing publishes a snapshot from that Worker ([`CONTROL_PLANE.md`](CONTROL_PLANE.md) Section 5). Existing rows read `false`, what the API assumed of an assigned Worker before the column |
-| `final_snapshot_refusal` | text nullable | why the assigned Worker refused the stop's final snapshot: `busy` / `unavailable` (CHECK enum, the control-plane `BUSY` / `UNAVAILABLE`, [`CONTROL_PLANE.md`](CONTROL_PLANE.md) Section 7; issue #4054). Written only while the row is `desired_state = stopped` and still assigned to the Worker that answered, and set back to `NULL` there when a later attempt is not refused. Every write that clears the assignment sets it to `NULL` too: a lifecycle write that changes the assignment, a confirmed stop's unassign, the release after a final snapshot and the release of a stop left holding its Worker. The server read and the status frames carry it ([`WEBUI_SPEC.md`](../ui/WEBUI_SPEC.md) Section 2.6). Written only by a stop's final snapshot, from its answer or its late result, under the per-server stop exclusion: a refusal holds the Worker assigned and the reconciler retries the snapshot (issue #3697, [`CONFIGURATION.md`](CONFIGURATION.md) Section 5.6). Existing rows read `NULL` |
+| `final_snapshot_refusal` | text nullable | why the assigned Worker refused the stop's final snapshot: `busy` / `unavailable` (CHECK enum, the control-plane `BUSY` / `UNAVAILABLE`, [`CONTROL_PLANE.md`](CONTROL_PLANE.md) Section 7; issue #4054). Written only while the row is `desired_state = stopped` and still assigned to the Worker that answered. A retry left unanswered (a timeout or a session end) keeps it, since the snapshot it records is still owed (issue #4111); only a release sets it back to `NULL`. Every write that clears the assignment does so: a lifecycle write that changes the assignment, a confirmed stop's unassign, the release after a final snapshot and the release of a stop left holding its Worker. The server read and the status frames carry it ([`WEBUI_SPEC.md`](../ui/WEBUI_SPEC.md) Section 2.6). Written only by a stop's final snapshot, from its answer or its late result, under the per-server stop exclusion: a refusal holds the Worker assigned and the reconciler retries the snapshot (issue #3697, [`CONFIGURATION.md`](CONFIGURATION.md) Section 5.6). Existing rows read `NULL` |
 | `creation_incomplete` | boolean, default `false` | whether the server's creation has yet to finish (issue #4065). The insert that creates the row sets it, and a single-column write clears it once the last write of the working set has returned, still under the creation's lifecycle lock ("The per-server lifecycle lock" below): after the seed for a create, and after the archive's publish but before the plugin rows for an import. That write is retried in a new transaction after a transient database error, such as a pool wait running out, up to three attempts in all (issue #4088). A creation that fails, is cancelled or dies before then leaves it set, as does a failure of that write. While it is set, a start answers `409 creation_incomplete` and writes and dispatches nothing; every other start path needs `desired_state = running`, which only that start sets. The doors that start nothing stay open: delete, the files API, export and backups. Nothing else clears it: the remedy is to delete the server and create or import it again. The server read carries it. Existing rows read `false`, startable as before the column |
 | `created_at` / `updated_at` | timestamptz | |
 
@@ -567,12 +567,12 @@ can be re-placed after hydrate (FR-WRK-4), or when a failed start is undone
 refuses `BUSY` or `UNAVAILABLE` keeps it set, with the refusal in
 `final_snapshot_refusal`, until a retry of the snapshot settles, an operator
 releases the server without it, or its Worker stays away a full grace (issue
-#3697). One exception remains: a stop while that Worker is not connected
-releases the server at once, without the snapshot (issue #4111). A Worker
-disconnect does not clear the column:
+#3697). A stop while that Worker is not connected releases nothing (issue
+#4111). A Worker disconnect does not clear the column:
 the API marks the Worker's servers `observed=unknown` (a crashed one stays
 `crashed`) and they stay assigned to it. A server whose Worker never comes back
-is released by an operator stop and re-placed by a start ([`CONFIGURATION.md`](CONFIGURATION.md) Section 5.6,
+is released by an operator stop (one held by a refused final snapshot, by the
+release without it) and re-placed by a start ([`CONFIGURATION.md`](CONFIGURATION.md) Section 5.6,
 "A Worker that never reconnects"; whether the API should do it on its own is
 issue #3809).
 The server row survives the Worker; the Worker holds no authoritative state. The
@@ -884,9 +884,9 @@ this row only points at them.
 | `id` | uuid PK | |
 | `server_id` | uuid FK → `server.id` | `ON DELETE CASCADE` |
 | `storage_ref` | text | locator of the archive in `Storage` (opaque to the DB) |
-| `size_bytes` | bigint nullable | recorded archive size; set at create/upload. NULL is reported as "unknown" in statistics — an honest gap, not a wrong total |
+| `size_bytes` | bigint nullable | recorded archive size; set by the insert that records the row, once the archive is written (issue #4086). NULL only on older rows: those from before size tracking, and those a create committed ahead of its archive. NULL is reported as "unknown" in statistics — an honest gap, not a wrong total |
 | `source` | text | `manual` / `scheduled` / `event` / `uploaded` (CHECK enum). `uploaded` is an off-host archive brought in via the upload endpoint |
-| `health` | text | `healthy` / `quarantined` / `unreadable` / `unknown` (CHECK enum). Health of the archive and its contents. A backup created through the integrity-gated create path is `healthy` by construction; an `uploaded` archive (which bypasses that gate) is `unknown` until the operator-run integrity sweep (`integrity_sweep_cli`, STORAGE.md) classifies it; a row a check found structurally corrupt is `quarantined` (still restorable with the `?force=true` override); a row whose archive could not be read back at all, or is missing, is `unreadable` (not restorable). The sweep re-checks every row, so a later sound read returns `quarantined` / `unreadable` to `healthy`. NOT NULL, defaults `unknown` |
+| `health` | text | `healthy` / `quarantined` / `unreadable` / `unknown` (CHECK enum). Health of the archive and its contents. A backup created through the integrity-gated create path is `healthy` by construction, as its row is recorded only once the gated archive is written; an `uploaded` archive (which bypasses that gate) is `unknown` until the operator-run integrity sweep (`integrity_sweep_cli`, STORAGE.md) classifies it; a row a check found structurally corrupt is `quarantined` (still restorable with the `?force=true` override); a row whose archive could not be read back at all, or is missing, is `unreadable` (not restorable). The sweep re-checks every row, so a later sound read returns `quarantined` / `unreadable` to `healthy`. NOT NULL, defaults `unknown` |
 | `created_by` | uuid nullable | the user who triggered the backup; **soft reference** (no FK) so the row survives the actor's deletion (Section 9) |
 | `created_at` | timestamptz | |
 
@@ -894,6 +894,20 @@ Constraints: index on `(server_id, created_at)` for listing a server's backups
 newest-first. Deleting a backup row must also delete the archive in `Storage`;
 that two-store cleanup is a use-case concern (orchestrated in `application`), not a
 DB cascade.
+
+Creating a backup is the same two-store write in the other order (issue #4086). A
+create or an upload writes the archive first and inserts the row, with its size,
+in one transaction once the archive exists. The INSERT is sent in a savepoint
+before the COMMIT, so a refused INSERT raises before any COMMIT is sent. A failure
+after the archive write and before the COMMIT is sent, a cancellation included,
+deletes the archive again, best effort. So no row is recorded ahead of its
+archive. Once the COMMIT is sent, its outcome is unknown: a COMMIT can apply and
+still raise, as when its answer is lost with the connection or the caller is
+cancelled while awaiting it. The archive is then kept and a WARNING logged, so a
+row that did land keeps its archive. A crash, a delete that fails, or an
+unconfirmed COMMIT that did not apply leaves an archive with no row instead: no
+listing shows it, and the row-less archive reclaim deletes it once it is older
+than its grace (STORAGE.md Section 4.3).
 
 Backups are downloadable and uploadable: download streams the
 archive in its native `tar.gz` form (no recompression); upload validates the
@@ -916,17 +930,40 @@ newest+oldest from these rows.
 scheduled backup run — and on every policy write — the rows the policy no
 longer keeps are pruned through the same archive-first/row-last delete path as
 a manual delete, each deletion audited as `backup:delete` with no actor.
-Rows whose `health` is `healthy`, `unknown` or `unreadable` are chosen as
-keepers first (issue #1864). A `quarantined` row keeps a keep-N slot only when
-too few of those rows are left to fill the N, and a tier bucket only when the
-bucket holds no non-quarantined row; every other scheduled row is pruned. Keep-N
+Rows are chosen as keepers in three ranks (issues #1864, #4105): first those
+whose `size_bytes` is recorded and whose `health` is `healthy`, `unknown` or
+`unreadable`, then a `quarantined` row whose `size_bytes` is recorded, then a
+row whose `size_bytes` is NULL, whatever its `health`. A row keeps a keep-N
+slot only when too few rows of the ranks above it are left to fill the N, and a
+tier bucket only when the bucket holds no row of a rank above it. Within a
+rank, the newest claims first; every other scheduled row is pruned. Keep-N
 therefore keeps as many rows as it would ignoring health, every bucket stays
-filled, and an all-quarantined set keeps exactly the health-blind selection.
+filled, and a set whose rows all share one rank keeps the health-blind
+selection.
 `unknown` ranks with `healthy` because no check has read the row yet, and
 `unreadable` because the verdict has documented false positives: a half-up
 backend or a read limit marks an intact archive `unreadable` (STORAGE.md).
-Retention stays health-blind for it.
+Retention stays health-blind for it. A `quarantined` row holds a corrupt world,
+but its archive exists and can still be force-restored. A NULL `size_bytes`
+ranks behind it because a row is recorded with its size once its archive exists
+(issue #4086). A NULL size therefore marks a legacy row, most often one a create
+committed ahead of an archive it never wrote. Two legacy populations can be NULL
+and still have an archive: a create before issue #4119 that wrote its archive
+but was interrupted before its separate size update, and a row from the day
+between backups landing (issue #123) and creates recording a size (issue #283).
+The prune sizes the NULL-size rows before it ranks them (below), so such a row
+ranks as the sized row it is. A row whose archive went missing after its size
+was recorded, as when a delete is interrupted between its archive removal and
+its row removal, still ranks by its `health`.
 Manual / uploaded / event rows are never auto-pruned.
+
+Before it ranks, the prune sizes each scheduled row whose `size_bytes` is NULL,
+as a listing does (issue #4107): a storage HEAD per row, with no unit of work
+open across it (the lifecycle lock's own connection stays held), and the sizes
+recorded in a short transaction of their own. A row whose archive the store
+reports missing stays NULL, so it ranks last. Any other store failure stops the
+prune before it selects or deletes anything, with a WARNING; the next run
+retries.
 
 ### `file_edit_history` — Storage-layer only (no DB table)
 
@@ -1040,8 +1077,11 @@ backup does not retry every tick — it gets the runner's bounded retry (one,
 
 #### `schedule_run`
 
-One row per fired occurrence, written after it completes. History is capped at
-50 rows per schedule by the runner's prune, not by the schema.
+One row per run (an occurrence, a backup's retry, or a skip the runner decides
+itself), written after it completes. The runner mints the `id` once per run and
+inserts the row `ON CONFLICT (id) DO NOTHING`, so a record that is retried
+writes no second row. History is capped at 50 rows per schedule by the runner's
+prune, not by the schema.
 
 | Column | Type | Notes |
 |---|---|---|

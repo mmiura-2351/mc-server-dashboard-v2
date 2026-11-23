@@ -1,13 +1,14 @@
 """An upload's publication window is serialized with the deletes (issue #3219).
 
-``UploadBackup`` commits its backup row BEFORE it writes the archive (#1707). A
-``DeleteServer`` or ``DeleteBackup`` that lands between the two would remove the
-row, then the upload would write its archive anyway and report success for a
-backup that no longer exists: an archive no delete saw, under a deleted server
-or a deleted backup. The upload holds the per-server lifecycle lock across its
-server check, the row commit and the archive write, so a delete arriving in that
-window waits for the publication and then handles the published backup, and a
-delete that already holds the lock turns the upload into a typed not-found.
+``UploadBackup`` stores its archive BEFORE it records its backup row (issue
+#4086). A ``DeleteServer`` that lands between its server check and the row would
+prune the server's storage and remove the server under an upload still writing
+into it. The upload holds the per-server lifecycle lock across its server check,
+the archive write and the row commit, so a server delete arriving in that window
+waits for the publication and then handles the published backup, and a delete
+that already holds the lock turns the upload into a typed not-found. A
+``DeleteBackup`` has nothing to race: until the archive is stored, the upload's
+backup has no row to delete.
 
 Each delete is launched at the entry to ``backup_store.store`` (or the upload at
 the entry to the delete's prune) and given ``_WINDOW_SECONDS`` to run. Unserialized,
@@ -57,10 +58,7 @@ from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleL
 from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
 )
-from mc_server_dashboard_api.servers.application.backups import (
-    DeleteBackup,
-    UploadBackup,
-)
+from mc_server_dashboard_api.servers.application.backups import UploadBackup
 from mc_server_dashboard_api.servers.application.manage_server import (
     CreateServer,
     DeleteServer,
@@ -275,45 +273,30 @@ async def test_server_delete_in_the_upload_window_waits_for_the_publication(
     assert remaining == [backup.storage_ref]
 
 
-async def test_backup_delete_in_the_upload_window_removes_the_published_archive(
+async def test_an_upload_in_its_window_has_no_row_for_a_backup_delete(
     engine: AsyncEngine, tmp_path: Path
 ) -> None:
     factory, server, store, lock = await _setup(engine, tmp_path)
-    delete = DeleteBackup(
-        uow=ServersUnitOfWork(factory), backup_store=store, lifecycle_lock=lock
-    )
-    deletes: list[asyncio.Task[None]] = []
+    in_window: list[list[str]] = []
 
-    async def _delete_backup_in_window(storage_ref: str) -> None:
+    async def _rows_in_window(_storage_ref: str) -> None:
         async with ServersUnitOfWork(factory) as uow:
             rows = await uow.backups.list_for_server(server.id)
-        (pending,) = [row for row in rows if row.storage_ref == storage_ref]
-        task = asyncio.create_task(
-            delete(
-                community_id=server.community_id,
-                server_id=server.id,
-                backup_id=pending.id,
-            )
-        )
-        deletes.append(task)
-        await asyncio.wait({task}, timeout=_WINDOW_SECONDS)
+        in_window.append([row.storage_ref for row in rows])
 
-    store.on_store = _delete_backup_in_window
+    store.on_store = _rows_in_window
 
     backup = await _upload(factory, store, lock)(
         community_id=server.community_id, server_id=server.id, content=_archive()
     )
-    await deletes[0]
 
-    # The delete waited for the publication and then removed both halves: no
-    # archive is left behind without the row that would find it.
+    assert in_window == [[]]
     async with ServersUnitOfWork(factory) as uow:
-        assert await uow.servers.get_by_id(server.id) is not None
-        assert await uow.backups.get_by_id(backup.id) is None
+        assert await uow.backups.get_by_id(backup.id) is not None
     remaining = await store.list_archive_refs(
         community_id=server.community_id, server_id=server.id
     )
-    assert remaining == []
+    assert remaining == [backup.storage_ref]
 
 
 # 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).

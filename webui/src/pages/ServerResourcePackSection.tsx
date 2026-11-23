@@ -3,8 +3,9 @@
  *
  * A card rendered in the Settings tab showing the current resource pack
  * assignment (or "none"), with assign/change/remove actions gated on
- * server:update and server-at-rest. The assign dialog fetches the library
- * list and lets the user pick a pack with optional require/prompt fields.
+ * server:update and on the server at rest and released (issue #4003). The
+ * assign dialog fetches the library list and lets the user pick a pack with
+ * optional require/prompt fields.
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -20,7 +21,12 @@ import { type TranslationKey, t } from "../i18n/index.ts";
 import { supportsResourcePackOptions } from "../mcVersion.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
-import { atRest, normalizeState } from "./serverState.ts";
+import {
+  atRestWriteRefusal,
+  finalSnapshotRefusal,
+  normalizeState,
+  serverAssignedKey,
+} from "./serverState.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
 type ResourcePackAssignmentResponse =
@@ -40,6 +46,8 @@ function resourcePackErrorMessage(
       return "serverDetail.error.unsettled";
     if (error.reason === "server_not_stopped")
       return "serverDetail.error.notStopped";
+    // A change the stop's Worker still holds the server for (#3998, #4003).
+    if (error.reason === "server_assigned") return "common.serverAssigned";
   }
   return fallback;
 }
@@ -63,10 +71,18 @@ export function ServerResourcePackSection({
 
   const canUpdate = can("server:update", { serverId });
   const supportsRequirePrompt = supportsResourcePackOptions(server.mc_version);
-  const serverAtRest = atRest(
+  // A change needs the server at rest and released: a stop holds its Worker
+  // until the final snapshot settles (409 server_assigned, #3998).
+  const writeRefusal = atRestWriteRefusal(
     normalizeState(server.observed_state),
     normalizeState(server.desired_state),
+    server.assigned_worker_id !== null,
   );
+  const serverAtRest = writeRefusal === null;
+  const holdReason: TranslationKey =
+    writeRefusal === "server_assigned"
+      ? serverAssignedKey(finalSnapshotRefusal(server.final_snapshot_refusal))
+      : "serverDetail.resourcePack.notAtRest";
 
   const assignmentQuery = useQuery({
     queryKey: assignmentKey(communityId, serverId),
@@ -148,6 +164,7 @@ export function ServerResourcePackSection({
         <UnassignedView
           canUpdate={canUpdate}
           serverAtRest={serverAtRest}
+          holdReason={holdReason}
           onAssign={() => setAssignOpen(true)}
         />
       ) : (
@@ -155,6 +172,7 @@ export function ServerResourcePackSection({
           assignment={assignment}
           canUpdate={canUpdate}
           serverAtRest={serverAtRest}
+          holdReason={holdReason}
           supportsRequirePrompt={supportsRequirePrompt}
           onChange={() => setAssignOpen(true)}
           onRemove={() => setRemoveOpen(true)}
@@ -209,10 +227,12 @@ export function ServerResourcePackSection({
 function UnassignedView({
   canUpdate,
   serverAtRest,
+  holdReason,
   onAssign,
 }: {
   canUpdate: boolean;
   serverAtRest: boolean;
+  holdReason: TranslationKey;
   onAssign: () => void;
 }) {
   return (
@@ -228,11 +248,7 @@ function UnassignedView({
           >
             {t("serverDetail.resourcePack.assign")}
           </button>
-          {!serverAtRest && (
-            <p className="field-hint">
-              {t("serverDetail.resourcePack.notAtRest")}
-            </p>
-          )}
+          {!serverAtRest && <p className="field-hint">{t(holdReason)}</p>}
         </>
       )}
     </>
@@ -243,6 +259,7 @@ function AssignedView({
   assignment,
   canUpdate,
   serverAtRest,
+  holdReason,
   supportsRequirePrompt,
   onChange,
   onRemove,
@@ -250,6 +267,7 @@ function AssignedView({
   assignment: ResourcePackAssignmentResponse;
   canUpdate: boolean;
   serverAtRest: boolean;
+  holdReason: TranslationKey;
   supportsRequirePrompt: boolean;
   onChange: () => void;
   onRemove: () => void;
@@ -336,11 +354,7 @@ function AssignedView({
           >
             {t("serverDetail.resourcePack.remove")}
           </button>
-          {!serverAtRest && (
-            <p className="field-hint">
-              {t("serverDetail.resourcePack.notAtRest")}
-            </p>
-          )}
+          {!serverAtRest && <p className="field-hint">{t(holdReason)}</p>}
         </div>
       )}
     </>

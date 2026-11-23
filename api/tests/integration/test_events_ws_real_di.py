@@ -379,7 +379,10 @@ class _WorkerDropsDuringSnapshotRead:
                     real_time_events=self._bus,
                 )
                 assert await sink.record_observed_state(
-                    server_id=self._server, worker_id=self._worker, state="running"
+                    server_id=self._server,
+                    worker_id=self._worker,
+                    state="running",
+                    observed_at=_NOW + dt.timedelta(hours=1),
                 )
                 await sink.mark_worker_servers_unknown(worker_id=self._worker)
                 self._bus.publish(

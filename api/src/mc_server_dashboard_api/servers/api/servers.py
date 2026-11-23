@@ -121,6 +121,7 @@ from mc_server_dashboard_api.servers.domain.config_bounds import (
     validate_config,
 )
 from mc_server_dashboard_api.servers.domain.control_plane import (
+    HeldServerWorkerNotConnectedError,
     WorkerUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.cpu_allocation import (
@@ -374,8 +375,9 @@ class ServerResponse(BaseModel):
     crash_not_restarted: bool
     # Why the assigned Worker refused the stop's final snapshot (issue #4054):
     # ``busy`` / ``unavailable`` while a stop holds its Worker for that reason,
-    # ``None`` otherwise.
-    final_snapshot_refusal: str | None = None
+    # ``None`` otherwise. Required, so a client reads ``None`` as "not held"
+    # rather than "not reported" (issue #4057).
+    final_snapshot_refusal: str | None
     # Whether the server's create seed or import has yet to finish (issue
     # #4065): ``True`` while the creation runs, and for good once it failed or
     # was interrupted, when a start is refused ``creation_incomplete``.
@@ -1587,6 +1589,9 @@ _LIFECYCLE_CLASSIFICATION: dict[type[Exception], tuple[Outcome, str]] = {
     ServerNotRunningError: (Outcome.DENIED, "server_not_running"),
     NoEligibleWorkerError: (Outcome.ERROR, "no_eligible_worker"),
     WorkerUnavailableError: (Outcome.ERROR, "worker_unavailable"),
+    # A stop of a server held by a refused final snapshot whose Worker is not
+    # connected (issue #4111): it releases nothing, and the 503 says what does.
+    HeldServerWorkerNotConnectedError: (Outcome.ERROR, "worker_unavailable"),
     JarProvisioningError: (Outcome.ERROR, "jar_unavailable"),
     # StartServer could not regenerate a player file a group change left stale
     # (issue #3223). Raised before the desired-state flip, so nothing started; a
@@ -1625,6 +1630,15 @@ def _lifecycle_classification(exc: Exception) -> tuple[Outcome, str]:
     return outcome, reason
 
 
+HELD_SERVER_WORKER_NOT_CONNECTED_DETAIL = (
+    "The server's Worker refused its final snapshot and is not connected, so the "
+    "stop released nothing and the server stays held. It is released when the "
+    "Worker returns and the snapshot is taken, when the Worker has stayed away for "
+    "the reconciler's full grace, or when someone allowed to stop it releases it "
+    "without the snapshot."
+)
+
+
 def _lifecycle_http_error(
     exc: Exception, *, name_worker_state: bool = False
 ) -> ProblemException:
@@ -1640,10 +1654,13 @@ def _lifecycle_http_error(
             and isinstance(exc, WorkerUnavailableError)
             and exc.worker_state is not None
         ):
+            extensions = {"worker_state": exc.worker_state.value}
+            if isinstance(exc, HeldServerWorkerNotConnectedError):
+                extensions["detail"] = HELD_SERVER_WORKER_NOT_CONNECTED_DETAIL
             return problem(
                 status.HTTP_503_SERVICE_UNAVAILABLE,
                 reason,
-                extensions={"worker_state": exc.worker_state.value},
+                extensions=extensions,
             )
         return _service_unavailable(reason)
     return _conflict(reason)

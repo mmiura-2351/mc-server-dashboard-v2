@@ -126,6 +126,7 @@ class FakeServerStateSink(ServerStateSink):
         server_id: str,
         worker_id: str,
         state: str,
+        observed_at: dt.datetime,
         detail: str = "",
         reason: str = "",
         emitted_at: dt.datetime | None = None,

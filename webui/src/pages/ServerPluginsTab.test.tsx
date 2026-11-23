@@ -7,17 +7,26 @@
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { MemoryRouter, Route, Routes } from "react-router";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
 import { DownloadTooLargeError } from "../api/download.ts";
 import type { components } from "../api/schema";
+import { setAccessToken } from "../auth/tokenStore.ts";
 import { ToastProvider } from "../components/Toast.tsx";
 import { humanizeBytes } from "../format.ts";
 import { t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { meta } from "../test/meta.ts";
+import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
+import { ServerDetailPage } from "./ServerDetailPage.tsx";
 import { ServerPluginsTab } from "./ServerPluginsTab.tsx";
 
 type PluginValidationResponse =
@@ -66,6 +75,8 @@ vi.mock("../permissions/ActiveCommunityProvider.tsx", () => ({
     communities: [{ id: CID, name: "Sakura" }],
   }),
 }));
+// The detail page reads its capabilities here; the tab alone takes `can`.
+vi.mock("../permissions/useCan.ts", () => ({ useCan: () => allow }));
 
 // biome-ignore lint/suspicious/noExplicitAny: minimal server fixture for the tab.
 function server(overrides: Record<string, unknown> = {}): any {
@@ -78,6 +89,7 @@ function server(overrides: Record<string, unknown> = {}): any {
     mc_version: "1.21",
     desired_state: "stopped",
     observed_state: "stopped",
+    assigned_worker_id: null,
     ...overrides,
   };
 }
@@ -829,6 +841,164 @@ describe("ServerPluginsTab error presentation glue", () => {
     expect(
       screen.queryByText(t("plugins.error.generic")),
     ).not.toBeInTheDocument();
+  });
+});
+
+// A stop holds its Worker until the final snapshot settles, and the API
+// refuses every plugin change until the release (409 server_assigned, #3998):
+// the changes are held, with the reason (#4003).
+describe("ServerPluginsTab a stopped server its Worker still holds", () => {
+  const held = { assigned_worker_id: "worker-a" };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function changeButtons() {
+    return [
+      t("plugins.install"),
+      t("plugins.browse"),
+      t("plugins.resolve.action"),
+      t("plugins.disable"),
+      t("plugins.remove"),
+    ].map((name) => screen.getByRole("button", { name }));
+  }
+
+  it("holds every change with the reason", async () => {
+    mockGets({ plugins: [plugin()], validation: EMPTY_VALIDATION });
+    render(
+      <MemoryRouter>
+        <QueryClientProvider client={new QueryClient()}>
+          <ToastProvider>
+            <ServerPluginsTab
+              server={server(held)}
+              communityId={CID}
+              can={allow}
+            />
+          </ToastProvider>
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("Sodium");
+    for (const button of changeButtons()) {
+      expect(button).toBeDisabled();
+    }
+    expect(screen.getByLabelText(t("plugins.side.label"))).toBeDisabled();
+    expect(screen.getByText(t("common.serverAssigned"))).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Stop the server to manage/),
+    ).not.toBeInTheDocument();
+  });
+
+  // A refusal hold has no bound, so the notice names the refusal (#4057).
+  it("names the refusal a held server is held for", async () => {
+    mockGets({ plugins: [plugin()], validation: EMPTY_VALIDATION });
+    render(
+      <MemoryRouter>
+        <QueryClientProvider client={new QueryClient()}>
+          <ToastProvider>
+            <ServerPluginsTab
+              server={server({
+                ...held,
+                final_snapshot_refusal: "unavailable",
+              })}
+              communityId={CID}
+              can={allow}
+            />
+          </ToastProvider>
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("Sodium");
+    expect(
+      screen.getByText(t("common.serverHeld.unavailable")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("common.serverAssigned")),
+    ).not.toBeInTheDocument();
+  });
+
+  describe("on the detail page", () => {
+    let restoreWs: () => void;
+    beforeEach(() => {
+      setAccessToken("tok-1");
+      restoreWs = installMockWebSocket();
+    });
+    afterEach(() => restoreWs());
+
+    it("frees the changes on the release frame", async () => {
+      const detail = server({
+        ...held,
+        name: "survival",
+        game_port: 25565,
+        observed_at: null,
+        config: {},
+      });
+      mockApi.get.mockImplementation((url: string) => {
+        if (url.endsWith("/plugins/validate")) {
+          return Promise.resolve(EMPTY_VALIDATION);
+        }
+        if (url.endsWith("/plugins/updates")) {
+          return Promise.resolve({ updates: [] });
+        }
+        if (url.endsWith("/plugins")) {
+          return Promise.resolve({ plugins: [plugin()] });
+        }
+        if (url === "/api/meta") {
+          return Promise.resolve(meta());
+        }
+        return Promise.resolve(detail);
+      });
+      render(
+        <MemoryRouter initialEntries={[`/communities/${CID}/servers/${SID}`]}>
+          <QueryClientProvider
+            client={
+              new QueryClient({ defaultOptions: { queries: { retry: false } } })
+            }
+          >
+            <ToastProvider>
+              <Routes>
+                <Route
+                  path="/communities/:cid/servers/:sid"
+                  element={<ServerDetailPage />}
+                />
+              </Routes>
+            </ToastProvider>
+          </QueryClientProvider>
+        </MemoryRouter>,
+      );
+      await screen.findByText("survival");
+      fireEvent.click(
+        screen.getByRole("tab", { name: t("serverDetail.tab.mods") }),
+      );
+      await screen.findByText("Sodium");
+      for (const button of changeButtons()) {
+        expect(button).toBeDisabled();
+      }
+
+      act(() => {
+        MockWebSocket.last().open();
+        MockWebSocket.last().message(
+          JSON.stringify({
+            stream: "status",
+            ts: "t",
+            payload: { assigned_worker_id: null },
+          }),
+        );
+      });
+
+      // The frame alone frees them: every REST read still answers worker-a.
+      await waitFor(() => {
+        for (const button of changeButtons()) {
+          expect(button).toBeEnabled();
+        }
+      });
+      expect(
+        screen.queryByText(t("common.serverAssigned")),
+      ).not.toBeInTheDocument();
+    });
   });
 });
 

@@ -27,6 +27,12 @@ describe("pluginErrorPresentation", () => {
       "plugins.error.busy",
     ],
     [
+      // A change the stop's Worker still holds the server for (#3998, #4003).
+      "maps server_assigned",
+      new ApiError(409, { reason: "server_assigned" }),
+      "common.serverAssigned",
+    ],
+    [
       "maps invalid_path",
       new ApiError(422, { reason: "invalid_path" }),
       "plugins.error.invalidPath",

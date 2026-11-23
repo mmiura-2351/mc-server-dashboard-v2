@@ -4,15 +4,20 @@ import { describe, expect, it } from "vitest";
 import {
   actionApplies,
   atRest,
+  atRestWriteRefusal,
   bucketOf,
   converging,
   crashNotRestarted,
+  finalSnapshotRefusal,
+  heldNoticeKey,
   isTransitional,
   KNOWN,
   normalizeState,
   type ObservedState,
+  releaseWithoutSnapshotApplies,
   STATE_BUCKETS,
   type StateBucket,
+  serverAssignedKey,
   startRefusal,
   statePill,
   statesForBucket,
@@ -182,8 +187,8 @@ describe("startRefusal", () => {
 });
 
 describe("atRest", () => {
-  // Export / delete / settings edits need the server at rest (the API answers
-  // 409 server_unsettled / server_not_stopped otherwise, SPEC 6.9).
+  // The at-rest copy is served here (the API answers 409 server_unsettled /
+  // server_not_stopped otherwise); a write also needs the release, below.
   it("is true for the settled states", () => {
     expect(atRest("stopped")).toBe(true);
     expect(atRest("crashed")).toBe(true);
@@ -211,6 +216,116 @@ describe("atRest", () => {
 
   it("running with desired is not at rest", () => {
     expect(atRest("running", "running")).toBe(false);
+  });
+});
+
+describe("atRestWriteRefusal", () => {
+  // The API's gate on a write to the at-rest data (`Server.is_quiescent()`,
+  // issue #3998): at rest and no Worker assigned. Not at rest is named first,
+  // as `not_quiescent_error` does: a running server is always assigned, and
+  // the release reason would be the wrong remedy for it.
+  const atRestStates: readonly ObservedState[] = [
+    "stopped",
+    "crashed",
+    "unknown",
+  ];
+  const rows = ["running", "stopped"].flatMap((desired) =>
+    KNOWN.flatMap((observed) =>
+      [false, true].map((assigned) => ({
+        desired,
+        observed,
+        assigned,
+        refusal:
+          desired !== "stopped" || !atRestStates.includes(observed)
+            ? "not_at_rest"
+            : assigned
+              ? "server_assigned"
+              : null,
+      })),
+    ),
+  );
+
+  it.each(rows)(
+    "$desired / $observed / assigned=$assigned answers $refusal",
+    ({ desired, observed, assigned, refusal }) => {
+      expect(atRestWriteRefusal(observed, desired, assigned)).toBe(refusal);
+    },
+  );
+
+  it("holds a stopped server its Worker still holds, and frees it on the release", () => {
+    expect(atRestWriteRefusal("stopped", "stopped", true)).toBe(
+      "server_assigned",
+    );
+    expect(atRestWriteRefusal("stopped", "stopped", false)).toBeNull();
+  });
+});
+
+describe("finalSnapshotRefusal", () => {
+  // The two refusals the API records (#4054); anything else, a missing field
+  // included, is no refusal.
+  it.each([
+    ["busy", "busy"],
+    ["unavailable", "unavailable"],
+    [null, null],
+    [undefined, null],
+    ["timeout", null],
+  ] as const)("reads %s as %s", (value, refusal) => {
+    expect(finalSnapshotRefusal(value)).toBe(refusal);
+  });
+});
+
+describe("releaseWithoutSnapshotApplies", () => {
+  // The precondition of the API's `…/release-without-snapshot` (#4055): at
+  // rest under a stopped intent, still assigned, and held by a refusal.
+  const atRestStates: readonly ObservedState[] = [
+    "stopped",
+    "crashed",
+    "unknown",
+  ];
+  const rows = ["running", "stopped"].flatMap((desired) =>
+    KNOWN.flatMap((observed) =>
+      [false, true].flatMap((assigned) =>
+        ([null, "busy", "unavailable"] as const).map((refusal) => ({
+          desired,
+          observed,
+          assigned,
+          refusal,
+          applies:
+            desired === "stopped" &&
+            atRestStates.includes(observed) &&
+            assigned &&
+            refusal !== null,
+        })),
+      ),
+    ),
+  );
+
+  it.each(rows)(
+    "$desired / $observed / assigned=$assigned / refusal=$refusal answers $applies",
+    ({ desired, observed, assigned, refusal, applies }) => {
+      expect(
+        releaseWithoutSnapshotApplies(observed, desired, assigned, refusal),
+      ).toBe(applies);
+    },
+  );
+});
+
+describe("serverAssignedKey", () => {
+  // A hold whose refusal is known is worded by it (#4057); one without, a
+  // final snapshot not settled yet, keeps the neutral reason (#4003).
+  it("names the refusal a held server is held for", () => {
+    expect(serverAssignedKey(null)).toBe("common.serverAssigned");
+    expect(serverAssignedKey("busy")).toBe("common.serverHeld.busy");
+    expect(serverAssignedKey("unavailable")).toBe(
+      "common.serverHeld.unavailable",
+    );
+  });
+});
+
+describe("heldNoticeKey", () => {
+  it("words the held notice by the refusal", () => {
+    expect(heldNoticeKey("busy")).toBe("serverDetail.held.busy");
+    expect(heldNoticeKey("unavailable")).toBe("serverDetail.held.unavailable");
   });
 });
 

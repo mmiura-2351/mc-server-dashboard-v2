@@ -34,6 +34,8 @@ import {
   bucketOf,
   converging,
   crashNotRestarted,
+  finalSnapshotRefusal,
+  heldNoticeKey,
   normalizeState,
   type ObservedState,
   STATE_BUCKETS,
@@ -644,7 +646,8 @@ function useLifecycle(server: ServerResponse, communityId: string) {
       // reasons their own message, the rest a generic toast. The verb goes with
       // it on both the 409 and the 503 path: for a few reasons what the failure
       // left pending, or left unconfirmed, depends on it (issues #2435/#2440/
-      // #2441).
+      // #2441), and so does the refusal a stop's Worker holds the server for
+      // (#4057).
       if (onForbidden(error, { server })) {
         return;
       }
@@ -652,7 +655,17 @@ function useLifecycle(server: ServerResponse, communityId: string) {
         setEulaOpen(true);
         return;
       }
-      showServerToast(server, t(lifecycleErrorMessage(error, action)), "error");
+      showServerToast(
+        server,
+        t(
+          lifecycleErrorMessage(
+            error,
+            action,
+            finalSnapshotRefusal(server.final_snapshot_refusal),
+          ),
+        ),
+        "error",
+      );
     },
   });
 
@@ -952,7 +965,8 @@ interface ActionProps {
 // permissions, WEBUI_SPEC.md 7.3); disabled while a request is in flight or the
 // action does not apply to the current state. Start follows the API's start
 // guard, whatever the server reads (#3860), and a Start held by the Worker a
-// stop still holds says so (#3818).
+// stop still holds says so (#3818), naming the Worker's refusal of the final
+// snapshot when it holds the server for one (#4057).
 function Action({ action, server, state, pending, can, onRun }: ActionProps) {
   if (!can(`server:${action}`, { serverId: server.id })) {
     return null;
@@ -966,12 +980,21 @@ function Action({ action, server, state, pending, can, onRun }: ActionProps) {
       : actionApplies(action, state, desired, assigned);
   const disabled = pending || !applies;
   const held = refusal === "transition_conflict";
+  const snapshotRefusal = finalSnapshotRefusal(server.final_snapshot_refusal);
   return (
     <button
       type="button"
       className={`btn sm${action === "start" ? " success" : ""}`}
       disabled={disabled}
-      title={held ? t("serverDetail.startAwaitsRelease") : undefined}
+      title={
+        held
+          ? t(
+              snapshotRefusal === null
+                ? "serverDetail.startAwaitsRelease"
+                : heldNoticeKey(snapshotRefusal),
+            )
+          : undefined
+      }
       onClick={() => onRun(action)}
     >
       {t(

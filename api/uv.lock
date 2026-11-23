@@ -792,7 +792,7 @@ dev = [
 requires-dist = [
     { name = "aioboto3", specifier = ">=15.5.0,<16" },
     { name = "alembic", specifier = ">=1.18.4,<2" },
-    { name = "anyio", specifier = ">=4.14.2,<5" },
+    { name = "anyio", specifier = ">=4.16.0,<5" },
     { name = "argon2-cffi", specifier = ">=25.1.0,<26" },
     { name = "asyncpg", specifier = ">=0.31.0,<0.33" },
     { name = "bcrypt", specifier = ">=5.0.0,<6" },
