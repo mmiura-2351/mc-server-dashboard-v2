@@ -88,6 +88,9 @@ from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
 from mc_server_dashboard_api.servers.application.stop_intents import (
     StopIntentCounter,
 )
+from mc_server_dashboard_api.servers.application.unannounced_refusals import (
+    UnannouncedRefusals,
+)
 from mc_server_dashboard_api.servers.application.unrecorded_stops import (
     UnrecordedStops,
 )
@@ -2400,6 +2403,7 @@ async def test_late_snapshot_release_whose_write_failed_converges_on_the_short_g
             clock=clock,
             stop_convergence=StopConvergenceGuard(),
             unrecorded_stops=unrecorded,
+            unannounced_refusals=UnannouncedRefusals(),
         )
     )
     reporter = FleetWorkerId(str(worker))
@@ -2687,7 +2691,9 @@ async def test_a_refused_final_snapshot_hold_is_released_without_it_then_starts(
         server_id=str(server_id.value), streams=frozenset({EventStream.STATUS})
     )
     released = await ReleaseHeldServer(
-        uow=ServersUnitOfWork(factory, bus), stop_convergence=StopConvergenceGuard()
+        uow=ServersUnitOfWork(factory, bus),
+        stop_convergence=StopConvergenceGuard(),
+        unannounced_refusals=UnannouncedRefusals(),
     )(community_id=community, server_id=server_id)
 
     # The returned server is the row as the release wrote it (issue #4056).

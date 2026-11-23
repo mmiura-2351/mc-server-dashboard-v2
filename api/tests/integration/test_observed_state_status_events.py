@@ -75,6 +75,9 @@ from mc_server_dashboard_api.servers.application.startup_reset import (
 from mc_server_dashboard_api.servers.application.stop_convergence import (
     StopConvergenceGuard,
 )
+from mc_server_dashboard_api.servers.application.unannounced_refusals import (
+    UnannouncedRefusals,
+)
 from mc_server_dashboard_api.servers.application.unrecorded_stops import (
     UnrecordedStops,
 )
@@ -1095,6 +1098,7 @@ async def test_late_final_snapshot_release_publishes_the_release(
         clock=world.clock,
         stop_convergence=StopConvergenceGuard(),
         unrecorded_stops=UnrecordedStops(),
+        unannounced_refusals=UnannouncedRefusals(),
         real_time_events=world.bus,
     )
     watching = world.watch(server)

@@ -146,6 +146,9 @@ from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
 from mc_server_dashboard_api.servers.application.stop_intents import (
     StopIntentCounter,
 )
+from mc_server_dashboard_api.servers.application.unannounced_refusals import (
+    UnannouncedRefusals,
+)
 from mc_server_dashboard_api.servers.application.unrecorded_stops import (
     UnrecordedStops,
 )
@@ -2056,6 +2059,14 @@ class StopServer:
     # (issue #3441), so its replay waits the short grace rather than the full one.
     # Defaulted for the same reason as ``stop_refusals``.
     unrecorded_stops: UnrecordedStops = field(default_factory=UnrecordedStops)
+    # Where a write of a final-snapshot refusal whose COMMIT failed is recorded
+    # (issue #4152), so the next refused attempt of the server, in time or late,
+    # announces the refusal. Process-wide in production, shared with every
+    # ReleaseHeldServer, whose release forgets it; defaulted for the same reason
+    # as ``stop_refusals``.
+    unannounced_refusals: UnannouncedRefusals = field(
+        default_factory=UnannouncedRefusals
+    )
     # The per-server exclusion every snapshot-then-release flow holds (issue #3491,
     # ``stop_convergence.py``). Process-wide in production — every construction
     # site wires the one app-state instance; the private default only serves the
@@ -2604,6 +2615,7 @@ class StopServer:
                 await self.uow.commit()
         if cleared:
             _reflect_release(server)
+            self.unannounced_refusals.forget(server_id)
 
     async def _final_snapshot(
         self, *, server: Server, worker_id: WorkerId
@@ -2830,26 +2842,42 @@ class StopServer:
         the database error would otherwise replace it. The row is held all the
         same, since it stays assigned, and keeps ``recorded`` until the next
         refused retry writes the refusal. The entity keeps ``recorded`` too.
+
+        A COMMIT that fails, or whose caller is cancelled at its await, may
+        have landed with its answer unread, and then the row holds the refusal
+        with no frame published. That write is recorded
+        (``unannounced_refusals``, issue #4152), and the next refused attempt
+        writes the refusal as a retry even when it reads it recorded, which
+        publishes the frame. An API restart loses the record, and a reload
+        then shows the hold.
         """
 
-        if refusal is not recorded:
+        retry = self.unannounced_refusals.pending(server.id)
+        if refusal is not recorded or retry:
             try:
                 async with self.uow:
                     await self.uow.servers.set_final_snapshot_refusal(
-                        server.id, worker_id, refusal
+                        server.id, worker_id, refusal, retry=retry
                     )
-                    await self.uow.commit()
+                    try:
+                        await self.uow.commit()
+                    except BaseException:
+                        # A cancellation at the await may leave it landed too.
+                        self.unannounced_refusals.record(server.id)
+                        raise
             except Exception:
                 _LOG.warning(
                     "could not record the final-snapshot refusal of server %s: it "
                     "stays assigned to worker %s, and the next refused retry of "
-                    "the snapshot records the refusal (issue #4103)",
+                    "the snapshot records the refusal, or announces it if this "
+                    "write's COMMIT landed unanswered (issues #4103, #4152)",
                     server.id.value,
                     worker_id.value,
                     exc_info=True,
                 )
                 server.final_snapshot_refusal = recorded
                 return
+            self.unannounced_refusals.forget(server.id)
         server.final_snapshot_refusal = refusal
 
     async def redispatch_stop(
@@ -3244,6 +3272,7 @@ class StopServer:
                     await self.uow.commit()
         if cleared:
             _reflect_release(server)
+            self.unannounced_refusals.forget(server_id)
             if wedged_at is ObservedState.UNKNOWN:
                 _LOG.warning(
                     "recovered a stop wedged at (stopped, unknown, assigned) for "
@@ -3420,7 +3449,9 @@ class StopServer:
         A retry of a late refusal takes no unassigned row: it has no release to
         announce, and the row it held was released since. On a row it still
         holds, it announces the refusal even when it finds it recorded, by its
-        earlier attempt or before (issue #4104).
+        earlier attempt or before (issue #4104). So does a first attempt that
+        follows an in-time write of the refusal whose COMMIT failed (issue
+        #4152), which may have landed unannounced.
         """
 
         refusal = _FINAL_SNAPSHOT_REFUSALS_KEEPING_THE_WORKER.get(outcome.status)
@@ -3464,8 +3495,13 @@ class StopServer:
                     else ""
                 )
                 if refusal is not None:
+                    # An in-time write of the refusal whose COMMIT failed may
+                    # have landed unannounced (issue #4152).
                     await self.uow.servers.set_final_snapshot_refusal(
-                        server_id, worker_id, refusal, retry=retry
+                        server_id,
+                        worker_id,
+                        refusal,
+                        retry=retry or self.unannounced_refusals.pending(server_id),
                     )
                     cleared = False
                 else:
@@ -3476,6 +3512,7 @@ class StopServer:
                     )
                 await self.uow.commit()
         if refusal is not None:
+            self.unannounced_refusals.forget(server_id)
             # Answered, so nothing of the snapshot is in flight.
             self.unrecorded_stops.record(server_id, at=answered_at)
             _LOG.warning(
@@ -3491,6 +3528,7 @@ class StopServer:
             return
         if not cleared:
             return
+        self.unannounced_refusals.forget(server_id)
         if outcome.success:
             _LOG.info(
                 "released worker %s for server %s on a LATE successful final "
