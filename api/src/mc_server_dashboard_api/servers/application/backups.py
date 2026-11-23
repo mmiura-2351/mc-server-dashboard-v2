@@ -25,12 +25,16 @@ row (source manual or scheduled, the archive ref, its size, the actor), and an
 upload stores its archive the same way (issue #4086). The row is inserted with
 its size in one transaction, so no row is recorded ahead of its archive. A
 failure after the archive write and before the row's COMMIT is sent, a
-cancellation included, deletes the archive again (best effort). Once the COMMIT
-is sent, its outcome is unknown, since a COMMIT can apply and still raise: the
-archive is kept and a WARNING logged. A crash, a delete that fails, or an
-unconfirmed COMMIT that did not apply leaves an archive with no row: no listing
-shows it, and the row-less archive reclaim deletes it after its grace (issue
-#4106, ``rowless_archive_gc``).
+cancellation included, deletes the archive again (best effort). The delete is
+shielded from a later cancellation and bounded, so an API shutdown that cancels
+the backup waits for it at most 30 s (issue #4109). A cancellation during the
+archive write has nothing to delete yet. Once the COMMIT is sent, its outcome is
+unknown, since a COMMIT can apply and still raise: the archive is kept and a
+WARNING logged. A crash, a delete that fails, an fs archive write cancelled
+midway (its thread runs on and still writes the archive), or an unconfirmed
+COMMIT that did not apply leaves an archive with no row: no listing shows it,
+and the row-less archive reclaim deletes it after its grace (issue #4106,
+``rowless_archive_gc``).
 
 Restore requires the server **at rest** (FR-BAK-4): a hot replacement of a live
 working set is unsafe, so a running server is 409. Restore republishes the
