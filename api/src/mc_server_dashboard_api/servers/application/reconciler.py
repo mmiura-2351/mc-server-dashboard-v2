@@ -632,8 +632,8 @@ class RunReconcilerTick:
                 continue
             if not marked:
                 _LOG.debug(
-                    "worker %s has had no session since %s; the mark changed none "
-                    "of its servers",
+                    "worker %s has had no session since %s; marked none of its "
+                    "servers unknown",
                     worker_id.value,
                     ended_at.isoformat(),
                 )

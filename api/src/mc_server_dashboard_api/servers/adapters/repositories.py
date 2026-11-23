@@ -758,8 +758,9 @@ class SqlAlchemyServerRepository(ServerRepository):
         # intent) is written only to move its stamp, so at this very stamp it is
         # not locked or written again (issue #4144): the reconciler repeats the
         # write on every tick while a row it keeps leaves the Worker selected. At
-        # an earlier stamp it still takes this one, as the teardown has always
-        # made it do.
+        # an earlier stamp it still takes this one: a report read before the
+        # disconnect that lands after this write is then dropped by the
+        # monotonic guard, not applied over the unknown (issue #4118).
         # A crashed row keeps its state (issue #3885), as the startup reset leaves
         # it: the Worker has already forgotten the crashed instance, so the row
         # stays truthful, and its stored crash keeps explaining it.
