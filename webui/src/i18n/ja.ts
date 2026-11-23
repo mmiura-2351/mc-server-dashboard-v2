@@ -622,6 +622,11 @@ export const ja: Record<TranslationKey, string> = {
   "backups.retention.error.tiered":
     "0以上の整数を入力し、少なくとも1つは0より大きい値にしてください。",
   "backups.retention.error.invalid": "その保持ポリシーは無効です。",
+  // An enabled backup schedule with no retention policy (keep all) grows
+  // without bound (#4084): warned on both the Backups and Schedules tabs.
+  "backups.retention.unboundedWarning":
+    "バックアップのスケジュールが有効ですが、保持ポリシーが設定されていません。定期バックアップが際限なく溜まり、ディスクを使い切るおそれがあります。",
+  "backups.retention.unboundedSetBelow": "下で保持ポリシーを設定してください。",
   // Restore dialog (stopped-only; two-step stop-then-restore).
   "backups.restoreDialog.title": "バックアップを復元",
   "backups.restoreDialog.blocked":
@@ -702,6 +707,8 @@ export const ja: Record<TranslationKey, string> = {
   "schedules.empty": "スケジュールはまだありません。",
   "schedules.none": "—",
   "schedules.create": "+ スケジュールを作成",
+  "schedules.retentionWarning.link":
+    "「バックアップ」タブで保持ポリシーを設定する",
   "schedules.edit": "編集",
   "schedules.delete": "削除",
   "schedules.history": "実行履歴",
@@ -725,6 +732,9 @@ export const ja: Record<TranslationKey, string> = {
   "schedules.cadence.everyMinutes": "{count}分ごと",
   "schedules.cadence.everyHours": "{count}時間ごと",
   "schedules.created": "スケジュールを作成しました。",
+  // The retention step found a policy set since the dialog opened (#4084).
+  "schedules.createdRetentionKept":
+    "スケジュールを作成しました。サーバーにはすでに保持ポリシーがあったため、ここで選んだものではなく既存のポリシーをそのまま残しました。",
   "schedules.updated": "スケジュールを更新しました。",
   "schedules.deleted": "スケジュールを削除しました。",
   "schedules.toggle.enabled": "スケジュールを有効にしました。",
@@ -770,6 +780,24 @@ export const ja: Record<TranslationKey, string> = {
     "サーバーの稼働中のみバックアップする",
   "schedules.dialog.onlyWhenRunningHint":
     "予定時刻にサーバーが停止している場合、バックアップを取らずに実行を「スキップ」として記録します。",
+  // Create only, for a backup schedule on a server with no retention policy
+  // (#4084): keep the last N (prefilled 7) or opt out to keep all. The hint
+  // follows the choice.
+  "schedules.dialog.retentionKeepLastHint":
+    "このサーバーにはまだ保持ポリシーがありません。スケジュールを作成すると、定期バックアップを最新のN件だけ保持するポリシーが設定され、それ以外の定期バックアップは既存のものも含めて削除されます。「破損」と表示された定期バックアップは、ほかの定期バックアップだけではN件に届かない場合にのみ保持されます。手動・アップロード・イベントのバックアップが削除されることはありません。",
+  "schedules.dialog.retentionKeepAllHint":
+    "このサーバーには保持ポリシーがないため、定期バックアップは削除するか「バックアップ」タブでポリシーを設定するまで、すべて保持されます。",
+  // Keep-last N prunes at once: the count of existing scheduled backups it
+  // deletes, a counting line while the backups list loads, or a generic line
+  // when it cannot be read; each gates Create behind the acknowledgement.
+  "schedules.dialog.retentionPrune":
+    "既存の定期バックアップ{count}件がすぐに削除されます。",
+  "schedules.dialog.retentionPruneCounting":
+    "すぐに削除される可能性のある既存の定期バックアップを数えています…",
+  "schedules.dialog.retentionPruneUnknown":
+    "既存の定期バックアップの件数を取得できませんでした。その一部がすぐに削除される可能性があります。",
+  "schedules.dialog.retentionPruneAck":
+    "この件数を超える既存の定期バックアップが削除されることを理解しました。",
   "schedules.dialog.warningsLabel": "プレイヤーへの警告",
   "schedules.dialog.warningsHint":
     "アクションの指定分前にメッセージを通知します（最大5ステップ）。",
@@ -793,6 +821,8 @@ export const ja: Record<TranslationKey, string> = {
   "schedules.error.invalidWarnings":
     "警告は1〜120分（間隔より短い）の重複しないオフセットとメッセージが必要です。",
   "schedules.error.generic": "問題が発生しました。もう一度お試しください。",
+  "schedules.error.retentionNotSet":
+    "スケジュールは作成されましたが、保持ポリシーを設定できませんでした。定期バックアップは引き続き無制限に保持されます。「バックアップ」タブで設定してください。",
   "schedules.deleteDialog.title": "スケジュールを削除",
   "schedules.deleteDialog.body":
     "「{name}」を削除しますか？実行履歴も一緒に削除されます。",

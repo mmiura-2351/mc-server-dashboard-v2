@@ -996,6 +996,13 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   keep; tiered, only when its day, week or month has no backup not marked
   Damaged. The keep-all hint does not mention Damaged backups, since nothing
   is pruned.
+- Keep-all warning (#4084): while the server has no retention policy
+  (`backup_retention` null) and at least one enabled `backup` schedule (from
+  the `…/{sid}/schedules` list), a warning above the retention editor says
+  scheduled backups accumulate without bound; for `backup:schedule` holders it
+  points at the editor below. A disabled backup schedule takes no backups and
+  any policy bounds them, so neither warns. The schedule list needs
+  `schedule:read`, so a member without it gets no warning on this tab.
 
 ### 6.8 Server detail — Players
 - Attached groups (`GET …/{sid}/groups`) with kind badges; attach/detach
@@ -1074,6 +1081,36 @@ numbers): the UI for the general scheduler.
   inline field errors via their typed 422 reasons (`invalid_cron`,
   `invalid_cadence`, `invalid_timezone`, `invalid_schedule_name`,
   `invalid_payload`) and the 409 duplicate name (`schedule_name_exists`).
+- Retention step (create only, #4084): a `backup` action on a server with no
+  retention policy adds a retention select, keep-last-N prefilled with 7
+  (editable; a whole number ≥ 1, checked before anything is sent) or keep all,
+  with a hint for the choice made. Keep-last-N prunes the server's existing
+  scheduled backups beyond N as soon as it is set, so the step counts them
+  from the backups list (`backup:read`), read since the dialog opened: a list
+  cached by the Backups tab counts only once read again, and a read that
+  fails makes the count unknown again. When some would be deleted it says
+  how many, and Create waits for an acknowledgement checkbox, asked again
+  when the count or N changes. While the list loads, a counting line
+  replaces the count; without `backup:read`, or when the list fails, a
+  generic line says it could not be counted. Either way the checkbox is
+  still required; with nothing to prune there is none. The line describes
+  the checkbox and is a polite live region (`role="status"`), so a count
+  that arrives and unticks the box is announced.
+- Once the schedule is created, the step reads the server again and leaves a
+  policy set since (from another session) in place, and the success toast
+  says so; otherwise keep-last-N `PUT`s `{keep_last}` to
+  `…/{sid}/backups/retention`. Keep all sends nothing.
+  After any retention attempt the server, the backups list and its statistics
+  are refetched, so the keep-all warning follows what the server holds, even
+  after a write reported as failed that had landed. A failed retention write
+  does not undo the schedule: the dialog closes on it and an error toast says
+  the policy was not set (a 403 also refreshes the capabilities, 7.3).
+  Creating a backup schedule already needs `backup:schedule`, the endpoint's
+  permission. Editing, and a server that has a policy, show no step.
+- Keep-all warning: the Backups tab's warning (6.7) also shows above this
+  table, under the same condition; for a member with `backup:read` and
+  `backup:schedule` it links to the Backups tab, where the retention editor
+  is.
 - Delete: confirm dialog (run history cascades away with the schedule).
 - Run history: per-schedule dialog, newest first — outcome badge
   (`success`/`failure`/`skipped`/`unknown`), sanitized detail, started/finished
