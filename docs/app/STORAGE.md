@@ -430,6 +430,7 @@ depend on a Worker.
 |---|---|---|
 | `create_backup_from_current(community_id, server_id) -> BackupKey` | Archive the authoritative `current/` into `backups/` | The **stopped-server** path (REQUIREMENTS.md Section 6.9). For a **running** server the Worker quiesces the live world (save-off → save-all → settle-wait, capped at 180 s: a save still writing then refuses the snapshot `quiesce_unavailable`) and commits an on-demand snapshot (`commit_snapshot`) → then the application calls this; `Storage` only ever archives the authoritative copy. The writer counts the tar it writes, every byte of the stream restore will decompress, and a working set whose tar would pass the decompressed-size cap (8 GiB) raises `ArchiveTooLargeError` with nothing written (issue #3859): restore and the upload gate count the same stream toward the same cap, so such a backup could be neither restored nor uploaded again. The servers seam answers `409 working_set_too_large`. |
 | `list_backups(community_id, server_id) -> [BackupKey]` | Enumerate a server's backups | Metadata (label, timestamp, size) lives in the DB (DATABASE.md); this returns the keys. |
+| `list_backup_entries(community_id, server_id) -> [BackupEntry]` | Enumerate a server's backup archives with their store times | The archives `list_backups` lists, each with `modified_at`: the file's mtime on fs, the object's `LastModified` on the object backend. The row-less archive reclaim (Section 4.3) ages each archive by it. |
 | `restore_backup(community_id, server_id, BackupKey, *, force=False, fence=None)` | Atomically republish a backup into `current/` | Atomic publish (Section 4). Caller must ensure the server is **stopped** (FR-BAK-4); `Storage` enforces atomicity, the application enforces the stop precondition. A restore replaces `current/`, so it **bumps the working-set generation** like a `commit_snapshot` — otherwise a same-Worker scratch with `held == store` would skip the post-restore hydrate on the next start and boot the PRE-restore world. The publisher is stamped with the `api-restore` sentinel (no producing Worker), so the publish-time guard (Section 8) treats an in-flight stale snapshot from a real Worker as a different-publisher publish and refuses it, closing the restore-clobber window. The extracted backup is validated through the integrity gate: a corrupt backup is refused with `IntegrityCheckError` (carrying the `WorkingSetReport`); `current/` is left untouched. Quarantining the backup is an application-layer concern — the caller receives the report and decides what to do. `force=True` (the `?force=true` API override, operator-only) publishes despite corruption and returns the `WorkingSetReport` so the caller can quarantine and audit. An archive whose bytes do not read back as a `tar.gz` at all — truncated, or damaged gzip/tar framing — raises `ArchiveUnreadableError` whatever `force` says, with `current/` untouched (Section 7.3, `UNREADABLE` vs. `QUARANTINED`). A restore **bypasses the missing-region gate (Section 4.5) by design**: that gate diffs a staged set against the prior `current/` to catch a Worker accidentally dropping live regions, but a backup is a **complete, self-consistent set captured as a whole** — it is the authoritative replacement, not an incremental delta over `current/`, so a backup that legitimately holds fewer regions than the current world (an older/smaller world being restored) is exactly the intended operation and must not be refused. The structural `.mca` integrity gate applies regardless (a backup cannot be *internally* corrupt); only the prior-set partial-loss comparison is skipped. **Restore marker↔flip window:** unlike `commit_snapshot`, the generation/publisher marker is written *before* the `current` flip (Section 2 generation marker), so a failure between the two leaves the prior world live at the advanced generation with the `api-restore` publisher: holders of the old generation hydrate it again and an in-flight stale snapshot is refused. The accepted cost: a stopped Worker's unpublished scratch progress is displaced and lost by that hydrate on its next start. The per-server lock serializes the window so no concurrent publish can interleave. A failure *after* the flip — the fs parent-dir fsync, an object pointer write the store applied but whose response was lost — leaves the restored world live at the advanced generation and raises `RestorePartiallyPublishedError` carrying the `WorkingSetReport` and the failure as its `cause`. The caller treats it as a published restore whose later step failed: it quarantines a forced corrupt backup, runs its post-restore steps over the live working set, and audits a forced corrupt restore as published (#3564). On fs a replace of `current` that returned is a known flip, so a failure after it is reported as published with no re-read. A replace that raised may still have renamed (a remote filesystem such as NFS can apply a rename and report it failed), so one read of the link settles it: naming the restored snapshot, it published; naming the prior one, it did not and the failure is re-raised; anything else, or a failed read, is `RestorePublicationUnknownError`. On the object backend a failed pointer write is confirmed by re-reading the pointer (up to 3 reads with a short backoff); when no read answers, `RestorePublicationUnknownError` (same fields) says the restore may have published, and the caller handles it the same way. The copied snapshot is never deleted once its pointer write was attempted. On both backends a failed staging cleanup (on fs, its path probe can itself raise on a failing mount) is logged rather than raised over the outcome on its way out, and the sweep reclaims what is left. `fence` is the caller's async check that it still holds the exclusion it started under (`RestoreBackup` passes its lifecycle lock's, DATABASE.md Section 7), awaited once under the per-server lock after the lock-free extraction and copy and before the generation bump; what it raises propagates with nothing bumped or published. It runs while the lock is held, so it must not wait on anything that can wait on this server's lock; `None` skips it. |
 | `delete_backup(community_id, server_id, BackupKey)` | Remove a backup archive | Idempotent. |
 | `open_backup(community_id, server_id, BackupKey, byte_range=None) -> ReadStream` | Stream a stored archive (or one byte range of it) in its native format | Download: yields the archive bytes **verbatim** — the adapter-internal `tar.gz` (Section 2), no recompression. `NotFoundError` for an unknown key. `byte_range` is an **inclusive** `(first, last)` pair the caller has already resolved against `backup_size`, and the stream then yields exactly `last - first + 1` bytes — how a download interrupted mid-transfer resumes. It is a real ranged read (an object-store ranged GET; a filesystem seek), never a prefix discarded off the full stream: serving the tail of a multi-GB archive must not re-read its head. |
@@ -445,8 +446,11 @@ as a `WARNING`. So no row is recorded ahead of its archive. Once the COMMIT is
 sent, a failure keeps the archive and is logged as a `WARNING`: a COMMIT can apply
 and still raise, so the row may stand (DATABASE.md Section 8). What a crash, a
 delete that failed, or an unconfirmed COMMIT that did not apply leaves is an
-archive with no row: no listing shows it, and `DeleteServer` deletes it with the
-server's other non-retained archives (Section 2.1).
+archive with no row: no listing shows it, and the row-less archive reclaim
+(Section 4.3) deletes it once it is older than the grace. If the server is
+deleted first, `DeleteServer` deletes it with the server's other non-retained
+archives (Section 2.1). An archive that lands under a server after its delete
+stays there; issue #4165 tracks reclaiming it.
 
 **One archive member rule.** Both backends judge a backup archive's members by
 one rule, shared code in both adapters (`refuse_unrestorable_member`), wherever
@@ -971,9 +975,56 @@ Section 5.7). It is gated on the resource pack store
 existing, not on the control plane. On fs / remote-fs there is no resource pack
 store, so no blob to reclaim, and the GC does not run.
 
+**Row-less backup archives** (issue #4106). A backup writes its archive before
+it records its row (Section 3.3), so a crash between the two, a discard whose
+delete failed, or an unconfirmed COMMIT that did not apply leaves an archive no
+row names. It is never listed, restored or downloaded, and nothing else removes
+it while its server lives. The **row-less archive reclaim** does. Like the
+resource-pack GC, it is a servers-side use case, not part of `sweep`, because it
+reads the backup rows. For each server row:
+
+1. List the server's archives with their store times (`list_backup_entries`). A
+   listing that fails ends that server's pass with a WARNING, and the pass goes
+   on with the next server.
+2. Read the server's backup rows. The read follows the listing, so a row
+   committed by then is seen. An archive a row names is live and never deleted.
+   A read that fails ends the whole pass with a WARNING, since every later
+   server reads the same database. So does a failed read of the servers.
+3. Spare any archive younger than the grace,
+   `storage_sweep.rowless_archive_grace_seconds` (7 days by default,
+   CONFIGURATION.md Section 5.15). The age is the archive's own, from its store
+   time, not the time since it lost its row. Both writers, a create and an
+   upload, hold the server's lifecycle lock from the archive write to the row
+   commit, and the reclaim takes the same lock, so a writer that holds its lock
+   is never raced.
+   The grace covers a writer that lost its lock (DATABASE.md Section 7) and goes
+   on writing, and a store that stamps a multipart object with the time its
+   upload began. So it must be longer than any backup takes to write.
+4. For a server with an archive left, take its lifecycle lock and read the
+   server's row and its backup rows again under it. A server whose row is gone
+   was deleted during the pass and is left alone: `DeleteServer` commits under
+   the same lock. Otherwise delete each archive the rows still do not name, each
+   after a check that the lock is still held. A server whose lock stays busy past
+   the wait budget is skipped until the next pass. A delete that fails, or a lock
+   found lost before a delete, ends that server's pass with a WARNING, and the
+   pass goes on with the next server. A re-read that fails ends the whole pass
+   with a WARNING, as in step 2. A database failure in the lock's own acquire
+   is not caught: it propagates to the caller, which logs it at ERROR.
+
+Each reclaimed archive is logged at INFO with its server, its ref and its age.
+The pass asks the owner marker first, as every GC does (below), and a refusal
+stops it before it lists anything. It runs once at API startup, after the
+startup sweep, and after each pass of the storage sweep loop
+(`storage_sweep.interval_seconds`). A failure at startup is logged and the API
+still starts. A deleted server has no rows and no lock, and `DeleteServer`
+keeps one of its archives on purpose (Section 2.1), so the reclaim leaves the
+servers whose row is gone alone. Telling a leftover there apart from the
+archive kept on purpose is issue #4165.
+
 **Store ownership** (issue #3870). A store (a bucket, or an fs root) must belong
-to exactly one database. The JAR-pool, plugin-cache and resource-pack GCs delete
-what no row of *this* database names, and the sweep deletes staging and multipart
+to exactly one database. The JAR-pool, plugin-cache and resource-pack GCs and the
+row-less archive reclaim delete what no row of *this* database names, and the
+sweep deletes staging and multipart
 uploads that no lease in *this* process holds. Pointed at a store that another
 database also uses, they would delete that database's live objects. Examples are
 a probe or dev stack that copied the live object-store settings, and two
@@ -1071,7 +1122,8 @@ Before **every** pass, each destructive GC and sweep reads the marker again. It
 runs only if the marker names this installation. This covers the storage sweep
 (at startup and on its loop, both backends), the JAR-pool GC (its loop, and
 `POST /versions/jar-pool/gc`, which answers `409 store_not_owned` with the
-reason as `detail`), the plugin-cache GC and the resource-pack GC. A refused pass
+reason as `detail`), the plugin-cache GC, the resource-pack GC and the row-less
+archive reclaim (at startup and on the sweep loop). A refused pass
 deletes nothing and logs an ERROR on every pass, naming the marker and both
 installation ids. Everything
 else continues: serving, uploads, publishes, backups. Readiness (`/readyz`) is
@@ -1095,11 +1147,13 @@ Cases the marker does not cover:
 
 - **A database restored to an earlier point** keeps its installation id, so its
   GCs run. Objects the store gained after the restore point have no row in the
-  restored database. The safety windows (1 h) spare only the newest of them, and
-  the re-read before each delete only catches a row committed meanwhile, so a pass
-  reclaims every such object stored more than an hour before it runs. Restore the
-  store from the same point, or copy out what it gained since, before the restored
-  database's API starts.
+  restored database, backup archives included. The safety windows spare only the
+  newest of them: 1 h for the JAR-pool, plugin-cache and resource-pack GCs, and
+  the row-less archive reclaim's grace (7 days by default) for backup archives.
+  The re-read before each delete only catches a row committed meanwhile, so a
+  pass reclaims every such object stored longer before it runs than its window.
+  Restore the store from the same point, or copy out what it gained since, before
+  the restored database's API starts.
 - **A database cloned from a dump** keeps the installation id too, so two
   databases now carry the same one. An API on the clone (a probe or staging
   stack seeded from a live dump) matches the live store's marker, and its GCs
@@ -2138,7 +2192,12 @@ the store reports missing. It deletes nothing unless `--apply` is given; then
 each listed row is deleted and audited as `backup:delete_dangling`. Only the row
 is deleted: the store is sent no archive delete (issue #4158), so a NotFound
 that was false, from a store that flapped, leaves the archive in the store with
-no row rather than deleting it. Only a NotFound answer condemns a row: a HEAD
+no row rather than deleting it. The row-less archive reclaim (Section 4.3) then
+deletes that archive at the next API start or sweep pass, unless the archive is
+younger than the grace: the grace counts from when the store wrote the archive,
+not from the repair. DEPLOYMENT.md (Storage-capacity incident runbook) says how
+to copy it out first, the only way to keep it, and how to delay the reclaim
+until then. Only a NotFound answer condemns a row: a HEAD
 that fails any other way skips it, and the command then exits 1. `--apply` runs
 only while the owner marker (Section 4.3) names this database's installation,
 since a store that is not this database's answers NotFound for every row. It
