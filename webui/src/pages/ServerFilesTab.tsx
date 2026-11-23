@@ -69,6 +69,7 @@ import {
   fileListErrorPresentation,
   fileOperationErrorPresentation,
   fileReadErrorPresentation,
+  fileRollbackErrorPresentation,
   fileSaveErrorPresentation,
 } from "./serverFilesErrorPresentation.ts";
 import {
@@ -2518,6 +2519,7 @@ function Viewer({
           serverId={serverId}
           mcVersion={mcVersion}
           canRollback={can("file:rollback", { serverId })}
+          running={running}
           held={held}
           heldReason={heldReason}
           onClose={() => setHistoryOpen(false)}
@@ -2569,6 +2571,7 @@ function HistoryDrawer({
   serverId,
   mcVersion,
   canRollback,
+  running,
   held,
   heldReason,
   onClose,
@@ -2580,6 +2583,8 @@ function HistoryDrawer({
   serverId: string;
   mcVersion: string;
   canRollback: boolean;
+  /** Not at rest: a rollback republishes the at-rest copy, so none (#4147). */
+  running: boolean;
   /** At rest, but the stop's Worker still holds the server: no rollback. */
   held: boolean;
   /** Why it is held, shown beside the held confirm. */
@@ -2594,7 +2599,14 @@ function HistoryDrawer({
   // The version selected for a read-only content preview, or `null` when the
   // preview is closed. Keyed query fetches only while a version is selected.
   const [previewing, setPreviewing] = useState<string | null>(null);
-  const heldId = useId();
+  // Why the confirm is held, if it is: the rollback's own words while the
+  // server is not at rest (#4147), the release reason while it is held.
+  const refusalReason: TranslationKey | null = running
+    ? "files.error.rollbackServerMustBeStopped"
+    : held
+      ? heldReason
+      : null;
+  const refusalId = useId();
 
   const historyKey = ["files", "history", communityId, serverId, path];
   const history = useQuery({
@@ -2633,7 +2645,12 @@ function HistoryDrawer({
     },
     onError: (error) => {
       setConfirming(null);
-      onError(error);
+      const presentation = fileRollbackErrorPresentation(error);
+      if (presentation === undefined) {
+        onError(error);
+        return;
+      }
+      showToast(t(presentation.key), "error");
     },
   });
 
@@ -2700,8 +2717,10 @@ function HistoryDrawer({
               <button
                 type="button"
                 className="btn danger"
-                disabled={rollback.isPending || held}
-                aria-describedby={held ? heldId : undefined}
+                disabled={rollback.isPending || refusalReason !== null}
+                aria-describedby={
+                  refusalReason !== null ? refusalId : undefined
+                }
                 onClick={() => rollback.mutate(confirming)}
               >
                 {t("files.rollback.confirm")}
@@ -2713,9 +2732,9 @@ function HistoryDrawer({
           <p className="files-history-date">
             {versionDate(confirming).toLocaleString()}
           </p>
-          {held && (
-            <p className="field-hint" id={heldId}>
-              {t(heldReason)}
+          {refusalReason !== null && (
+            <p className="field-hint" id={refusalId}>
+              {t(refusalReason)}
             </p>
           )}
         </Modal>

@@ -147,6 +147,22 @@ export function fileSaveErrorPresentation(
 }
 
 /**
+ * Select the toast a failed rollback shows in place of the operation's, or
+ * `undefined` when it shows the operation's (issue #4147). A rollback refused
+ * because the server is not stopped names the rollback, not the upload and
+ * folder writes the operation's wording is about.
+ */
+export function fileRollbackErrorPresentation(
+  error: unknown,
+): FileErrorPresentation | undefined {
+  return error instanceof ApiError &&
+    error.status === 409 &&
+    error.reason === "server_not_stopped"
+    ? { key: "files.error.rollbackServerMustBeStopped" }
+    : undefined;
+}
+
+/**
  * Select the viewer's inline message for a file that could not be read
  * (#3361). The read shares the operations' reasons except two whose operation
  * wording is about changes: an unsettled server (the operations say "stop the

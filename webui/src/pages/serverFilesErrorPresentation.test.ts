@@ -7,6 +7,7 @@ import {
   fileListErrorPresentation,
   fileOperationErrorPresentation,
   fileReadErrorPresentation,
+  fileRollbackErrorPresentation,
   fileSaveErrorPresentation,
 } from "./serverFilesErrorPresentation.ts";
 
@@ -34,6 +35,28 @@ describe("fileSaveErrorPresentation", () => {
     ["a local refusal", new UnencodableTextError()],
   ])("leaves %s to the operation's presentation", (_label, error) => {
     expect(fileSaveErrorPresentation(error)).toBeUndefined();
+  });
+});
+
+describe("fileRollbackErrorPresentation", () => {
+  it("names the rollback when the server is not stopped (#4147)", () => {
+    expect(
+      fileRollbackErrorPresentation(
+        new ApiError(409, { reason: "server_not_stopped" }),
+      ),
+    ).toEqual({ key: "files.error.rollbackServerMustBeStopped" });
+  });
+
+  it.each([
+    ["another 409", new ApiError(409, { reason: "server_assigned" })],
+    [
+      "the reason on another status",
+      new ApiError(422, { reason: "server_not_stopped" }),
+    ],
+    ["a 403", new ApiError(403, { reason: "forbidden" })],
+    ["a non-API error", new Error("boom")],
+  ])("leaves %s to the operation's presentation", (_label, error) => {
+    expect(fileRollbackErrorPresentation(error)).toBeUndefined();
   });
 });
 
