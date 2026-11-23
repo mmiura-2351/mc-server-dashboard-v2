@@ -27,7 +27,7 @@ its size in one transaction, so no row is recorded ahead of its archive. A
 failure after the archive write and before the row's COMMIT is sent, a
 cancellation included, deletes the archive again (best effort). The delete is
 shielded from a later cancellation and bounded, so an API shutdown that cancels
-the backup waits for it at most 30 s (issue #4109). A cancellation during the
+the backup waits for it at most 5 s (issue #4109). A cancellation during the
 archive write has nothing to delete yet. Once the COMMIT is sent, its outcome is
 unknown, since a COMMIT can apply and still raise: the archive is kept and a
 WARNING logged. A crash, a delete that fails, an fs archive write cancelled
@@ -190,8 +190,9 @@ _MAX_ECHOED_NAME_CHARS = 256
 
 # How long a backup that failed or was cancelled before its row's COMMIT spends
 # deleting its archive (issue #4109). A store that does not answer holds the
-# backup, and an API shutdown that cancelled it, no longer than this.
-_DISCARD_TIMEOUT_SECONDS = 30.0
+# backup, and an API shutdown that cancelled it, no longer than this, which
+# keeps the cleanup inside Docker's 10 s stop default for the api service.
+_DISCARD_TIMEOUT_SECONDS = 5.0
 
 # Archive deletes still running after their backup stopped waiting (issue
 # #4109): the strong reference keeps a delete alive to its end once a later

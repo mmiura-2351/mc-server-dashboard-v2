@@ -479,13 +479,15 @@ class ScheduleSettings(_Section):
 
     ``shutdown_drain_seconds`` is how long an API shutdown waits for the tick
     in flight, a scheduled backup for one, before it cancels it (issue #4109).
-    Zero cancels at once. It must stay below the api service's
-    ``stop_grace_period`` in ``compose.yaml``, less the backup's cleanup bound,
-    or Docker kills the API mid-drain and no cleanup runs.
+    The default, zero, cancels at once: the api service has no
+    ``stop_grace_period`` in ``compose.yaml`` (issue #2934), so Docker kills it
+    10 s after the stop. A non-zero drain needs a grace above the drain, the
+    backup's cleanup bound and the teardown, or Docker kills the API mid-drain
+    and no cleanup runs (Decide #4185).
     """
 
     tick_seconds: int = Field(default=20, gt=0, le=300)
-    shutdown_drain_seconds: int = Field(default=300, ge=0)
+    shutdown_drain_seconds: int = Field(default=0, ge=0)
 
 
 class ReconcilerSettings(_Section):

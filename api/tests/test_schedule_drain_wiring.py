@@ -3,8 +3,9 @@
 These drive the real ``create_app`` lifespan with the control plane on, so the
 schedule loop runs, over a runner whose tick the test holds open: the tick in
 flight when the shutdown begins gets ``schedule.shutdown_drain_seconds`` to
-finish, and is cancelled once that runs out. The loop's cadence is cut to a
-hundredth of a second so the first tick starts at once.
+finish, and is cancelled once that runs out. Each test sets the drain itself,
+so neither depends on the default (0, which cancels at once). The loop's
+cadence is cut to a hundredth of a second so the first tick starts at once.
 """
 
 from __future__ import annotations
@@ -90,8 +91,10 @@ async def _shut_down_mid_tick(runner: _HeldRunner) -> asyncio.Task[None]:
 
 
 async def test_a_shutdown_lets_the_scheduled_tick_in_flight_finish(
-    runner: _HeldRunner,
+    runner: _HeldRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("MCD_API_SCHEDULE__SHUTDOWN_DRAIN_SECONDS", "300")
+
     serving = await _shut_down_mid_tick(runner)
     # The shutdown has begun, and the tick is still running.
     await asyncio.sleep(0.2)

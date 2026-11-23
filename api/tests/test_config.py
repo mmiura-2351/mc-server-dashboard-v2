@@ -142,7 +142,7 @@ _SECTION_LOADING_CASES = [
     ),
     pytest.param(
         "schedule",
-        {"tick_seconds": 20, "shutdown_drain_seconds": 300},
+        {"tick_seconds": 20, "shutdown_drain_seconds": 0},
         {"tick_seconds": 30, "shutdown_drain_seconds": 120},
         {"tick_seconds": "40", "shutdown_drain_seconds": "60"},
         {"tick_seconds": 40, "shutdown_drain_seconds": 60},
@@ -792,7 +792,7 @@ _SCALAR_VALID_CASES = [
         300,
         id="schedule-tick-at-grace",
     ),
-    # No drain: the shutdown cancels a scheduled backup in flight at once.
+    # No drain, the default: the shutdown cancels a scheduled run at once.
     pytest.param(
         "schedule",
         "shutdown_drain_seconds = 0",

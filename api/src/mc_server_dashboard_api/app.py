@@ -1527,7 +1527,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # tick, and the tick in flight, a scheduled backup for one, gets the
             # drain to finish while the engine, the storage and the Worker
             # sessions it uses are still up. One still running after the drain
-            # is cancelled.
+            # is cancelled; the default drain, 0, cancels it at once.
             if schedule_task is not None:
                 await drain_schedule_loop(
                     schedule_task,

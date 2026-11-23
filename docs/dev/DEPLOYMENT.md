@@ -1400,37 +1400,60 @@ servers), starts the stack, stamps the started revision, and runs a post-deploy
 ### An API stop during a scheduled backup
 
 A redeploy stops the `api` container, and a scheduled backup may be running in
-it. The stop goes through these steps, in this order (issue #4109):
+it. Two settings decide what happens to it: `schedule.shutdown_drain_seconds`
+(default `0`) and the `api` service's `stop_grace_period`. The bundled
+`compose.yaml` sets no grace for the `api` service (issue #2934), so Docker
+kills it 10 s after the stop. The stop goes through these steps, in this order
+(issue #4109):
 
 1. Docker sends `SIGTERM`. uvicorn stops accepting connections and waits for
    the HTTP requests still open to end. It has no limit of its own: `serve.py`
    passes only the bind. Meanwhile the API is up but unreachable (the Web UI,
    the health check, the data plane), and the scheduler still takes ticks.
 2. The lifespan shutdown stops the scheduler taking ticks and waits up to
-   `schedule.shutdown_drain_seconds` (300 s by default) for the tick in
-   flight, every run that tick has already started or queued included. A
-   backup that ends in time is recorded as usual. One INFO line marks the start
-   of the drain and one its end.
+   `schedule.shutdown_drain_seconds` for the tick in flight, every run that
+   tick has already started or queued included. With the default of `0` it
+   does not wait. A backup that ends in time is recorded as usual. One INFO line
+   marks the start of the drain and one its end.
 3. A tick still going when the drain runs out is cancelled, with one WARNING
    line. A backup cancelled before its row's COMMIT leaves no row, and spends up
-   to 30 s deleting the archive it wrote; its occurrence runs again on the next
+   to 5 s deleting the archive it wrote; its occurrence runs again on the next
    boot. The details are in
    [`../app/CONFIGURATION.md`](../app/CONFIGURATION.md) Section 5.14.
 4. The rest of the teardown runs: the other background tasks, the gRPC server,
    the engine. It is prompt.
 
-The `api` service's `stop_grace_period` in `compose.yaml` is 600 s, and Docker
-kills the process when it runs out. A kill runs no cleanup. A backup killed
-mid-run leaves no row, since its archive is written before its row, but it can
-leave an archive with no row, which the row-less archive reclaim deletes after
-its grace ([`../app/STORAGE.md`](../app/STORAGE.md) Section 4.3). So the grace
-has to cover all four steps: the HTTP wait, the drain, the 30 s cleanup and the
-teardown. With the defaults, 300 s of drain
-and 30 s of cleanup leave about 270 s for the HTTP requests of step 1. Keep
-`schedule.shutdown_drain_seconds` below the grace less 30 s if you change
-either, or Docker kills the API mid-drain. A test in the api suite fails if the
-defaults ever reach the compose value. The grace is a ceiling, not a wait: a
-stop with nothing in flight still exits at once.
+Docker kills the process when the grace runs out, and a kill runs no cleanup. A
+backup killed mid-run leaves no row, since its archive is written before its
+row, but it can leave an archive with no row, which the row-less archive
+reclaim deletes after its grace ([`../app/STORAGE.md`](../app/STORAGE.md)
+Section 4.3). With the defaults, a scheduled backup in flight is cancelled and
+cleaned up within the 10 s, unless the HTTP requests of step 1 use them up
+first. A test in the api suite fails if the default drain and the 5 s cleanup
+ever reach the api's grace.
+
+**To let a scheduled run finish on a stop**, set both on the `api` service, for
+example in a `compose.override.yaml` beside `compose.yaml`, which `docker
+compose` merges:
+
+```yaml
+services:
+  api:
+    stop_grace_period: 360s
+    environment:
+      MCD_API_SCHEDULE__SHUTDOWN_DRAIN_SECONDS: "300"
+```
+
+The drain goes under `environment:` because `compose.yaml` forwards only the
+`MCD_API_*` names it lists, and this is not one of them: set in `.env` alone, it
+does not reach the container. The grace must exceed the drain, the 5 s cleanup
+and the teardown, and leave room for the HTTP wait of step 1. It is a ceiling,
+not a wait: a stop with nothing in flight still exits at once. The cost is that
+step 1 can now hold the API up but unreachable for up to the grace, instead of
+10 s. Whether to ship this by default is Decide #4185.
+
+A drain longer than the grace less 5 s is worse than none: Docker kills the API
+mid-drain, and the cleanup of step 3 never runs.
 
 A backup of a running server starts with a snapshot, which the Worker uploads to
 the API's data-plane URL, served by the same HTTP listener. Step 1 closes that
