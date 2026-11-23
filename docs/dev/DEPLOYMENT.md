@@ -1404,12 +1404,14 @@ it. The stop goes through these steps, in this order (issue #4109):
 
 1. Docker sends `SIGTERM`. uvicorn stops accepting connections and waits for
    the HTTP requests still open to end. It has no limit of its own: `serve.py`
-   passes only the bind.
+   passes only the bind. Meanwhile the API is up but unreachable (the Web UI,
+   the health check, the data plane), and the scheduler still takes ticks.
 2. The lifespan shutdown stops the scheduler taking ticks and waits up to
-   `schedule.shutdown_drain_seconds` (300 s by default) for the run in flight.
-   A backup that ends in time is recorded as usual. One INFO line marks the
-   start of the drain and one its end.
-3. A run still going when the drain runs out is cancelled, with one WARNING
+   `schedule.shutdown_drain_seconds` (300 s by default) for the tick in
+   flight, every run that tick has already started or queued included. A
+   backup that ends in time is recorded as usual. One INFO line marks the start
+   of the drain and one its end.
+3. A tick still going when the drain runs out is cancelled, with one WARNING
    line. A backup cancelled before its row's COMMIT leaves no row, and spends up
    to 30 s deleting the archive it wrote; its occurrence runs again on the next
    boot. The details are in
@@ -1421,8 +1423,9 @@ The `api` service's `stop_grace_period` in `compose.yaml` is 600 s, and Docker
 kills the process when it runs out. A kill runs no cleanup. A backup killed
 mid-run leaves no row, since its archive is written before its row, but it can
 leave an archive with no row, which the row-less archive reclaim deletes after
-its grace ([`../app/STORAGE.md`](../app/STORAGE.md) Section 4.3). So the grace has to cover all four steps: the HTTP wait,
-the drain, the 30 s cleanup and the teardown. With the defaults, 300 s of drain
+its grace ([`../app/STORAGE.md`](../app/STORAGE.md) Section 4.3). So the grace
+has to cover all four steps: the HTTP wait, the drain, the 30 s cleanup and the
+teardown. With the defaults, 300 s of drain
 and 30 s of cleanup leave about 270 s for the HTTP requests of step 1. Keep
 `schedule.shutdown_drain_seconds` below the grace less 30 s if you change
 either, or Docker kills the API mid-drain. A test in the api suite fails if the

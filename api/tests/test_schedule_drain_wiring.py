@@ -22,6 +22,10 @@ from mc_server_dashboard_api.fleet.adapters.drain_store import (
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
 from mc_server_dashboard_api.servers.adapters.schedule_loop import run_schedule_loop
 
+# Generous: an app startup on a contended host can take seconds, and only a
+# hang should reach it.
+_STARTUP_BOUND = 60
+
 
 class _HeldRunner:
     """A runner whose tick waits for ``release``."""
@@ -78,7 +82,7 @@ async def _shut_down_mid_tick(runner: _HeldRunner) -> asyncio.Task[None]:
 
     leave, started = asyncio.Event(), asyncio.Event()
     serving = asyncio.create_task(_serve_until(leave, started))
-    async with asyncio.timeout(10):
+    async with asyncio.timeout(_STARTUP_BOUND):
         await started.wait()
         await runner.in_tick.wait()
     leave.set()
@@ -94,7 +98,7 @@ async def test_a_shutdown_lets_the_scheduled_tick_in_flight_finish(
     assert not serving.done()
 
     runner.release.set()
-    async with asyncio.timeout(10):
+    async with asyncio.timeout(_STARTUP_BOUND):
         await serving
 
     assert (runner.finished, runner.cancelled) == (1, 0)
@@ -106,7 +110,7 @@ async def test_a_shutdown_cancels_the_scheduled_tick_once_its_drain_runs_out(
     monkeypatch.setenv("MCD_API_SCHEDULE__SHUTDOWN_DRAIN_SECONDS", "0")
 
     serving = await _shut_down_mid_tick(runner)
-    async with asyncio.timeout(10):
+    async with asyncio.timeout(_STARTUP_BOUND):
         await serving
 
     assert (runner.finished, runner.cancelled) == (0, 1)

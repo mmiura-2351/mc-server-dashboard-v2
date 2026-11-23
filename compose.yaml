@@ -265,7 +265,7 @@ services:
     restart: unless-stopped
     # Covers the scheduler's shutdown drain (issue #4109), a FINITE code-level
     # bound like the worker's 550 s and the relay's ~40 s. The lifespan shutdown
-    # gives the scheduled run in flight, a backup for one, up to
+    # gives the scheduler's tick in flight, a backup for one, up to
     # schedule.shutdown_drain_seconds (300 s by default) and cancels it after
     # that; a backup it cancels spends up to 30 s deleting its archive. A kill
     # mid-drain runs no cleanup, so the drain plus that bound must stay below
