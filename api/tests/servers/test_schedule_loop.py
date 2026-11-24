@@ -25,7 +25,11 @@ _LONG = 3600.0
 
 
 class _Runner:
-    """Counts its ticks; with ``hold`` set, each tick waits for ``release``."""
+    """Counts its ticks; with ``hold`` set, each tick waits for ``release``.
+
+    Each tick yields to the event loop once, as a real one does, so a loop that
+    keeps ticking after its stop cannot starve the tests' own timeouts.
+    """
 
     def __init__(self, *, hold: bool = False) -> None:
         self._hold = hold
@@ -38,6 +42,7 @@ class _Runner:
     async def tick(self) -> None:
         self.started += 1
         self.in_tick.set()
+        await asyncio.sleep(0)
         try:
             if self._hold:
                 await self.release.wait()
@@ -78,10 +83,28 @@ async def test_a_loop_stopped_between_ticks_takes_no_further_tick() -> None:
     assert runner.started == 0
 
 
+async def test_an_idle_loop_with_no_drain_ends_without_a_cancel(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The default, and the path of every ordinary shutdown.
+    caplog.set_level(logging.INFO)
+    runner = _Runner()
+    loop, stopping = _start(runner, tick_seconds=_LONG)
+    # The loop is asleep, waiting for its next tick.
+    await asyncio.sleep(0)
+
+    async with asyncio.timeout(5):
+        await drain_schedule_loop(loop, stopping, drain_seconds=0)
+
+    assert loop.done() and not loop.cancelled()
+    assert runner.started == 0
+    assert [level for level, _ in _drain_lines(caplog)] == [logging.INFO] * 2
+
+
 async def test_a_loop_stopped_mid_tick_takes_no_tick_after_it() -> None:
     runner = _Runner(hold=True)
     loop, stopping = _start(runner, tick_seconds=0.01)
-    await runner.in_tick.wait()
+    await asyncio.wait_for(runner.in_tick.wait(), 5)
 
     drain = asyncio.create_task(
         drain_schedule_loop(loop, stopping, drain_seconds=_LONG)
@@ -102,7 +125,7 @@ async def test_a_drain_lets_the_tick_in_flight_finish(
     caplog.set_level(logging.INFO)
     runner = _Runner(hold=True)
     loop, stopping = _start(runner, tick_seconds=0.01)
-    await runner.in_tick.wait()
+    await asyncio.wait_for(runner.in_tick.wait(), 5)
 
     drain = asyncio.create_task(
         drain_schedule_loop(loop, stopping, drain_seconds=_LONG)
@@ -123,7 +146,7 @@ async def test_a_drain_that_runs_out_cancels_the_tick_in_flight(
     caplog.set_level(logging.INFO)
     runner = _Runner(hold=True)
     loop, stopping = _start(runner, tick_seconds=0.01)
-    await runner.in_tick.wait()
+    await asyncio.wait_for(runner.in_tick.wait(), 5)
 
     async with asyncio.timeout(5):
         await drain_schedule_loop(loop, stopping, drain_seconds=0.05)

@@ -25,9 +25,10 @@ row (source manual or scheduled, the archive ref, its size, the actor), and an
 upload stores its archive the same way (issue #4086). The row is inserted with
 its size in one transaction, so no row is recorded ahead of its archive. A
 failure after the archive write and before the row's COMMIT is sent, a
-cancellation included, deletes the archive again (best effort). The delete is
-shielded from a later cancellation and bounded, so an API shutdown that cancels
-the backup waits for it at most 5 s (issue #4109). A cancellation during the
+cancellation included, deletes the archive again (best effort). After a
+cancellation the delete is shielded from a later one and bounded, so an API
+shutdown that cancels the backup waits for it at most 5 s (issue #4109); after
+any other failure it is awaited with no bound. A cancellation during the
 archive write has nothing to delete yet. Once the COMMIT is sent, its outcome is
 unknown, since a COMMIT can apply and still raise: the archive is kept and a
 WARNING logged. A crash, a delete that fails, an fs archive write cancelled
@@ -188,16 +189,17 @@ _PROPERTIES_REL_PATH = "server.properties"
 # tiny upload into a huge 422 body.
 _MAX_ECHOED_NAME_CHARS = 256
 
-# How long a backup that failed or was cancelled before its row's COMMIT spends
-# deleting its archive (issue #4109). A store that does not answer holds the
-# backup, and an API shutdown that cancelled it, no longer than this, which
-# keeps the cleanup inside Docker's 10 s stop default for the api service.
+# How long a backup cancelled before its row's COMMIT spends deleting its
+# archive (issue #4109). A store that does not answer holds the backup, and an
+# API shutdown that cancelled it, no longer than this, which keeps the cleanup
+# inside Docker's 10 s stop default for the api service. Only a cancellation is
+# bounded: after any other failure the delete is awaited as it is.
 _DISCARD_TIMEOUT_SECONDS = 5.0
 
-# Archive deletes still running after their backup stopped waiting (issue
-# #4109): the strong reference keeps a delete alive to its end once a later
-# cancellation has stopped the wait.
-_DISCARDS: set[asyncio.Future[None]] = set()
+# Archive deletes still running after their cancelled backup stopped waiting
+# (issue #4109): the strong reference keeps a delete alive to its end once a
+# later cancellation has stopped the wait.
+_DISCARDS: set[asyncio.Task[None]] = set()
 
 
 async def _load(
@@ -304,7 +306,7 @@ class CreateBackup:
                         await self.uow.backups.add(backup)
                     commit_sent = True
                     await self.uow.commit()
-            except BaseException:
+            except BaseException as exc:
                 if commit_sent:
                     _keep_unconfirmed_archive(backup)
                 else:
@@ -313,6 +315,7 @@ class CreateBackup:
                         community_id=community_id,
                         server_id=server_id,
                         storage_ref=storage_ref,
+                        cancelled=isinstance(exc, asyncio.CancelledError),
                     )
                 raise
             return backup
@@ -324,6 +327,7 @@ async def _discard_archive(
     community_id: CommunityId,
     server_id: ServerId,
     storage_ref: str,
+    cancelled: bool,
 ) -> None:
     """Delete an archive whose row was not recorded (issue #4086).
 
@@ -335,21 +339,25 @@ async def _discard_archive(
     lifecycle-lock check: the ref is new, so nothing else can be using the
     archive.
 
-    The failure can be a cancellation, such as an API shutdown's (issue #4109).
-    So the delete runs as its own task, shielded: a later cancellation stops only
-    the wait, and the delete goes on. It is bounded by
+    When the failure is a cancellation (``cancelled``), such as an API
+    shutdown's (issue #4109), the delete runs as its own task, shielded: a later
+    cancellation stops only the wait, and the delete goes on. It is bounded by
     :data:`_DISCARD_TIMEOUT_SECONDS`, and one that runs out is logged like a
-    delete that failed.
+    delete that failed. After any other failure the delete is awaited as it is,
+    with no bound, so a slow store only delays the failure's answer.
     """
 
-    discard = asyncio.ensure_future(
-        _delete_unrecorded_archive(
-            backup_store,
-            community_id=community_id,
-            server_id=server_id,
-            storage_ref=storage_ref,
-        )
+    delete = _delete_unrecorded_archive(
+        backup_store,
+        community_id=community_id,
+        server_id=server_id,
+        storage_ref=storage_ref,
+        timeout=_DISCARD_TIMEOUT_SECONDS if cancelled else None,
     )
+    if not cancelled:
+        await delete
+        return
+    discard = asyncio.create_task(delete)
     _DISCARDS.add(discard)
     discard.add_done_callback(_DISCARDS.discard)
     await asyncio.shield(discard)
@@ -361,9 +369,10 @@ async def _delete_unrecorded_archive(
     community_id: CommunityId,
     server_id: ServerId,
     storage_ref: str,
+    timeout: float | None,
 ) -> None:
     try:
-        async with asyncio.timeout(_DISCARD_TIMEOUT_SECONDS):
+        async with asyncio.timeout(timeout):
             await backup_store.delete(
                 community_id=community_id,
                 server_id=server_id,
@@ -1729,7 +1738,7 @@ class UploadBackup:
                         await self.uow.backups.add(backup)
                     commit_sent = True
                     await self.uow.commit()
-            except BaseException:
+            except BaseException as exc:
                 if commit_sent:
                     _keep_unconfirmed_archive(backup)
                 else:
@@ -1738,6 +1747,7 @@ class UploadBackup:
                         community_id=community_id,
                         server_id=server_id,
                         storage_ref=storage_ref,
+                        cancelled=isinstance(exc, asyncio.CancelledError),
                     )
                 raise
             return backup

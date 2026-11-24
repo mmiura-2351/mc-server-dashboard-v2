@@ -16,6 +16,7 @@ import datetime as dt
 import logging
 import uuid
 from dataclasses import dataclass, field, fields, replace
+from typing import cast
 
 import pytest
 
@@ -4714,10 +4715,30 @@ def _backup_hanging_at(point: str) -> _HangingBackup:
     return _HangingBackup(env, store, schedule, entered)
 
 
+@dataclass
+class _YieldingRunner:
+    """The real runner, yielding to the event loop once per tick.
+
+    With the fakes, a tick that finds nothing due awaits nothing that suspends,
+    so a loop that kept ticking after its stop would never let the tests' own
+    timeouts fire.
+    """
+
+    runner: RunScheduleTick
+
+    async def tick(self) -> None:
+        await asyncio.sleep(0)
+        await self.runner.tick()
+
+
 def _start_loop(env: _Env) -> tuple[asyncio.Task[None], asyncio.Event]:
     stopping = asyncio.Event()
     loop = asyncio.create_task(
-        run_schedule_loop(env.runner, tick_seconds=0.01, stopping=stopping)
+        run_schedule_loop(
+            cast(RunScheduleTick, _YieldingRunner(env.runner)),
+            tick_seconds=0.01,
+            stopping=stopping,
+        )
     )
     return loop, stopping
 
@@ -4726,7 +4747,7 @@ async def test_a_shutdown_during_a_backup_the_drain_outlasts_records_it() -> Non
     backup = _backup_hanging_at("write")
     assert isinstance(backup.store, _HangingArchiveStore)
     loop, stopping = _start_loop(backup.env)
-    await backup.entered.wait()
+    await asyncio.wait_for(backup.entered.wait(), 5)
 
     shutdown = asyncio.create_task(
         drain_schedule_loop(loop, stopping, drain_seconds=_LONG_DRAIN)
@@ -4747,7 +4768,7 @@ async def test_a_shutdown_whose_drain_runs_out_mid_backup_leaves_no_row_or_archi
 ) -> None:
     backup = _backup_hanging_at(point)
     loop, stopping = _start_loop(backup.env)
-    await backup.entered.wait()
+    await asyncio.wait_for(backup.entered.wait(), 5)
 
     async with asyncio.timeout(5):
         await drain_schedule_loop(loop, stopping, drain_seconds=0.01)

@@ -11,6 +11,7 @@ cadence is cut to a hundredth of a second so the first tick starts at once.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -26,10 +27,20 @@ from mc_server_dashboard_api.servers.adapters.schedule_loop import run_schedule_
 # Generous: an app startup on a contended host can take seconds, and only a
 # hang should reach it.
 _STARTUP_BOUND = 60
+# A shutdown with a drain no longer than ``_DRAIN_SECONDS`` takes milliseconds
+# when nothing is wrong.
+_SHUTDOWN_BOUND = 10
+# Ample for the held tick the first test releases after 0.2 s, and short enough
+# that a loop which never sees its stop is cancelled well inside the bounds.
+_DRAIN_SECONDS = "5"
 
 
 class _HeldRunner:
-    """A runner whose tick waits for ``release``."""
+    """A runner whose tick waits for ``release``.
+
+    Each tick yields to the event loop once, as a real one does, so a loop that
+    keeps ticking after its stop cannot starve the test's own timeouts.
+    """
 
     def __init__(self) -> None:
         self.in_tick = asyncio.Event()
@@ -39,6 +50,7 @@ class _HeldRunner:
 
     async def tick(self) -> None:
         self.in_tick.set()
+        await asyncio.sleep(0)
         try:
             await self.release.wait()
         except asyncio.CancelledError:
@@ -71,49 +83,85 @@ def runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _HeldRunner:
     return held
 
 
-async def _serve_until(leave: asyncio.Event, started: asyncio.Event) -> None:
-    app = create_app()
-    async with app.router.lifespan_context(app):
-        started.set()
-        await leave.wait()
+class _App:
+    """The real app's lifespan, run in a task so a test can begin its shutdown."""
+
+    def __init__(self, runner: _HeldRunner) -> None:
+        self._runner = runner
+        self._leave = asyncio.Event()
+        self.serving: asyncio.Task[None] | None = None
+
+    async def _serve(self) -> None:
+        app = create_app()
+        async with app.router.lifespan_context(app):
+            await self._leave.wait()
+
+    async def start_mid_tick(self) -> asyncio.Task[None]:
+        """Start the app and wait for its first tick to begin."""
+
+        self.serving = asyncio.create_task(self._serve())
+        await asyncio.wait_for(self._runner.in_tick.wait(), _STARTUP_BOUND)
+        return self.serving
+
+    def begin_shutdown(self) -> None:
+        self._leave.set()
+
+    async def finish(self) -> None:
+        """Let the shutdown end, whatever the code under test does.
+
+        It never cancels the lifespan. A lifespan cancelled mid-teardown leaves
+        its gRPC server running, and at the session's end pytest then waits for
+        a thread that server keeps alive, past every timeout. So once the bound
+        passes, this releases the held tick instead: that ends a drain still
+        waiting on it, and ``_DRAIN_SECONDS`` ends one whose loop never sees its
+        stop.
+        """
+
+        if self.serving is None:
+            return
+        self._leave.set()
+        _, pending = await asyncio.wait({self.serving}, timeout=_SHUTDOWN_BOUND)
+        if pending:
+            self._runner.release.set()
+            await asyncio.wait({self.serving}, timeout=_SHUTDOWN_BOUND)
 
 
-async def _shut_down_mid_tick(runner: _HeldRunner) -> asyncio.Task[None]:
-    """Start the app, wait for a tick to begin, then begin its shutdown."""
-
-    leave, started = asyncio.Event(), asyncio.Event()
-    serving = asyncio.create_task(_serve_until(leave, started))
-    async with asyncio.timeout(_STARTUP_BOUND):
-        await started.wait()
-        await runner.in_tick.wait()
-    leave.set()
-    return serving
+@pytest.fixture
+async def app(runner: _HeldRunner) -> AsyncIterator[_App]:
+    served = _App(runner)
+    try:
+        yield served
+    finally:
+        await served.finish()
 
 
 async def test_a_shutdown_lets_the_scheduled_tick_in_flight_finish(
-    runner: _HeldRunner, monkeypatch: pytest.MonkeyPatch
+    runner: _HeldRunner, app: _App, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("MCD_API_SCHEDULE__SHUTDOWN_DRAIN_SECONDS", "300")
+    monkeypatch.setenv("MCD_API_SCHEDULE__SHUTDOWN_DRAIN_SECONDS", _DRAIN_SECONDS)
+    serving = await app.start_mid_tick()
 
-    serving = await _shut_down_mid_tick(runner)
+    app.begin_shutdown()
     # The shutdown has begun, and the tick is still running.
     await asyncio.sleep(0.2)
     assert not serving.done()
-
     runner.release.set()
-    async with asyncio.timeout(_STARTUP_BOUND):
-        await serving
+    await app.finish()
 
+    assert serving.done()
+    serving.result()
     assert (runner.finished, runner.cancelled) == (1, 0)
 
 
 async def test_a_shutdown_cancels_the_scheduled_tick_once_its_drain_runs_out(
-    runner: _HeldRunner, monkeypatch: pytest.MonkeyPatch
+    runner: _HeldRunner, app: _App, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("MCD_API_SCHEDULE__SHUTDOWN_DRAIN_SECONDS", "0")
+    serving = await app.start_mid_tick()
 
-    serving = await _shut_down_mid_tick(runner)
-    async with asyncio.timeout(_STARTUP_BOUND):
-        await serving
+    app.begin_shutdown()
+    await app.finish()
 
+    assert serving.done()
+    serving.result()
     assert (runner.finished, runner.cancelled) == (0, 1)
