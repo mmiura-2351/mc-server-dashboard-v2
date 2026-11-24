@@ -1299,10 +1299,11 @@ function ScheduleDialog({
           </p>
           <div className={confirmPrune ? "field" : undefined}>
             {/* A live region, mounted while the step shows and empty while
-                nothing is asked, so each new line is a text change it
-                announces: a count that arrives and unticks the box below, or
-                a refetch that finds backups to delete and holds Create. A
-                region inserted with its text is not reliably read out. */}
+                nothing is asked, so a line that changes once the step is up
+                is a text change it announces: a count that arrives and
+                unticks the box below, or a refetch that finds backups to
+                delete and holds Create. A region inserted with its text is
+                not reliably read out. */}
             <p
               id={pruneLineId}
               className="schedule-prune-warning"

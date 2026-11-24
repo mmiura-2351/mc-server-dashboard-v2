@@ -1102,8 +1102,9 @@ numbers): the UI for the general scheduler.
   counted. Either way the checkbox is still required; with nothing to prune
   there is none. The line describes the checkbox and is a polite live
   region (`role="status"`), mounted for as long as the step shows and empty
-  while nothing is asked, so each new line is announced: a count that
-  arrives and unticks the box, or a refetch that finds backups to delete.
+  while nothing is asked, so a line that changes once the step is up is
+  announced: a count that arrives and unticks the box, or a refetch that
+  finds backups to delete.
 - Once the schedule is created, the step reads the server again and leaves a
   policy set since (from another session) in place, and the success toast
   says so; otherwise keep-last-N `PUT`s `{keep_last}` to
