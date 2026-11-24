@@ -937,7 +937,7 @@ export const en = {
   // conflicts with sibling tab PRs minimal.
   "files.denied": "You do not have permission to view this server's files.",
   "files.runningNotice":
-    "The server is not stopped — file edits apply to the running server immediately. Uploading, creating folders, renaming, moving, deleting, extracting, pasting and rolling back require stopping the server first.",
+    "While the server is running, file edits apply to it immediately. Uploading, downloading, creating folders, renaming, moving, deleting, extracting, pasting and rolling back require the server to be stopped.",
   "files.root": "/",
   "files.loading": "Loading…",
   "files.listError": "Could not list this directory. Try refreshing.",
@@ -1003,9 +1003,10 @@ export const en = {
   "files.renamed": "Renamed.",
   "files.deleted": "Deleted.",
   "files.rolledBack": "Rolled back to the selected version.",
-  // Why a write is refused, or its control disabled, while the server is not at
-  // rest (issue #4183): one neutral reason for every Files operation.
-  "files.error.notStopped": "Stop the server before changing its files.",
+  // Why a Files operation is refused, or its control disabled, while the server
+  // is not at rest (issue #4183). It names no action, since the downloads show
+  // it too: the sibling tabs' wording.
+  "files.error.notStopped": "The server must be stopped for this operation.",
   // A rollback republishes the at-rest copy (issue #4147): its own words, not
   // the neutral ones.
   "files.error.rollbackServerMustBeStopped":

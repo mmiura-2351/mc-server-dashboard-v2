@@ -1525,11 +1525,12 @@ describe("ServerFilesTab running notice", () => {
     );
   });
 
-  // The notice names every write the tab gates while the server is not at
+  // The notice names every action the tab gates while the server is not at
   // rest, not only upload and folder creation (#4183). Editing is not one:
   // a save applies to the running server.
   it.each([
     ["uploading", /\buploading\b/i, /アップロード/],
+    ["downloading", /\bdownloading\b/i, /ダウンロード/],
     ["creating folders", /\bcreating folders\b/i, /フォルダの作成/],
     ["renaming", /\brenaming\b/i, /名前の変更/],
     ["moving", /\bmoving\b/i, /移動/],
@@ -1546,11 +1547,26 @@ describe("ServerFilesTab running notice", () => {
   );
 
   // The notice shows whenever the server is not at rest, stopping, starting
-  // and stopped under a running intent included, so its lead claims no state
-  // the server may not be in (#4183).
-  it("leads the running notice with a state-neutral clause (#4183)", () => {
-    expect(en["files.runningNotice"]).toMatch(/^The server is not stopped —/);
-    expect(ja["files.runningNotice"]).toMatch(/^サーバーは停止していません —/);
+  // and stopped under a running intent included, and a save applies live only
+  // to a running server, so the live-edit clause is conditional (#4183).
+  it("conditions the running notice's live-edit clause on a running server (#4183)", () => {
+    expect(en["files.runningNotice"]).toMatch(
+      /^While the server is running, file edits apply to it immediately\. /,
+    );
+    expect(ja["files.runningNotice"]).toMatch(
+      /^サーバーの稼働中は、ファイルの編集が即座に反映されます。/,
+    );
+  });
+
+  // The stop reason is shown for downloads too, so it names no action: the
+  // sibling tabs' action-neutral wording (#4183).
+  it("words the stop reason without naming an action (#4183)", () => {
+    expect(en["files.error.notStopped"]).toBe(
+      "The server must be stopped for this operation.",
+    );
+    expect(ja["files.error.notStopped"]).toBe(
+      "この操作にはサーバーの停止が必要です。",
+    );
   });
 });
 

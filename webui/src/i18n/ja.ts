@@ -845,7 +845,7 @@ export const ja: Record<TranslationKey, string> = {
   // Files tab (WEBUI_SPEC.md 6.6).
   "files.denied": "このサーバーのファイルを表示する権限がありません。",
   "files.runningNotice":
-    "サーバーは停止していません — ファイルの編集は稼働中のサーバーに即座に反映されます。アップロード、フォルダの作成、名前の変更、移動、削除、展開、貼り付け、ロールバックにはサーバーを停止する必要があります。",
+    "サーバーの稼働中は、ファイルの編集が即座に反映されます。アップロード、ダウンロード、フォルダの作成、名前の変更、移動、削除、展開、貼り付け、ロールバックにはサーバーの停止が必要です。",
   "files.root": "/",
   "files.loading": "読み込み中…",
   "files.listError":
@@ -913,8 +913,7 @@ export const ja: Record<TranslationKey, string> = {
   "files.renamed": "名前を変更しました。",
   "files.deleted": "削除しました。",
   "files.rolledBack": "選択したバージョンにロールバックしました。",
-  "files.error.notStopped":
-    "ファイルを変更する前にサーバーを停止してください。",
+  "files.error.notStopped": "この操作にはサーバーの停止が必要です。",
   "files.error.rollbackServerMustBeStopped":
     "ファイルをロールバックする前にサーバーを停止してください。",
   "files.error.contentDirProtected":

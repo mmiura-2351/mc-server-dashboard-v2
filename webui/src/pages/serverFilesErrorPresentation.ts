@@ -39,8 +39,8 @@ export function fileOperationErrorPresentation(
       return { key: "files.error.notFound" };
     case 409:
       switch (error.reason) {
-        // One neutral reason for every operation (#4183): the mapper does not
-        // know which write was refused.
+        // One action-neutral reason for every operation, the downloads
+        // included (#4183): the mapper does not know which one was refused.
         case "server_unsettled":
         case "server_not_stopped":
           return { key: "files.error.notStopped" };
