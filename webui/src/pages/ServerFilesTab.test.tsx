@@ -29,7 +29,9 @@ import type { components } from "../api/schema.ts";
 import { setAccessToken } from "../auth/tokenStore.ts";
 import { ToastProvider } from "../components/Toast.tsx";
 import { humanizeBytes } from "../format.ts";
+import { en } from "../i18n/en.ts";
 import { t } from "../i18n/index.ts";
+import { ja } from "../i18n/ja.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { createQueryClient } from "../queryClient.ts";
 import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
@@ -657,6 +659,36 @@ describe("ServerFilesTab operations", () => {
         `${FILES_BASE}/directories?path=datapacks`,
       ),
     );
+  });
+
+  // The gate reads the cached state, so a start can race past it. The 409
+  // names the stop with the tab's neutral reason, as every operation's does
+  // (#4183).
+  it("names the stop neutrally when a folder create is refused server_unsettled (#4183)", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", kind: "file" }]),
+    });
+    mockApi.post.mockRejectedValue(
+      new ApiError(409, { reason: "server_unsettled" }),
+    );
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.newFolder") }),
+    );
+    fireEvent.change(screen.getByLabelText(t("files.folderName")), {
+      target: { value: "datapacks" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: t("files.create") }));
+
+    expect(
+      await screen.findByText(t("files.error.notStopped")),
+    ).toBeInTheDocument();
   });
 
   it("disables the Create button while the folder-create request is in flight", async () => {
@@ -1425,7 +1457,7 @@ describe("ServerFilesTab history + rollback", () => {
   );
 
   // The gate reads the cached state, so a start can race past it. The API's
-  // 409 then names the rollback, not the upload and folder writes (#4147).
+  // 409 then names the rollback, not the tab's neutral stop reason (#4147).
   it("names the rollback when the API refuses it server_not_stopped (#4147)", async () => {
     mockApi.post.mockRejectedValue(
       new ApiError(409, { reason: "server_not_stopped" }),
@@ -1436,8 +1468,21 @@ describe("ServerFilesTab history + rollback", () => {
       await screen.findByText(t("files.error.rollbackServerMustBeStopped")),
     ).toBeInTheDocument();
     expect(
-      screen.queryByText(t("files.error.serverMustBeStopped")),
+      screen.queryByText(t("files.error.notStopped")),
     ).not.toBeInTheDocument();
+  });
+
+  // Any other refusal is the tab's to present (#4183): a rollback refused
+  // while a stop's Worker still holds the server names the release.
+  it("toasts the tab's message for any other rollback refusal (#4183)", async () => {
+    mockApi.post.mockRejectedValue(
+      new ApiError(409, { reason: "server_assigned" }),
+    );
+    fireEvent.click(await openRollbackConfirm());
+
+    expect(
+      await screen.findByText(t("common.serverAssigned")),
+    ).toBeInTheDocument();
   });
 });
 
@@ -1476,7 +1521,51 @@ describe("ServerFilesTab running notice", () => {
     expect(downloadButton).toBeDisabled();
     expect(downloadButton).toHaveAttribute(
       "title",
-      t("files.error.serverMustBeStopped"),
+      t("files.error.notStopped"),
+    );
+  });
+
+  // The notice names every action the tab gates while the server is not at
+  // rest, not only upload and folder creation (#4183). Editing is not one:
+  // a save applies to the running server.
+  it.each([
+    ["uploading", /\buploading\b/i, /アップロード/],
+    ["downloading", /\bdownloading\b/i, /ダウンロード/],
+    ["creating folders", /\bcreating folders\b/i, /フォルダの作成/],
+    ["renaming", /\brenaming\b/i, /名前の変更/],
+    ["moving", /\bmoving\b/i, /移動/],
+    ["deleting", /\bdeleting\b/i, /削除/],
+    ["extracting", /\bextracting\b/i, /展開/],
+    ["pasting", /\bpasting\b/i, /貼り付け/],
+    ["rolling back", /\brolling back\b/i, /ロールバック/],
+  ])(
+    "names %s as needing a stop in the running notice (#4183)",
+    (_label, enPattern, jaPattern) => {
+      expect(en["files.runningNotice"]).toMatch(enPattern);
+      expect(ja["files.runningNotice"]).toMatch(jaPattern);
+    },
+  );
+
+  // The notice shows whenever the server is not at rest, stopping, starting
+  // and stopped under a running intent included, and a save applies live only
+  // to a running server, so the live-edit clause is conditional (#4183).
+  it("conditions the running notice's live-edit clause on a running server (#4183)", () => {
+    expect(en["files.runningNotice"]).toMatch(
+      /^While the server is running, file edits apply to it immediately\. /,
+    );
+    expect(ja["files.runningNotice"]).toMatch(
+      /^サーバーの稼働中は、ファイルの編集が即座に反映されます。/,
+    );
+  });
+
+  // The stop reason is shown for downloads too, so it names no action: the
+  // sibling tabs' action-neutral wording (#4183).
+  it("words the stop reason without naming an action (#4183)", () => {
+    expect(en["files.error.notStopped"]).toBe(
+      "The server must be stopped for this operation.",
+    );
+    expect(ja["files.error.notStopped"]).toBe(
+      "この操作にはサーバーの停止が必要です。",
     );
   });
 });
@@ -2634,39 +2723,34 @@ describe("ServerFilesTab bulk operations", () => {
     });
   });
 
-  it("disables bulk delete, download and move when server is running", async () => {
-    routeGet({
-      detail: server({ observed_state: "running", desired_state: "running" }),
-      list: listing([
-        { name: "a.txt", kind: "file" },
-        { name: "b.txt", kind: "file" },
-      ]),
-    });
-    renderPage();
-    await openFiles();
-    await screen.findByText(/a\.txt/);
+  // The download API is at-rest only too: a running server answers 409
+  // (#3396). Each control names the stop with the same neutral reason, not the
+  // upload and folder one (#4183).
+  it.each([
+    ["delete", "files.bulk.delete"],
+    ["download", "files.bulk.download"],
+    ["move", "files.bulk.move"],
+  ] as const)(
+    "disables bulk %s with the stop reason when server is running",
+    async (_label, name) => {
+      routeGet({
+        detail: server({ observed_state: "running", desired_state: "running" }),
+        list: listing([
+          { name: "a.txt", kind: "file" },
+          { name: "b.txt", kind: "file" },
+        ]),
+      });
+      renderPage();
+      await openFiles();
+      await screen.findByText(/a\.txt/);
 
-    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+      fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
 
-    const deleteBtn = screen.getByRole("button", {
-      name: t("files.bulk.delete"),
-    });
-    const moveBtn = screen.getByRole("button", {
-      name: t("files.bulk.move"),
-    });
-    const downloadBtn = screen.getByRole("button", {
-      name: t("files.bulk.download"),
-    });
-
-    expect(deleteBtn).toBeDisabled();
-    expect(moveBtn).toBeDisabled();
-    // The download API is at-rest only too: a running server answers 409 (#3396).
-    expect(downloadBtn).toBeDisabled();
-    expect(downloadBtn).toHaveAttribute(
-      "title",
-      t("files.error.serverMustBeStopped"),
-    );
-  });
+      const button = screen.getByRole("button", { name: t(name) });
+      expect(button).toBeDisabled();
+      expect(button).toHaveAttribute("title", t("files.error.notStopped"));
+    },
+  );
 
   it("reports partial failure on bulk delete", async () => {
     routeGet({
@@ -4622,7 +4706,7 @@ describe("ServerFilesTab directory downloads (minted grant, #2354)", () => {
     downloadDirFromContextMenu();
 
     expect(
-      await screen.findByText(t("files.error.serverMustBeStopped")),
+      await screen.findByText(t("files.error.notStopped")),
     ).toBeInTheDocument();
     expect(clicks).toHaveLength(0);
   });

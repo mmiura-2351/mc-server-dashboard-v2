@@ -910,12 +910,24 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 - History drawer per file: version list → rollback with confirm. A rollback
   republishes the at-rest copy, so while the server is not at rest (running,
   transitional or under a running intent) the confirm shows disabled with
-  "Stop the server before rolling back a file". A `409 server_not_stopped`
-  that races past it toasts the same words, not the upload and folder ones
+  "Stop the server before rolling back a file." A `409 server_not_stopped`
+  that races past it toasts the same words, not the tab's neutral ones
   (#4147).
 - Edits against a running server show "live working set — may need restart"
   notice (Section 6.9 semantics). Creating a new file works while running too
-  (create-through to the live working set).
+  (create-through to the live working set). The notice shows whenever the
+  server is not at rest (running, transitional or under a running intent),
+  so its live-edit clause is conditional: "While the server is running, file
+  edits apply to it immediately." It also says that uploading, downloading,
+  creating folders, renaming, moving, deleting, extracting, pasting and
+  rolling back need the server stopped. The context menu then offers none of
+  them (rolling back is the history drawer's, above), and the drop zone and
+  the Delete / F2 / paste keys do nothing. The viewer's Download and the bulk
+  delete, download and move show disabled with one action-neutral reason as
+  their tooltip, "The server must be stopped for this operation." A Files
+  operation the API refuses with `409 server_unsettled` toasts the same
+  words, a Save in a transitional state included; opening a file shows its
+  own message in the viewer instead (#4183).
 - While a server at rest still has a Worker assigned (6.4), the tab shows the
   release reason in place of that notice, and every write is held: the
   editor's Save and the rollback confirm show disabled with the reason, the

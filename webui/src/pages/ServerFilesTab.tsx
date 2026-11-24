@@ -2451,7 +2451,7 @@ function Viewer({
             type="button"
             className="btn sm"
             disabled={running}
-            title={running ? t("files.error.serverMustBeStopped") : undefined}
+            title={running ? t("files.error.notStopped") : undefined}
             onClick={() =>
               void downloadFile(
                 `${apiPath(
@@ -3090,9 +3090,7 @@ function Toolbar({
     return null;
   }
 
-  const atRestTooltip = running
-    ? t("files.error.serverMustBeStopped")
-    : undefined;
+  const atRestTooltip = running ? t("files.error.notStopped") : undefined;
   const editTooltip = held ? t(heldReason) : atRestTooltip;
 
   return (
