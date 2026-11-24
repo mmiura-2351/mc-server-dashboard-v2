@@ -16,6 +16,7 @@ import datetime as dt
 import logging
 import uuid
 from dataclasses import dataclass, field, fields, replace
+from typing import cast
 
 import pytest
 
@@ -26,6 +27,10 @@ from mc_server_dashboard_api.audit.domain.operations import (
 )
 from mc_server_dashboard_api.servers.adapters.cronsim_next_run_calculator import (
     CronsimNextRunCalculator,
+)
+from mc_server_dashboard_api.servers.adapters.schedule_loop import (
+    drain_schedule_loop,
+    run_schedule_loop,
 )
 from mc_server_dashboard_api.servers.application.backups import (
     CreateBackup,
@@ -84,6 +89,7 @@ from tests.audit.fakes import RecordingAuditRecorder
 from tests.servers.fakes import (
     DatabaseOutageError,
     FakeBackupArchiveStore,
+    FakeBackupRepository,
     FakeClock,
     FakeControlPlane,
     FakeFileStore,
@@ -4621,3 +4627,153 @@ async def test_schedule_edited_after_the_poll_is_not_dispatched(
     assert [r.levelno for r in caplog.records if "not dispatched" in r.message] == [
         logging.INFO
     ]
+
+
+# --- an API shutdown during a scheduled backup (issue #4109) -----------------
+#
+# The lifespan shutdown stops the schedule loop taking ticks and gives the tick
+# in flight up to the drain to finish. A backup that finishes in time is
+# recorded as usual. One the drain cancels leaves no row at any point, since its
+# archive is written before its row (issue #4086), and CreateBackup deletes an
+# archive it wrote while its row's COMMIT is unsent.
+
+# Far longer than any test here takes, so a drain of it never runs out.
+_LONG_DRAIN = 3600.0
+
+
+class _HangingArchiveStore(FakeBackupArchiveStore):
+    """Waits for ``release`` at ``point``: before its archive write, or after it,
+    reading the size."""
+
+    def __init__(self, point: str) -> None:
+        super().__init__()
+        self._point = point
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def _hang(self, point: str) -> None:
+        if point == self._point:
+            self.entered.set()
+            await self.release.wait()
+
+    async def create_from_current(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> None:
+        await self._hang("write")
+        await super().create_from_current(
+            community_id=community_id, server_id=server_id, storage_ref=storage_ref
+        )
+
+    async def size(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> int:
+        await self._hang("size")
+        return await super().size(
+            community_id=community_id, server_id=server_id, storage_ref=storage_ref
+        )
+
+
+class _HangingInsert(FakeBackupRepository):
+    """The row's INSERT is sent and never answered, so its COMMIT is never sent."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+
+    async def add(self, backup: Backup) -> None:
+        self.entered.set()
+        await asyncio.Event().wait()
+
+
+@dataclass
+class _HangingBackup:
+    env: _Env
+    store: FakeBackupArchiveStore
+    schedule: Schedule
+    entered: asyncio.Event
+
+
+def _backup_hanging_at(point: str) -> _HangingBackup:
+    if point == "insert":
+        backups = _HangingInsert()
+        store = FakeBackupArchiveStore()
+        env = _env(backup_store=store, uow=FakeUnitOfWork(backups=backups))
+        entered = backups.entered
+    else:
+        store = _HangingArchiveStore(point)
+        env = _env(backup_store=store)
+        entered = store.entered
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        only_when_running=False,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+    return _HangingBackup(env, store, schedule, entered)
+
+
+@dataclass
+class _YieldingRunner:
+    """The real runner, yielding to the event loop once per tick.
+
+    With the fakes, a tick that finds nothing due awaits nothing that suspends,
+    so a loop that kept ticking after its stop would never let the tests' own
+    timeouts fire.
+    """
+
+    runner: RunScheduleTick
+
+    async def tick(self) -> None:
+        await asyncio.sleep(0)
+        await self.runner.tick()
+
+
+def _start_loop(env: _Env) -> tuple[asyncio.Task[None], asyncio.Event]:
+    stopping = asyncio.Event()
+    loop = asyncio.create_task(
+        run_schedule_loop(
+            cast(RunScheduleTick, _YieldingRunner(env.runner)),
+            tick_seconds=0.01,
+            stopping=stopping,
+        )
+    )
+    return loop, stopping
+
+
+async def test_a_shutdown_during_a_backup_the_drain_outlasts_records_it() -> None:
+    backup = _backup_hanging_at("write")
+    assert isinstance(backup.store, _HangingArchiveStore)
+    loop, stopping = _start_loop(backup.env)
+    await asyncio.wait_for(backup.entered.wait(), 5)
+
+    shutdown = asyncio.create_task(
+        drain_schedule_loop(loop, stopping, drain_seconds=_LONG_DRAIN)
+    )
+    await asyncio.sleep(0.05)
+    backup.store.release.set()
+    async with asyncio.timeout(5):
+        await shutdown
+
+    (row,) = backup.env.uow.backups.by_id.values()
+    assert backup.store.archives == {row.storage_ref}
+    assert _runs(backup.env, backup.schedule) == [ScheduleRunOutcome.SUCCESS]
+
+
+@pytest.mark.parametrize("point", ["write", "size", "insert"])
+async def test_a_shutdown_whose_drain_runs_out_mid_backup_leaves_no_row_or_archive(
+    point: str,
+) -> None:
+    backup = _backup_hanging_at(point)
+    loop, stopping = _start_loop(backup.env)
+    await asyncio.wait_for(backup.entered.wait(), 5)
+
+    async with asyncio.timeout(5):
+        await drain_schedule_loop(loop, stopping, drain_seconds=0.01)
+
+    assert loop.cancelled()
+    assert backup.env.uow.backups.by_id == {}
+    assert backup.store.archives == set()
+    assert _runs(backup.env, backup.schedule) == []

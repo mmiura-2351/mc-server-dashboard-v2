@@ -14,6 +14,8 @@ real PostgreSQL over the fs storage adapter. DB-gated: skipped unless
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import datetime as dt
 import os
 from collections.abc import AsyncIterator
@@ -22,7 +24,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, IntegrityError
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
 from mc_server_dashboard_api.servers.adapters.backup_store import (
@@ -175,6 +177,51 @@ async def test_a_backup_whose_insert_is_refused_deletes_its_archive(
 
     with pytest.raises(IntegrityError):
         await _back_up(kind, engine, store, community, server)
+
+    assert await _row_refs(engine) == []
+    assert await _archive_refs(storage, community, server) == []
+
+
+class _HangsBetweenInsertAndCommit(ServersUnitOfWork):
+    """Sends the row's INSERT and releases its savepoint, then never sends the
+    COMMIT (issue #4109): the point an API shutdown can cancel a backup at."""
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        super().__init__(session_factory)
+        self.entered = asyncio.Event()
+
+    @contextlib.asynccontextmanager
+    async def savepoint(self) -> AsyncIterator[None]:
+        async with super().savepoint():
+            yield
+        self.entered.set()
+        await asyncio.Event().wait()
+
+
+async def test_a_create_cancelled_between_its_insert_and_its_commit_leaves_neither(
+    engine: AsyncEngine,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    community, server = await _seed_server(engine)
+    storage = FsStorage(tmp_path)
+    await _publish(storage, community, server, _WORLD)
+    factory = create_session_factory(engine)
+    uow = _HangsBetweenInsertAndCommit(factory)
+    create = asyncio.create_task(
+        CreateBackup(
+            uow=uow,
+            backup_store=StorageBackupStoreAdapter(storage=storage),
+            snapshot_server=SnapshotServer(
+                uow=ServersUnitOfWork(factory), control_plane=FakeControlPlane()
+            ),
+            clock=FakeClock(_NOW),
+        )(community_id=community, server_id=server, source=BackupSource.SCHEDULED)
+    )
+    await uow.entered.wait()
+
+    create.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await create
 
     assert await _row_refs(engine) == []
     assert await _archive_refs(storage, community, server) == []

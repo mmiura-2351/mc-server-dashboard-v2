@@ -142,10 +142,10 @@ _SECTION_LOADING_CASES = [
     ),
     pytest.param(
         "schedule",
-        {"tick_seconds": 20},
-        {"tick_seconds": 30},
-        {"tick_seconds": "40"},
-        {"tick_seconds": 40},
+        {"tick_seconds": 20, "shutdown_drain_seconds": 0},
+        {"tick_seconds": 30, "shutdown_drain_seconds": 120},
+        {"tick_seconds": "40", "shutdown_drain_seconds": "60"},
+        {"tick_seconds": 40, "shutdown_drain_seconds": 60},
         id="schedule-tick",
     ),
     pytest.param(
@@ -467,6 +467,12 @@ _SCALAR_INVALID_CASES = [
         id="schedule-tick-exceeds-grace",
     ),
     pytest.param(
+        "schedule",
+        "shutdown_drain_seconds = -1",
+        "shutdown_drain_seconds",
+        id="negative-schedule-shutdown-drain",
+    ),
+    pytest.param(
         "reconciler",
         "interval_seconds = 0",
         "interval_seconds",
@@ -785,6 +791,14 @@ _SCALAR_VALID_CASES = [
         "tick_seconds",
         300,
         id="schedule-tick-at-grace",
+    ),
+    # No drain, the default: the shutdown cancels a scheduled run at once.
+    pytest.param(
+        "schedule",
+        "shutdown_drain_seconds = 0",
+        "shutdown_drain_seconds",
+        0,
+        id="no-schedule-shutdown-drain",
     ),
     pytest.param(
         "control",
