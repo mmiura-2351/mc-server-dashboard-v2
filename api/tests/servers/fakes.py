@@ -1171,7 +1171,8 @@ class FakeServerRepository(ServerRepository):
 
     async def mark_worker_servers_unknown(
         self, worker_id: WorkerId, observed_at: dt.datetime
-    ) -> None:
+    ) -> int:
+        marked = 0
         for server in self.by_id.values():
             if server.assigned_worker_id != worker_id:
                 continue
@@ -1179,10 +1180,14 @@ class FakeServerRepository(ServerRepository):
             if server.observed_at is not None and server.observed_at > observed_at:
                 continue
             if server.observed_state is not ObservedState.CRASHED:
+                # Only a changed state counts (issue #4144).
+                if server.observed_state is not ObservedState.UNKNOWN:
+                    marked += 1
                 _observe(server, ObservedState.UNKNOWN, observed_at)
             elif server.desired_state is DesiredState.STOPPED:
                 # A crash under a stopped intent keeps its crash, stamped anew.
                 server.observed_at = observed_at
+        return marked
 
     async def workers_with_trusted_observed_state(self) -> set[WorkerId]:
         return {

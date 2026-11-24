@@ -1535,10 +1535,13 @@ and equally the writes the API makes without one, whose frames carry an empty
 A write that leaves the state as it was — the bulk `unknown` over a row already
 `unknown`, a confirmed stop the Worker's own `stopped` report preceded —
 publishes nothing, unless it is a `StatusChange` carrying a `detail` or crash
-reason, or the held retry of a `StatusChange` (Section 4.2). A report the API
-drops — it comes from a Worker that no longer owns the server, or it is no
-fresher than the state already recorded, counted from the instant it arrived
-(Section 4.2) — is not relayed.
+reason, or the held retry of a `StatusChange` (Section 4.2). The bulk `unknown`
+does not write such a row at all once the row holds its stamp, so the
+reconciler's repeat of it for a Worker that stays away (Section 4.4) changes
+nothing, and logs a mark only when it changed a server's state (issue #4144).
+A report the API drops — it comes from a Worker that no longer owns the server,
+or it is no fresher than the state already recorded, counted from the instant
+it arrived (Section 4.2) — is not relayed.
 
 Real-time delivery is best-effort end to end: if the control plane is down the
 API's REST endpoints still function and clients simply miss live updates

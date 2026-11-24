@@ -393,7 +393,7 @@ class ServerRepository(abc.ABC):
     @abc.abstractmethod
     async def mark_worker_servers_unknown(
         self, worker_id: WorkerId, observed_at: dt.datetime
-    ) -> None:
+    ) -> int:
         """Set observed=unknown for the servers assigned to ``worker_id`` (FR-WRK-4).
 
         A ``crashed`` server keeps its state and stored crash (issue #3885): the
@@ -407,6 +407,11 @@ class ServerRepository(abc.ABC):
         stamp included (issue #4092): that is a report of the Worker's next
         session, made after the disconnect, which this write must not
         overwrite when it lands late.
+
+        Returns the number of servers whose state it changed to ``unknown``
+        (issue #4144). A server already ``unknown``, or a crashed one under a
+        stopped intent, at ``observed_at`` already holds what the write would
+        set and is not written again, so a repeat of the write changes nothing.
         """
 
     @abc.abstractmethod
