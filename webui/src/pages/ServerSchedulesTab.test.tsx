@@ -1885,6 +1885,33 @@ describe("ServerSchedulesTab keep-all retention (#4084)", () => {
     expect(createButton()).toBeDisabled();
   });
 
+  it("stops saying it is counting when backup:read is revoked during the read", async () => {
+    routeGet({ schedules: [] });
+    const get = mockApi.get.getMockImplementation() as (
+      path: string,
+    ) => Promise<unknown>;
+    mockApi.get.mockImplementation((path: string) =>
+      path.endsWith("/backups") ? new Promise(() => {}) : get(path),
+    );
+    routePost({ create: schedule() });
+    const view = renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    expect(
+      screen.getByText(t("schedules.dialog.retentionPruneCounting")),
+    ).toBeInTheDocument();
+
+    // The read still in flight is not counted, whatever it answers.
+    view.rerenderCan(canFor(ALL_CODES));
+    expect(
+      screen.getByText(t("schedules.dialog.retentionPruneUnknown")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("schedules.dialog.retentionPruneCounting")),
+    ).not.toBeInTheDocument();
+    expect(createButton()).toBeDisabled();
+  });
+
   describe("with a backups list cached by the Backups tab", () => {
     // The dialog shares the Backups tab's list cache; a visit there leaves
     // a list that may be out of date by the time the dialog opens.

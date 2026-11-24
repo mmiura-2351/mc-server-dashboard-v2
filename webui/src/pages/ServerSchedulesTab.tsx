@@ -1312,7 +1312,9 @@ function ScheduleDialog({
                 (pruneCount !== null
                   ? t("schedules.dialog.retentionPrune", { count: pruneCount })
                   : t(
-                      backupsQuery.isFetching
+                      // A read still in flight when backup:read is revoked
+                      // is not counted, so the line does not say counting.
+                      canReadBackups && backupsQuery.isFetching
                         ? "schedules.dialog.retentionPruneCounting"
                         : "schedules.dialog.retentionPruneUnknown",
                     ))}
