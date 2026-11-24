@@ -1842,9 +1842,12 @@ describe("ServerSchedulesTab keep-all retention (#4084)", () => {
 
     await openBackupCreate();
     await screen.findByText(t("schedules.dialog.retentionPrune", { count: 3 }));
+    fireEvent.click(pruneAck() as HTMLElement);
+    expect(createButton()).toBeEnabled();
 
     // The capabilities refetch without backup:read: the list read under it
-    // is no longer counted.
+    // is no longer counted, and the tick given for three deletions does not
+    // cover a count that is unknown.
     view.rerenderCan(canFor(ALL_CODES));
     expect(
       screen.getByText(t("schedules.dialog.retentionPruneUnknown")),
@@ -1852,6 +1855,7 @@ describe("ServerSchedulesTab keep-all retention (#4084)", () => {
     expect(
       screen.queryByText(t("schedules.dialog.retentionPrune", { count: 3 })),
     ).not.toBeInTheDocument();
+    expect(pruneAck()).not.toBeChecked();
     expect(createButton()).toBeDisabled();
   });
 
