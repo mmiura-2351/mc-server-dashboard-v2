@@ -78,14 +78,16 @@ describe("fileOperationErrorPresentation", () => {
       { key: "files.error.notFound" },
     ],
     [
-      "maps server_unsettled to the at-rest message",
+      // One neutral reason for every operation, upload and folder creation
+      // included (#4183).
+      "maps server_unsettled to the neutral stop message",
       new ApiError(409, { reason: "server_unsettled" }),
-      { key: "files.error.serverMustBeStopped" },
+      { key: "files.error.notStopped" },
     ],
     [
-      "maps server_not_stopped to the at-rest message",
+      "maps server_not_stopped to the neutral stop message",
       new ApiError(409, { reason: "server_not_stopped" }),
-      { key: "files.error.serverMustBeStopped" },
+      { key: "files.error.notStopped" },
     ],
     [
       "maps server_busy to the contention message",

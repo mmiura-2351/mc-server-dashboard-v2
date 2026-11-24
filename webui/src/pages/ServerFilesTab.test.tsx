@@ -661,6 +661,36 @@ describe("ServerFilesTab operations", () => {
     );
   });
 
+  // The gate reads the cached state, so a start can race past it. The 409
+  // names the stop with the tab's neutral reason, as every operation's does
+  // (#4183).
+  it("names the stop neutrally when a folder create is refused server_unsettled (#4183)", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", kind: "file" }]),
+    });
+    mockApi.post.mockRejectedValue(
+      new ApiError(409, { reason: "server_unsettled" }),
+    );
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.newFolder") }),
+    );
+    fireEvent.change(screen.getByLabelText(t("files.folderName")), {
+      target: { value: "datapacks" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: t("files.create") }));
+
+    expect(
+      await screen.findByText(t("files.error.notStopped")),
+    ).toBeInTheDocument();
+  });
+
   it("disables the Create button while the folder-create request is in flight", async () => {
     routeGet({
       detail: server(),
@@ -1427,7 +1457,7 @@ describe("ServerFilesTab history + rollback", () => {
   );
 
   // The gate reads the cached state, so a start can race past it. The API's
-  // 409 then names the rollback, not the upload and folder writes (#4147).
+  // 409 then names the rollback, not the tab's neutral stop reason (#4147).
   it("names the rollback when the API refuses it server_not_stopped (#4147)", async () => {
     mockApi.post.mockRejectedValue(
       new ApiError(409, { reason: "server_not_stopped" }),
@@ -1438,7 +1468,7 @@ describe("ServerFilesTab history + rollback", () => {
       await screen.findByText(t("files.error.rollbackServerMustBeStopped")),
     ).toBeInTheDocument();
     expect(
-      screen.queryByText(t("files.error.serverMustBeStopped")),
+      screen.queryByText(t("files.error.notStopped")),
     ).not.toBeInTheDocument();
   });
 
@@ -1514,6 +1544,14 @@ describe("ServerFilesTab running notice", () => {
       expect(ja["files.runningNotice"]).toMatch(jaPattern);
     },
   );
+
+  // The notice shows whenever the server is not at rest, stopping, starting
+  // and stopped under a running intent included, so its lead claims no state
+  // the server may not be in (#4183).
+  it("leads the running notice with a state-neutral clause (#4183)", () => {
+    expect(en["files.runningNotice"]).toMatch(/^The server is not stopped —/);
+    expect(ja["files.runningNotice"]).toMatch(/^サーバーは停止していません —/);
+  });
 });
 
 describe("ServerFilesTab viewer read errors (#3361)", () => {
@@ -4652,7 +4690,7 @@ describe("ServerFilesTab directory downloads (minted grant, #2354)", () => {
     downloadDirFromContextMenu();
 
     expect(
-      await screen.findByText(t("files.error.serverMustBeStopped")),
+      await screen.findByText(t("files.error.notStopped")),
     ).toBeInTheDocument();
     expect(clicks).toHaveLength(0);
   });
