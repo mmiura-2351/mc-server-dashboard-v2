@@ -1285,6 +1285,9 @@ describe("ServerSchedulesTab keep-all retention (#4084)", () => {
     screen.queryByRole("checkbox", {
       name: t("schedules.dialog.retentionPruneAck"),
     });
+  // The live region that says what keep-last N deletes.
+  const pruneLine = () =>
+    within(screen.getByRole("dialog")).getByRole("status");
   const warning = () =>
     screen.queryByText(t("backups.retention.unboundedWarning"));
   const createCalls = () =>
@@ -1664,6 +1667,29 @@ describe("ServerSchedulesTab keep-all retention (#4084)", () => {
     );
   });
 
+  it("keeps the live region through keep all, so the count is heard on coming back", async () => {
+    routeGet({ schedules: [], backups: scheduled(10) });
+    routePost({ create: schedule() });
+    renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    const line = await screen.findByText(
+      t("schedules.dialog.retentionPrune", { count: 3 }),
+    );
+    const mode = screen.getByLabelText(t("backups.retention.modeLabel"));
+    fireEvent.change(mode, { target: { value: "none" } });
+    expect(pruneLine()).toBe(line);
+    expect(line).toBeEmptyDOMElement();
+
+    // A region inserted with its text is not reliably read out; a text
+    // change in one already there is.
+    fireEvent.change(mode, { target: { value: "keepLast" } });
+    expect(pruneLine()).toBe(line);
+    expect(line).toHaveTextContent(
+      t("schedules.dialog.retentionPrune", { count: 3 }),
+    );
+  });
+
   it("asks again when the number to keep changes", async () => {
     routeGet({ schedules: [], backups: scheduled(10) });
     routePost({ create: schedule() });
@@ -2029,6 +2055,37 @@ describe("ServerSchedulesTab keep-all retention (#4084)", () => {
         await screen.findByText(t("schedules.dialog.retentionPruneUnknown")),
       ).toBeInTheDocument();
       expect(pruneAck()).not.toBeChecked();
+      expect(createButton()).toBeDisabled();
+    });
+
+    it("announces in one live region each line the reads lead to", async () => {
+      let release: (list: object) => void = () => {};
+      reply = () =>
+        new Promise((resolve) => {
+          release = resolve;
+        });
+      const readAgain = renderReadAgain();
+
+      await openBackupCreate();
+      const line = pruneLine();
+      expect(line).toHaveTextContent(
+        t("schedules.dialog.retentionPruneCounting"),
+      );
+
+      // Seven: nothing to prune and nothing to say, but the region stays.
+      await act(async () => release({ backups: scheduled(7) }));
+      await waitFor(() => expect(pruneAck()).not.toBeInTheDocument());
+      expect(pruneLine()).toBe(line);
+      expect(line).toBeEmptyDOMElement();
+
+      // A refetch finds ten: Create is held again, and the same region says
+      // why.
+      reply = answer(10);
+      await readAgain();
+      await screen.findByText(
+        t("schedules.dialog.retentionPrune", { count: 3 }),
+      );
+      expect(pruneLine()).toBe(line);
       expect(createButton()).toBeDisabled();
     });
   });

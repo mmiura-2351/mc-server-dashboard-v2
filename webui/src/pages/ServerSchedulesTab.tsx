@@ -1297,23 +1297,27 @@ function ScheduleDialog({
                 : "schedules.dialog.retentionKeepAllHint",
             )}
           </p>
-          {confirmPrune && (
-            <div className="field">
-              {/* A live region: a count that arrives unticks the box below
-                  and holds Create, which is heard rather than silent. */}
-              <p
-                id={pruneLineId}
-                className="schedule-prune-warning"
-                role="status"
-              >
-                {pruneCount !== null
+          <div className={confirmPrune ? "field" : undefined}>
+            {/* A live region, mounted while the step shows and empty while
+                nothing is asked, so each new line is a text change it
+                announces: a count that arrives and unticks the box below, or
+                a refetch that finds backups to delete and holds Create. A
+                region inserted with its text is not reliably read out. */}
+            <p
+              id={pruneLineId}
+              className="schedule-prune-warning"
+              role="status"
+            >
+              {confirmPrune &&
+                (pruneCount !== null
                   ? t("schedules.dialog.retentionPrune", { count: pruneCount })
                   : t(
                       backupsQuery.isFetching
                         ? "schedules.dialog.retentionPruneCounting"
                         : "schedules.dialog.retentionPruneUnknown",
-                    )}
-              </p>
+                    ))}
+            </p>
+            {confirmPrune && (
               <label className="checkbox">
                 <input
                   type="checkbox"
@@ -1325,8 +1329,8 @@ function ScheduleDialog({
                 />
                 {t("schedules.dialog.retentionPruneAck")}
               </label>
-            </div>
-          )}
+            )}
+          </div>
         </>
       )}
 
