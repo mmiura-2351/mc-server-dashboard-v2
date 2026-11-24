@@ -1095,12 +1095,15 @@ numbers): the UI for the general scheduler.
   cached by the Backups tab counts only once read again, and a read that
   fails makes the count unknown again. When some would be deleted it says
   how many, and Create waits for an acknowledgement checkbox, asked again
-  when the count or N changes. While the list loads, a counting line
-  replaces the count; without `backup:read`, or when the list fails, a
-  generic line says it could not be counted. Either way the checkbox is
-  still required; with nothing to prune there is none. The line describes
-  the checkbox and is a polite live region (`role="status"`), so a count
-  that arrives and unticks the box is announced.
+  when the count or N changes, even if the count comes back to one
+  confirmed before. While the list loads, a counting line replaces the
+  count; without `backup:read` (also from the moment it is revoked during
+  a read), or when the list fails, a generic line says it could not be
+  counted. Either way the checkbox is still required; with nothing to prune
+  there is none. The line describes the checkbox and is a polite live
+  region (`role="status"`), mounted for as long as the step shows and empty
+  while nothing is asked, so each new line is announced: a count that
+  arrives and unticks the box, or a refetch that finds backups to delete.
 - Once the schedule is created, the step reads the server again and leaves a
   policy set since (from another session) in place, and the success toast
   says so; otherwise keep-last-N `PUT`s `{keep_last}` to
