@@ -655,8 +655,8 @@ function ScheduleDialog({
     keepLastN !== null &&
     pruneCount !== 0;
   // The confirmation holds only for the count it was given: a new count, or a
-  // new number to keep, asks again. One the count no longer matches is
-  // dropped, so a count that comes back to it still asks again.
+  // new number to keep, asks again. A confirmation the count no longer
+  // matches is dropped, so a count that comes back to it asks again too.
   const pruneKey = pruneCount ?? "unknown";
   const [pruneConfirmedFor, setPruneConfirmedFor] = useState<
     number | "unknown" | null
