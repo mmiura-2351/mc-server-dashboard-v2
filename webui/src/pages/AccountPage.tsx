@@ -242,7 +242,7 @@ function PasswordSection({
   };
 
   return (
-    <form className="card" onSubmit={onSubmit}>
+    <form className="card" method="post" onSubmit={onSubmit}>
       <h2>{t("account.password.heading")}</h2>
       {/* The signed-in username, for password managers to match the saved
           credential and save a new one against (#4093, #4094). Visually

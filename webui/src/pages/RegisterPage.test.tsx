@@ -341,6 +341,17 @@ describe("RegisterPage", () => {
     }
   });
 
+  // A script's form.submit() fires no submit event, so a GET form would put
+  // the named credentials in the URL (#4180).
+  it("posts the sign-up form", () => {
+    renderRegister();
+
+    const password = screen.getByLabelText(
+      t("auth.fieldPassword"),
+    ) as HTMLInputElement;
+    expect(password.form).toHaveAttribute("method", "post");
+  });
+
   it("keeps the password's name and autocomplete when the show/hide toggle reveals it", () => {
     renderRegister();
 
