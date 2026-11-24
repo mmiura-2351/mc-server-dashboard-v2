@@ -1941,6 +1941,98 @@ describe("ServerSchedulesTab keep-all retention (#4084)", () => {
     });
   });
 
+  describe("with the backups list read again while the dialog is open", () => {
+    // Each read of the backups list answers what `reply` returns at the
+    // time, so a test changes it between reads.
+    let reply: () => Promise<unknown>;
+    const answer = (count: number) => () =>
+      Promise.resolve({ backups: scheduled(count) });
+
+    // Renders the tab and returns a refetch of the backups list, as a
+    // return to the browser tab makes.
+    function renderReadAgain() {
+      routeGet({ schedules: [] });
+      const get = mockApi.get.getMockImplementation() as (
+        path: string,
+      ) => Promise<unknown>;
+      mockApi.get.mockImplementation((path: string) =>
+        path.endsWith("/backups") ? reply() : get(path),
+      );
+      routePost({ create: schedule() });
+      const queryClient = testQueryClient();
+      renderTab(CAN_COUNT, server({ backup_retention: null }), queryClient);
+      return () =>
+        act(() =>
+          queryClient.refetchQueries({ queryKey: ["backups", CID, SID] }),
+        );
+    }
+
+    it("asks again when a count comes back to the one confirmed", async () => {
+      reply = answer(10);
+      const readAgain = renderReadAgain();
+
+      await openBackupCreate();
+      await screen.findByText(
+        t("schedules.dialog.retentionPrune", { count: 3 }),
+      );
+      fireEvent.click(pruneAck() as HTMLElement);
+      expect(createButton()).toBeEnabled();
+
+      // Twelve: five deletions, which the tick for three does not cover.
+      reply = answer(12);
+      await readAgain();
+      expect(
+        await screen.findByText(
+          t("schedules.dialog.retentionPrune", { count: 5 }),
+        ),
+      ).toBeInTheDocument();
+      expect(pruneAck()).not.toBeChecked();
+
+      // Ten again: the dialog asked again and got no answer, so the box
+      // stays unticked.
+      reply = answer(10);
+      await readAgain();
+      expect(
+        await screen.findByText(
+          t("schedules.dialog.retentionPrune", { count: 3 }),
+        ),
+      ).toBeInTheDocument();
+      expect(pruneAck()).not.toBeChecked();
+      expect(createButton()).toBeDisabled();
+    });
+
+    it("asks again when a count that unticked the box turns unknown", async () => {
+      let release: (list: object) => void = () => {};
+      reply = () =>
+        new Promise((resolve) => {
+          release = resolve;
+        });
+      const readAgain = renderReadAgain();
+
+      // Ticked against the counting line; the count of three unticks it.
+      await openBackupCreate();
+      fireEvent.click(pruneAck() as HTMLElement);
+      await act(async () => release({ backups: scheduled(10) }));
+      expect(
+        await screen.findByText(
+          t("schedules.dialog.retentionPrune", { count: 3 }),
+        ),
+      ).toBeInTheDocument();
+      expect(pruneAck()).not.toBeChecked();
+
+      // The next read fails: the count is unknown as when the box was
+      // ticked, but the tick was taken back by the count in between.
+      reply = () =>
+        Promise.reject(new ApiError(503, { reason: "storage_unavailable" }));
+      await readAgain();
+      expect(
+        await screen.findByText(t("schedules.dialog.retentionPruneUnknown")),
+      ).toBeInTheDocument();
+      expect(pruneAck()).not.toBeChecked();
+      expect(createButton()).toBeDisabled();
+    });
+  });
+
   it("leaves a policy that was set after the dialog read the server", async () => {
     // Another session set a tiered policy; the cached server still reads none.
     routeGet({
