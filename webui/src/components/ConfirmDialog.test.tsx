@@ -131,6 +131,35 @@ describe("ConfirmDialog with a password prompt", () => {
     expect(username).toHaveClass("visually-hidden");
   });
 
+  // A script's form.submit() fires no submit event, so a GET form would put
+  // the named credentials in the URL (#4180).
+  it("posts the password's form", () => {
+    const { password } = renderPasswordDialog({ username: "miura" });
+
+    expect(password.form).toHaveAttribute("method", "post");
+  });
+
+  // On account deletion the phrase is the username, so a filled phrase field
+  // would bypass the typed confirm (#4180).
+  it("keeps the typed phrase out of autofill and form history", () => {
+    const { phrase } = renderPasswordDialog({ username: "miura" });
+
+    expect(phrase).toHaveAttribute("autocomplete", "off");
+    expect(phrase).not.toHaveAttribute("name");
+  });
+
+  // Out of the sign-in form, and before it, so the hidden username field is
+  // never the dialog's first control (#4121, #4180).
+  it("keeps the typed phrase outside the password's form, before it", () => {
+    const { phrase, password } = renderPasswordDialog({ username: "miura" });
+
+    const form = password.form as HTMLFormElement;
+    expect((phrase as HTMLInputElement).form).toBeNull();
+    expect(
+      phrase.compareDocumentPosition(form) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+  });
+
   it("renders no username field when the caller passes no username", () => {
     const { password } = renderPasswordDialog();
 
@@ -169,6 +198,21 @@ describe("ConfirmDialog with a password prompt", () => {
       onConfirm,
     });
     fireEvent.change(password, { target: { value: "MyPass123!" } });
+
+    expect(password.form).not.toBeNull();
+    const notPrevented = fireEvent.submit(password.form as HTMLFormElement);
+
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(notPrevented).toBe(false);
+  });
+
+  it("ignores a submit while the password is empty", () => {
+    const onConfirm = vi.fn();
+    const { phrase, password } = renderPasswordDialog({
+      username: "miura",
+      onConfirm,
+    });
+    fireEvent.change(phrase, { target: { value: "miura" } });
 
     expect(password.form).not.toBeNull();
     const notPrevented = fireEvent.submit(password.form as HTMLFormElement);

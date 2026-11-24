@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import logging
 import os
 import uuid
 from typing import Any
 
 import grpc
 import pytest
+from sqlalchemy import text
 
 from mc_server_dashboard_api.fleet.adapters import grpc_server
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
@@ -54,10 +56,13 @@ from mc_server_dashboard_api.servers.application.unrecorded_stops import (
 )
 from mc_server_dashboard_api.servers.domain.control_plane import ControlPlane
 from mc_server_dashboard_api.servers.domain.value_objects import (
+    DesiredState,
     ObservedState,
+    ServerId,
     WorkerId,
 )
 from mcsd.controlplane.v1 import control_plane_pb2 as pb
+from tests.contracts.server_repositories import server as contract_server
 from tests.fleet.fakes import FakeServerStateSink
 from tests.fleet.test_grpc_session import (
     _CREDENTIAL,
@@ -247,11 +252,14 @@ async def test_a_gone_workers_servers_end_unknown_when_its_teardown_wrote_nothin
 
 async def test_the_mark_keeps_a_report_newer_than_the_sessions_end(
     world: _World,  # noqa: F811
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     # The write's guard on PostgreSQL: a server observed after the session's
     # end is kept, and one observed before it is marked and announced. The
     # kept one leaves the Worker selected, and the write it repeats on the
-    # next tick changes nothing and announces nothing.
+    # next tick changes nothing, announces nothing and logs no mark (issue
+    # #4144).
+    caplog.set_level(logging.INFO, logger="mc_server_dashboard_api")
     worker = uuid.uuid4()
     before = await world.server("before", worker=worker, reported="running")
     ended_at = world.clock.now()
@@ -275,10 +283,71 @@ async def test_the_mark_keeps_a_report_newer_than_the_sessions_end(
         _status("unknown")
     ]
     world.assert_published_after_commit()
+    assert len(_marks(caplog)) == 1
 
+    caplog.clear()
     watching = world.watch_all()
     await reconciler.tick()
 
     assert await _load(world.engine, before.id) == marked
     assert await _load(world.engine, after.id) == kept
     assert await _received(watching) == []
+    assert _marks(caplog) == []
+
+
+def _marks(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if "marked them unknown" in r.getMessage()]
+
+
+async def _row_version(world: _World, server_id: ServerId) -> str:  # noqa: F811
+    """The row's ``xmin``: any UPDATE of it, even to the same values, moves it."""
+
+    async with world.engine.connect() as conn:
+        version = await conn.scalar(
+            text("SELECT xmin::text FROM server WHERE id = :id"),
+            {"id": server_id.value},
+        )
+    assert isinstance(version, str)
+    return version
+
+
+@pytest.mark.parametrize(
+    ("state", "desired"),
+    [
+        (ObservedState.UNKNOWN, DesiredState.RUNNING),
+        (ObservedState.CRASHED, DesiredState.STOPPED),
+    ],
+    ids=["unknown", "crashed-under-stopped-intent"],
+)
+async def test_a_repeated_mark_writes_no_row_again(
+    world: _World,  # noqa: F811
+    state: ObservedState,
+    desired: DesiredState,
+) -> None:
+    # Issue #4144: a server the write leaves in its state, already at the
+    # write's stamp, holds what the write would set. The reconciler repeats
+    # the write on every tick while a kept server leaves the Worker selected,
+    # and the repeat must change nothing: the row is not updated again, so
+    # its stamps stay and so does its row version.
+    item = contract_server(world.community)
+    assert item.assigned_worker_id is not None
+    item.observed_state = state
+    item.desired_state = desired
+    item.observed_at = _TICK_AT
+    if state is not ObservedState.CRASHED:
+        item.crash_reason = None
+        item.crash_detail = None
+    async with world.uow() as uow:
+        await uow.servers.add(item)
+        await uow.commit()
+    before = (await _row_version(world, item.id), await _load(world.engine, item.id))
+
+    async with world.uow() as uow:
+        marked = await uow.servers.mark_worker_servers_unknown(
+            item.assigned_worker_id, _TICK_AT
+        )
+        await uow.commit()
+
+    assert marked == 0
+    after = (await _row_version(world, item.id), await _load(world.engine, item.id))
+    assert after == before

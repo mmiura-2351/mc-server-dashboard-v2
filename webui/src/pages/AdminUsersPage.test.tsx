@@ -514,6 +514,22 @@ describe("AdminUsersPage", () => {
     expect(password).toHaveAttribute("autocomplete", "new-password");
   });
 
+  // A script's form.submit() fires no submit event, so a GET form would put
+  // the named credentials in the URL (#4180).
+  it("posts the create-user form", async () => {
+    renderPage();
+    await screen.findByText("alice");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: t("admin.users.create") }),
+    );
+
+    const password = screen.getByLabelText(
+      t("admin.users.passwordLabel"),
+    ) as HTMLInputElement;
+    expect(password.form).toHaveAttribute("method", "post");
+  });
+
   it("keeps the create-user password's name and autocomplete when the show/hide toggle reveals it", async () => {
     renderPage();
     await screen.findByText("alice");

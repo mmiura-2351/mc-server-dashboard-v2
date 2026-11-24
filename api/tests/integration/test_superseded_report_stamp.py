@@ -139,9 +139,9 @@ def _gate_reads_and_marks(monkeypatch: pytest.MonkeyPatch) -> tuple[_Gate, _Gate
 
     async def _mark(
         repo: SqlAlchemyServerRepository, worker_id: WorkerId, observed_at: dt.datetime
-    ) -> None:
+    ) -> int:
         await mark_gate.hold()
-        await mark(repo, worker_id, observed_at)
+        return await mark(repo, worker_id, observed_at)
 
     monkeypatch.setattr(SqlAlchemyServerRepository, "get_by_id", _read)
     monkeypatch.setattr(

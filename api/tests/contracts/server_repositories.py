@@ -870,6 +870,57 @@ class ServerRepositoryContract:
         assert row is not None
         assert (row.observed_state, row.observed_at) == (state, _NOW)
 
+    async def test_a_worker_disconnect_counts_the_servers_it_marks_unknown(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+    ) -> None:
+        # Issue #4144: the count is of the servers whose state the write
+        # changed, so a repeat of it counts none. A server observed after the
+        # write is kept; a crashed one keeps its state, and one already unknown
+        # its state too, whether the write moves the stamp or not; another
+        # Worker's server is not this disconnect's.
+        worker = WorkerId(uuid.uuid4())
+        rows = [
+            (ObservedState.RUNNING, DesiredState.RUNNING, _NOW, worker),
+            (ObservedState.STOPPED, DesiredState.STOPPED, None, worker),
+            (
+                ObservedState.RUNNING,
+                DesiredState.RUNNING,
+                _LATER + dt.timedelta(microseconds=1),
+                worker,
+            ),
+            (ObservedState.UNKNOWN, DesiredState.RUNNING, _NOW, worker),
+            (ObservedState.UNKNOWN, DesiredState.STOPPED, _LATER, worker),
+            (ObservedState.CRASHED, DesiredState.STOPPED, _NOW, worker),
+            (ObservedState.CRASHED, DesiredState.RUNNING, _NOW, worker),
+            (ObservedState.RUNNING, DesiredState.RUNNING, _NOW, WorkerId(uuid.uuid4())),
+        ]
+        async with server_repository_harness.open() as tx:
+            for offset, (state, desired, observed_at, assigned) in enumerate(rows):
+                item = server(contract_community_id, name=f"srv-{offset}")
+                item.observed_state = state
+                item.desired_state = desired
+                item.observed_at = observed_at
+                item.assigned_worker_id = assigned
+                if state is not ObservedState.CRASHED:
+                    item.crash_reason = None
+                    item.crash_detail = None
+                item.game_port = 25565 + offset
+                item.bedrock_port = 19132 + offset
+                await tx.repository.add(item)
+            await tx.commit()
+
+        counts = []
+        for _ in range(2):
+            async with server_repository_harness.open() as tx:
+                counts.append(
+                    await tx.repository.mark_worker_servers_unknown(worker, _LATER)
+                )
+                await tx.commit()
+
+        assert counts == [2, 0]
+
     async def test_lists_the_workers_whose_servers_a_disconnect_would_change(
         self,
         server_repository_harness: RepositoryHarness[ServerRepository],

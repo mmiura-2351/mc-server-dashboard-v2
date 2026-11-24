@@ -4525,6 +4525,51 @@ async def test_a_gone_workers_servers_already_unknown_are_left_alone(
     assert [r for r in caplog.records if "marked them unknown" in r.getMessage()] == []
 
 
+async def test_a_kept_server_leaves_the_next_tick_quiet(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #4144: a server observed after the session's end is kept, and
+    # keeps its Worker selected. The tick that marks the Worker's other
+    # server says so at INFO; the next one changes nothing and says so once,
+    # at DEBUG.
+    ended_at = _NOW - dt.timedelta(seconds=_HEARTBEAT_TIMEOUT)
+    uow = FakeUnitOfWork()
+    marked = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.RUNNING,
+        worker=_GONE,
+        observed_at=ended_at - dt.timedelta(seconds=1),
+    )
+    kept = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.RUNNING,
+        worker=_GONE,
+        observed_at=ended_at + dt.timedelta(seconds=1),
+    )
+    uow.servers.seed(marked)
+    uow.servers.seed(kept)
+    cp = FakeControlPlane()
+    cp.end_session(_GONE, at=ended_at)
+    reconciler = _reconciler(uow, cp, FakeClock(_NOW))
+
+    def gone_worker_lines() -> list[int]:
+        return [
+            record.levelno
+            for record in caplog.records
+            if str(_GONE.value) in record.getMessage()
+        ]
+
+    with caplog.at_level(logging.DEBUG, logger="mc_server_dashboard_api"):
+        await reconciler.tick()
+        first = gone_worker_lines()
+        caplog.clear()
+        await reconciler.tick()
+        second = gone_worker_lines()
+
+    assert _observed(uow, kept) == (ObservedState.RUNNING, kept.observed_at)
+    assert (first, second) == ([logging.INFO], [logging.DEBUG])
+
+
 class _SelectionMarksRepository(FakeServerRepository):
     def __init__(self) -> None:
         super().__init__()
@@ -4580,7 +4625,7 @@ async def test_a_report_committed_while_the_mark_waits_is_kept() -> None:
 class _MarkFailsRepository(FakeServerRepository):
     async def mark_worker_servers_unknown(
         self, worker_id: WorkerId, observed_at: dt.datetime
-    ) -> None:
+    ) -> int:
         raise RuntimeError("the database is down")
 
 

@@ -263,6 +263,18 @@ describe("AccountPage password", () => {
     expect(username).toHaveClass("visually-hidden");
   });
 
+  // A script's form.submit() fires no submit event, so a GET form would put
+  // the named credentials in the URL (#4180).
+  it("posts the change-password form", async () => {
+    renderPage();
+    await waitForLoaded();
+
+    const current = screen.getByLabelText(
+      t("account.password.current"),
+    ) as HTMLInputElement;
+    expect(current.form).toHaveAttribute("method", "post");
+  });
+
   it("names each password input next to its autocomplete hint", async () => {
     renderPage();
     await waitForLoaded();
