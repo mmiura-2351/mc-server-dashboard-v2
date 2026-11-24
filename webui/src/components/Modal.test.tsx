@@ -673,6 +673,58 @@ describe("Modal focus on controls that cannot take it", () => {
     );
   });
 
+  // A control with tabindex -1, as a visually hidden username field or an
+  // inactive tab of a roving tabindex, is out of the browser's Tab order, so
+  // the trap never wraps onto it (#4180).
+  const minusOne = {
+    input: <input aria-label="Minus" tabIndex={-1} readOnly />,
+    button: (
+      <button type="button" tabIndex={-1}>
+        Minus
+      </button>
+    ),
+  };
+
+  it.each(["input", "button"] as const)(
+    "wraps Tab past a tabindex -1 %s at the start of the dialog",
+    (kind) => {
+      render(
+        <Modal open={true} title="Title" onClose={() => {}}>
+          {minusOne[kind]}
+          {twoControls}
+        </Modal>,
+      );
+      const last = screen.getByRole("button", { name: "Last" });
+      last.focus();
+
+      expect(fireEvent.keyDown(last, { key: "Tab" })).toBe(false);
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: "First" }),
+      );
+    },
+  );
+
+  it.each(["input", "button"] as const)(
+    "wraps Shift+Tab past a tabindex -1 %s at the end of the dialog",
+    (kind) => {
+      render(
+        <Modal open={true} title="Title" onClose={() => {}}>
+          {twoControls}
+          {minusOne[kind]}
+        </Modal>,
+      );
+      const first = screen.getByRole("button", { name: "First" });
+      first.focus();
+
+      expect(fireEvent.keyDown(first, { key: "Tab", shiftKey: true })).toBe(
+        false,
+      );
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: "Last" }),
+      );
+    },
+  );
+
   it("goes on to the next control when one refuses focus", () => {
     render(
       <Modal open={true} title="Title" onClose={() => {}}>

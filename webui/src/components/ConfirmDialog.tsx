@@ -16,7 +16,10 @@ import { PasswordInput } from "./PasswordInput.tsx";
 // confirm button, and password managers see a sign-in form: the field is named
 // and, when the caller passes the signed-in username, a hidden read-only
 // username field names the account (#4121, as on the change-password form).
-// The typed phrase stays outside that form.
+// The form posts, so a script's form.submit(), which fires no submit event,
+// never puts the credentials in the URL (#4180). The typed phrase stays
+// outside that form, unnamed and opted out of autofill: on account deletion it
+// is the username, and a filled phrase would bypass the typed confirm.
 
 const PASSWORD_FORM_ID = "confirm-dialog-password-form";
 
@@ -110,13 +113,14 @@ export function ConfirmDialog({
         {promptLabel}
         <input
           type="text"
+          autoComplete="off"
           value={typed}
           placeholder={confirmPhrase}
           onChange={(event) => setTyped(event.target.value)}
         />
       </label>
       {passwordLabel !== undefined && (
-        <form id={PASSWORD_FORM_ID} onSubmit={onSubmit}>
+        <form id={PASSWORD_FORM_ID} method="post" onSubmit={onSubmit}>
           {/* Visually hidden rather than type="hidden", which some managers
               ignore; out of the tab order and the accessibility tree. */}
           {username !== undefined && (
