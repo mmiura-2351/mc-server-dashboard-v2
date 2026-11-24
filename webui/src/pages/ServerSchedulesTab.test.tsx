@@ -1285,6 +1285,9 @@ describe("ServerSchedulesTab keep-all retention (#4084)", () => {
     screen.queryByRole("checkbox", {
       name: t("schedules.dialog.retentionPruneAck"),
     });
+  // The live region that says what keep-last N deletes.
+  const pruneLine = () =>
+    within(screen.getByRole("dialog")).getByRole("status");
   const warning = () =>
     screen.queryByText(t("backups.retention.unboundedWarning"));
   const createCalls = () =>
@@ -1664,6 +1667,29 @@ describe("ServerSchedulesTab keep-all retention (#4084)", () => {
     );
   });
 
+  it("keeps the live region through keep all, so the count is heard on coming back", async () => {
+    routeGet({ schedules: [], backups: scheduled(10) });
+    routePost({ create: schedule() });
+    renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    const line = await screen.findByText(
+      t("schedules.dialog.retentionPrune", { count: 3 }),
+    );
+    const mode = screen.getByLabelText(t("backups.retention.modeLabel"));
+    fireEvent.change(mode, { target: { value: "none" } });
+    expect(pruneLine()).toBe(line);
+    expect(line).toBeEmptyDOMElement();
+
+    // A region inserted with its text is not reliably read out; a text
+    // change in one already there is.
+    fireEvent.change(mode, { target: { value: "keepLast" } });
+    expect(pruneLine()).toBe(line);
+    expect(line).toHaveTextContent(
+      t("schedules.dialog.retentionPrune", { count: 3 }),
+    );
+  });
+
   it("asks again when the number to keep changes", async () => {
     routeGet({ schedules: [], backups: scheduled(10) });
     routePost({ create: schedule() });
@@ -1842,15 +1868,46 @@ describe("ServerSchedulesTab keep-all retention (#4084)", () => {
 
     await openBackupCreate();
     await screen.findByText(t("schedules.dialog.retentionPrune", { count: 3 }));
+    fireEvent.click(pruneAck() as HTMLElement);
+    expect(createButton()).toBeEnabled();
 
     // The capabilities refetch without backup:read: the list read under it
-    // is no longer counted.
+    // is no longer counted, and the tick given for three deletions does not
+    // cover a count that is unknown.
     view.rerenderCan(canFor(ALL_CODES));
     expect(
       screen.getByText(t("schedules.dialog.retentionPruneUnknown")),
     ).toBeInTheDocument();
     expect(
       screen.queryByText(t("schedules.dialog.retentionPrune", { count: 3 })),
+    ).not.toBeInTheDocument();
+    expect(pruneAck()).not.toBeChecked();
+    expect(createButton()).toBeDisabled();
+  });
+
+  it("stops saying it is counting when backup:read is revoked during the read", async () => {
+    routeGet({ schedules: [] });
+    const get = mockApi.get.getMockImplementation() as (
+      path: string,
+    ) => Promise<unknown>;
+    mockApi.get.mockImplementation((path: string) =>
+      path.endsWith("/backups") ? new Promise(() => {}) : get(path),
+    );
+    routePost({ create: schedule() });
+    const view = renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    expect(
+      screen.getByText(t("schedules.dialog.retentionPruneCounting")),
+    ).toBeInTheDocument();
+
+    // The read still in flight is not counted, whatever it answers.
+    view.rerenderCan(canFor(ALL_CODES));
+    expect(
+      screen.getByText(t("schedules.dialog.retentionPruneUnknown")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("schedules.dialog.retentionPruneCounting")),
     ).not.toBeInTheDocument();
     expect(createButton()).toBeDisabled();
   });
@@ -1933,6 +1990,129 @@ describe("ServerSchedulesTab keep-all retention (#4084)", () => {
         ),
       ).toBeInTheDocument();
       expect(pruneAck()).not.toBeChecked();
+      expect(createButton()).toBeDisabled();
+    });
+  });
+
+  describe("with the backups list read again while the dialog is open", () => {
+    // Each read of the backups list answers what `reply` returns at the
+    // time, so a test changes it between reads.
+    let reply: () => Promise<unknown>;
+    const answer = (count: number) => () =>
+      Promise.resolve({ backups: scheduled(count) });
+
+    // Renders the tab and returns a refetch of the backups list, as a
+    // return to the browser tab makes.
+    function renderReadAgain() {
+      routeGet({ schedules: [] });
+      const get = mockApi.get.getMockImplementation() as (
+        path: string,
+      ) => Promise<unknown>;
+      mockApi.get.mockImplementation((path: string) =>
+        path.endsWith("/backups") ? reply() : get(path),
+      );
+      routePost({ create: schedule() });
+      const queryClient = testQueryClient();
+      renderTab(CAN_COUNT, server({ backup_retention: null }), queryClient);
+      return () =>
+        act(() =>
+          queryClient.refetchQueries({ queryKey: ["backups", CID, SID] }),
+        );
+    }
+
+    it("asks again when a count comes back to the one confirmed", async () => {
+      reply = answer(10);
+      const readAgain = renderReadAgain();
+
+      await openBackupCreate();
+      await screen.findByText(
+        t("schedules.dialog.retentionPrune", { count: 3 }),
+      );
+      fireEvent.click(pruneAck() as HTMLElement);
+      expect(createButton()).toBeEnabled();
+
+      // Twelve: five deletions, which the tick for three does not cover.
+      reply = answer(12);
+      await readAgain();
+      expect(
+        await screen.findByText(
+          t("schedules.dialog.retentionPrune", { count: 5 }),
+        ),
+      ).toBeInTheDocument();
+      expect(pruneAck()).not.toBeChecked();
+
+      // Ten again: the dialog asked again and got no answer, so the box
+      // stays unticked.
+      reply = answer(10);
+      await readAgain();
+      expect(
+        await screen.findByText(
+          t("schedules.dialog.retentionPrune", { count: 3 }),
+        ),
+      ).toBeInTheDocument();
+      expect(pruneAck()).not.toBeChecked();
+      expect(createButton()).toBeDisabled();
+    });
+
+    it("asks again when a count that unticked the box turns unknown", async () => {
+      let release: (list: object) => void = () => {};
+      reply = () =>
+        new Promise((resolve) => {
+          release = resolve;
+        });
+      const readAgain = renderReadAgain();
+
+      // Ticked against the counting line; the count of three unticks it.
+      await openBackupCreate();
+      fireEvent.click(pruneAck() as HTMLElement);
+      await act(async () => release({ backups: scheduled(10) }));
+      expect(
+        await screen.findByText(
+          t("schedules.dialog.retentionPrune", { count: 3 }),
+        ),
+      ).toBeInTheDocument();
+      expect(pruneAck()).not.toBeChecked();
+
+      // The next read fails: the count is unknown as when the box was
+      // ticked, but the tick was taken back by the count in between.
+      reply = () =>
+        Promise.reject(new ApiError(503, { reason: "storage_unavailable" }));
+      await readAgain();
+      expect(
+        await screen.findByText(t("schedules.dialog.retentionPruneUnknown")),
+      ).toBeInTheDocument();
+      expect(pruneAck()).not.toBeChecked();
+      expect(createButton()).toBeDisabled();
+    });
+
+    it("announces in one live region each line the reads lead to", async () => {
+      let release: (list: object) => void = () => {};
+      reply = () =>
+        new Promise((resolve) => {
+          release = resolve;
+        });
+      const readAgain = renderReadAgain();
+
+      await openBackupCreate();
+      const line = pruneLine();
+      expect(line).toHaveTextContent(
+        t("schedules.dialog.retentionPruneCounting"),
+      );
+
+      // Seven: nothing to prune and nothing to say, but the region stays.
+      await act(async () => release({ backups: scheduled(7) }));
+      await waitFor(() => expect(pruneAck()).not.toBeInTheDocument());
+      expect(pruneLine()).toBe(line);
+      expect(line).toBeEmptyDOMElement();
+
+      // A refetch finds ten: Create is held again, and the same region says
+      // why.
+      reply = answer(10);
+      await readAgain();
+      await screen.findByText(
+        t("schedules.dialog.retentionPrune", { count: 3 }),
+      );
+      expect(pruneLine()).toBe(line);
       expect(createButton()).toBeDisabled();
     });
   });

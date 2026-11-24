@@ -1267,6 +1267,11 @@ button.link:focus-visible {
   font-size: 12px;
   color: var(--red);
 }
+/* Empty while nothing is asked: it stays mounted as a live region, so it
+ * takes no space rather than being hidden. */
+.schedule-prune-warning:empty {
+  margin: 0;
+}
 /* Scheduled-backup settings card: the moved-to-Schedules note plus the
  * retention policy editor (#1843), both backup:schedule-gated. */
 .backups-retention {

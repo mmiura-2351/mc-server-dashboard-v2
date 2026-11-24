@@ -655,11 +655,16 @@ function ScheduleDialog({
     keepLastN !== null &&
     pruneCount !== 0;
   // The confirmation holds only for the count it was given: a new count, or a
-  // new number to keep, asks again.
+  // new number to keep, asks again. A confirmation the count no longer
+  // matches is dropped, so a count that comes back to it asks again too.
+  const pruneKey = pruneCount ?? "unknown";
   const [pruneConfirmedFor, setPruneConfirmedFor] = useState<
     number | "unknown" | null
   >(null);
-  const pruneConfirmed = pruneConfirmedFor === (pruneCount ?? "unknown");
+  if (pruneConfirmedFor !== null && pruneConfirmedFor !== pruneKey) {
+    setPruneConfirmedFor(null);
+  }
+  const pruneConfirmed = pruneConfirmedFor === pruneKey;
   const pruneLineId = useId();
 
   const [nameError, setNameError] = useState<string | null>(null);
@@ -1292,38 +1297,43 @@ function ScheduleDialog({
                 : "schedules.dialog.retentionKeepAllHint",
             )}
           </p>
-          {confirmPrune && (
-            <div className="field">
-              {/* A live region: a count that arrives unticks the box below
-                  and holds Create, which is heard rather than silent. */}
-              <p
-                id={pruneLineId}
-                className="schedule-prune-warning"
-                role="status"
-              >
-                {pruneCount !== null
+          <div className={confirmPrune ? "field" : undefined}>
+            {/* A live region, mounted while the step shows and empty while
+                nothing is asked, so a line that changes once the step is up
+                is a text change it announces: a count that arrives and
+                unticks the box below, or a refetch that finds backups to
+                delete and holds Create. A region inserted with its text is
+                not reliably read out. */}
+            <p
+              id={pruneLineId}
+              className="schedule-prune-warning"
+              role="status"
+            >
+              {confirmPrune &&
+                (pruneCount !== null
                   ? t("schedules.dialog.retentionPrune", { count: pruneCount })
                   : t(
-                      backupsQuery.isFetching
+                      // A read still in flight when backup:read is revoked
+                      // is not counted, so the line does not say counting.
+                      canReadBackups && backupsQuery.isFetching
                         ? "schedules.dialog.retentionPruneCounting"
                         : "schedules.dialog.retentionPruneUnknown",
-                    )}
-              </p>
+                    ))}
+            </p>
+            {confirmPrune && (
               <label className="checkbox">
                 <input
                   type="checkbox"
                   aria-describedby={pruneLineId}
                   checked={pruneConfirmed}
                   onChange={(e) =>
-                    setPruneConfirmedFor(
-                      e.target.checked ? (pruneCount ?? "unknown") : null,
-                    )
+                    setPruneConfirmedFor(e.target.checked ? pruneKey : null)
                   }
                 />
                 {t("schedules.dialog.retentionPruneAck")}
               </label>
-            </div>
-          )}
+            )}
+          </div>
         </>
       )}
 
