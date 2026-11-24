@@ -19,3 +19,10 @@ scripts/*.py[cod]
 # presence is how a re-run tells a partially-restored cluster from a finished
 # upgrade (both are just "the volume holds PostgreSQL <target>").
 .pg-upgrade-incomplete
+
+# An operator's own compose customisation, such as the api service's stop grace
+# and shutdown drain (docs/dev/DEPLOYMENT.md Section 9, issue #4109). docker
+# compose merges it beside compose.yaml; ignored so that the deploy preflight's
+# clean-tree check (scripts/deploy_preflight.sh) does not refuse a checkout
+# that has one.
+compose.override.yaml

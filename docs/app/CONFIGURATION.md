@@ -846,10 +846,10 @@ once. The tick still runs what its poll found due, a server's later schedules
 and a due backup retry included; only the next tick is not taken. One INFO line
 marks the start of the drain and one its end. A run that finishes in time is
 recorded as usual: a backup leaves its archive, its row and its run. A tick
-still running when the drain runs out is cancelled, with one WARNING line. Its run is not recorded, so the occurrence is due again on the
-next boot: a backup runs once more, and any other action only within the 300 s
-late-run grace. A backup it cancels leaves no row unless its row's COMMIT was
-already sent:
+still running when the drain runs out is cancelled, with one WARNING line. Its
+run is not recorded, so the occurrence is due again on the next boot: a backup
+runs once more, and any other action only within the 300 s late-run grace. A
+backup it cancels leaves no row unless its row's COMMIT was already sent:
 
 - Before the COMMIT is sent, the backup deletes the archive it wrote, in a
   delete shielded from any later cancellation and bounded at 5 s. A delete that

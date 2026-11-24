@@ -278,15 +278,20 @@ services:
     # server with grace=None (every RPC aborted immediately, so the long-lived
     # worker/relay session streams do not hold it) and disposes the engine.
     #
-    # The lifespan now has one code-level bound of its own (issue #4109): the
-    # scheduler's shutdown drain, schedule.shutdown_drain_seconds, plus the 5 s a
-    # scheduled backup it cancels may spend deleting its archive. The drain
-    # defaults to 0, which cancels at once, so the bound is the 5 s cleanup, and
-    # Docker's 10 s default still covers it; test_compose_api_stop_grace.py
-    # (api/tests) fails if it ever does not. An operator who sets the drain must
-    # also give this service a stop_grace_period above the drain, the 5 s and the
-    # teardown, or Docker kills the API mid-drain and no cleanup runs. Whether to
-    # ship such a grace and a non-zero drain by default is Decide #4185.
+    # Issue #4109 adds code-level bounds to that teardown: the scheduler's
+    # shutdown drain, schedule.shutdown_drain_seconds, and then up to 5 s for a
+    # scheduled backup it cancels to delete its archive. The drain defaults to 0,
+    # which cancels at once, so the default adds the 5 s. They are not the whole
+    # teardown. It also waits for the Worker sessions' teardowns, up to 10 s plus
+    # 2 s (#3555), which normally take milliseconds; and a cancel that lands
+    # during a backup's archive write is not under the 5 s at all: the store
+    # finishes or abandons that write itself (#4186). test_compose_api_stop_grace.py
+    # (api/tests) pins only a necessary condition, that the default drain plus
+    # the 5 s stay below this service's grace. An operator who sets the drain
+    # must also give this service a stop_grace_period above the drain, the 5 s
+    # and the rest of the teardown, or Docker kills the API mid-drain and no
+    # cleanup runs. Whether to ship such a grace and a non-zero drain by default
+    # is Decide #4185.
     environment:
       # An entry below with a LITERAL value is a pin this deployment owns, not a
       # default: setting that same MCD_API_* name in .env changes nothing,

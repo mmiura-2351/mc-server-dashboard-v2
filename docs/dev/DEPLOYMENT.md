@@ -1427,14 +1427,20 @@ Docker kills the process when the grace runs out, and a kill runs no cleanup. A
 backup killed mid-run leaves no row, since its archive is written before its
 row, but it can leave an archive with no row, which the row-less archive
 reclaim deletes after its grace ([`../app/STORAGE.md`](../app/STORAGE.md)
-Section 4.3). With the defaults, a scheduled backup in flight is cancelled and
-cleaned up within the 10 s, unless the HTTP requests of step 1 use them up
-first. A test in the api suite fails if the default drain and the 5 s cleanup
-ever reach the api's grace.
+Section 4.3). With the defaults, the cancel and its 5 s cleanup fit in the 10 s,
+unless the HTTP requests of step 1 use them up first. Two parts of the
+teardown are outside that 5 s: its wait for the Worker sessions' teardowns,
+which normally takes milliseconds but is bounded only at 10 s plus 2 s
+(#3555), and a cancel that lands during a backup's archive write, which the
+store finishes or abandons itself (#4186). A test in the api suite pins that
+the default drain and the 5 s cleanup stay below the api's grace: a necessary
+condition, not a proof that the whole teardown fits.
 
 **To let a scheduled run finish on a stop**, set both on the `api` service, for
 example in a `compose.override.yaml` beside `compose.yaml`, which `docker
-compose` merges:
+compose` merges. `.gitignore` lists that file, so the clean-tree check of
+`scripts/deploy_preflight.sh` (run by `make deploy` and `make update`) does not
+refuse a checkout that has one:
 
 ```yaml
 services:
