@@ -937,7 +937,7 @@ export const en = {
   // conflicts with sibling tab PRs minimal.
   "files.denied": "You do not have permission to view this server's files.",
   "files.runningNotice":
-    "Server is running — file edits apply to the running server immediately. Upload and folder creation require stopping the server first.",
+    "Server is running — file edits apply to the running server immediately. Uploading, creating folders, renaming, moving, deleting, extracting, pasting and rolling back require stopping the server first.",
   "files.root": "/",
   "files.loading": "Loading…",
   "files.listError": "Could not list this directory. Try refreshing.",
@@ -1005,6 +1005,9 @@ export const en = {
   "files.rolledBack": "Rolled back to the selected version.",
   "files.error.serverMustBeStopped":
     "Stop the server before uploading files or creating folders.",
+  // Why a control is disabled while the server is not at rest (issue #4183):
+  // one neutral reason for every gated control, not the upload and folder one.
+  "files.error.notStopped": "Stop the server before changing its files.",
   // A rollback republishes the at-rest copy (issue #4147): its own words, not
   // the upload and folder ones.
   "files.error.rollbackServerMustBeStopped":
