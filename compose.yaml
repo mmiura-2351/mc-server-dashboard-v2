@@ -223,7 +223,14 @@ services:
         # manual recovery").
         # -s3.port.iceberg=0 drops the Iceberg REST catalog listener (8181) from
         # the surface enumerated above; nothing in this deployment uses it.
-        exec weed server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -master.garbageThreshold=0.1 -s3.port.iceberg=0
+        # -volume.minFreeSpace=5 (a percent) makes every volume read-only while
+        # less than 5% of /data's filesystem is free, instead of SeaweedFS's 1%
+        # default. On a single host that filesystem is usually the root one, which
+        # PostgreSQL and the worker scratch share, so the store stops writing while
+        # they still have room (issue #4149, from #4085). Reads, deletes and vacuum
+        # keep working, and the volumes turn writable again once space is back
+        # (docs/dev/DEPLOYMENT.md Section 5, "Disk headroom").
+        exec weed server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -master.garbageThreshold=0.1 -s3.port.iceberg=0 -volume.minFreeSpace=5
     environment:
       # `:-` (empty default), NOT `:?`: compose interpolates a service's env even
       # when its profile is inactive, so a `:?` here would break the fs opt-out

@@ -282,10 +282,13 @@ every log it creates:
 - **The compose services.** `compose.yaml` gives every service the same
   `logging:` setting, the `x-logging` anchor at the top of the file: the
   `json-file` driver, rotated at `max-size` 50m, keeping at most `max-file` 5
-  files, the live one included. Each service holds at most 250 MB of log. The
-  bound is part of `compose.yaml` itself, with no `.env` setting: the deploy
-  preflight refuses a checkout with local edits, so changing it is a change to
-  the repository.
+  files, the live one included. Each service holds at most 250 MB of log there.
+  The exception is `seaweedfs`: under the entrypoint `compose.yaml` gives it,
+  `weed` also writes a second copy of its log as files in the container's
+  `/tmp`, in the container's writable layer and outside this bound
+  (issue #4206). The bound is part of `compose.yaml` itself, with no `.env`
+  setting: the deploy preflight refuses a checkout with local edits, so changing
+  it is a change to the repository.
 - **The Minecraft server containers.** They are not compose services: the
   worker creates them, and sets the same kind of bound on each, the launch
   container and the Forge install container alike. `driver.container.log_max_size`
@@ -786,12 +789,236 @@ them here — each has its own subsection:
   `storage_sweep.interval_seconds`). See CONFIGURATION.md
   [Section 5.15](../app/CONFIGURATION.md#515-crash-recovery-storage-sweep).
 
+#### Disk headroom
+
+On a single host the object store, PostgreSQL, the worker scratch and Docker
+usually share the root filesystem
+([What filesystem the scratch dir belongs on](#what-filesystem-the-scratch-dir-belongs-on)).
+The store is what grows, so `compose.yaml` runs `weed server` with
+`-volume.minFreeSpace=5`: the store stops writing while 5% of the filesystem is
+still free, instead of at SeaweedFS's 1% default.
+
+**What the minimum does.** While less than 5% of the filesystem that holds the
+`seaweedfs-data` volume is free, SeaweedFS makes every volume read-only:
+
+- Writes fail, so snapshots, backups and uploads fail. S3 answers them with
+  `500 InternalError` ("We encountered an internal error, please try again."),
+  so a client, the API included, sees only a 500. The reason is only in the
+  store's own log (next subsection).
+- Reads and deletes still work. A delete writes its tombstone into the
+  read-only volume.
+- The automatic vacuum still compacts a volume that is read-only for this reason
+  alone, so the space held by garbage still comes back.
+- SeaweedFS checks free space when it starts and then once a minute, and the
+  master learns the result at the next heartbeat, which runs every 5 seconds. So
+  the store stops writing up to a minute after free space drops below 5%, and
+  writes in between still succeed. Writes resume up to about 65 seconds after 5%
+  or more is free again: up to a minute until the next check, plus a heartbeat.
+  Nothing has to be restarted.
+
+SeaweedFS measures free space as `df`'s `Avail` divided by its `Size`. That can
+be lower than `100% - Use%`, because `Use%` leaves the blocks the filesystem
+reserves for root (5% by default on ext4) out of its total.
+
+**What it does not cover.** The minimum stops only the store's volume writes,
+and only at its next check, up to a minute late. PostgreSQL, the worker scratch,
+the API's temporary files and the container logs keep writing into the
+remaining 5%, and so does SeaweedFS itself: delete tombstones into its volumes,
+the filer's metadata store, and its own logs. While the store is low, the filer
+retries its metadata-log write about every 0.75 s after a metadata change,
+logging `metadata log write failed` each time, so its log grows several times
+faster. The minimum keeps the store from taking the last of the disk; it does
+not keep the disk from filling.
+
+**Threshold order: your alert > 5% > 0.** Your own alert threshold, and any
+app-side threshold added later (none exists today, issue #4151), must sit above
+the 5% minimum: an alert at 5% or below fires only after the store has stopped
+writing. Between 5% and 0 the rest of the host still has room; at 0 PostgreSQL
+cannot write its WAL and stops with a PANIC. The check in the next subsection
+uses 15%.
+
+**Raising the minimum on a host already below it.** A new minimum applies when
+`seaweedfs` next starts. If less than the new minimum is free by then, every
+volume comes up read-only and stays so until space is freed. Check `df` first.
+The update that brought 5% is such a raise, from 1% (Section 9). The value is
+part of `compose.yaml`, with no `.env` setting, so on a full host the remedy is
+to free space ([Recovery](#recovery) above).
+
+**Compaction headroom.** Vacuum writes the compacted copy of a volume beside the
+original before swapping it in
+([Vacuum tuning and manual recovery](#vacuum-tuning-and-manual-recovery)). It
+needs free space for about the volume's live data plus a sixteenth, but never
+more than the volume's current file, which it needs whole when SeaweedFS does
+not know how much of it is deleted. It counts all of `Avail`, the 5% included,
+so the reserve doubles as compaction room, but only up to its size. The
+automatic vacuum compacts one volume at a time, and a volume grows to about
+30 GiB (`-master.volumeSizeLimitMB` defaults to 30720, counted in MiB), so a
+full one can need about 30 GiB. On a filesystem smaller than about 600 GiB, 5%
+is less than that: plan for the larger of 5% and 30 GiB free.
+
+**Volume slots.** `compose.yaml` sets no `-volume.max`, so `weed server` keeps
+its default of 8 volumes, each up to 30 GiB: about 240 GiB of volume data at
+most, garbage included until it is vacuumed, however large the disk. The bucket
+gets less. SeaweedFS does not create volumes one at a time: a collection that
+needs a volume gets 7 at once by default, and the bucket (`mcsd`) and the
+filer's metadata log (collection `""`) are separate collections. Whichever of
+the two needs a volume first takes 7 of the 8 slots, and the other gets what is
+left. The filer normally first writes its metadata log a minute after it
+starts:
+
+- If the first S3 write comes before that, `mcsd` takes 7 and the metadata log
+  the last one. The bucket's ceiling is then about 210 GiB. Production is in
+  this state (issue #2786).
+- If the metadata log comes first, it takes the 7, and the bucket is left with
+  about one volume, about 30 GiB. This case is inferred from the growth count:
+  a check on 4.54 saw the metadata log grow first and create volumes 1-3, but
+  did not observe the rest.
+
+Check the split with `volume.list`: the bucket's ceiling is the number of
+`mcsd` volumes it lists, times 30 GiB. `free:` does not show it, because a
+healthy store shows `volume:8/8 active:8 free:0` almost from its first write.
+
+So a full slot count is normal, not a warning. The signal that the slots
+have run out is writes failing with `No writable volumes and no free volumes
+left for …` while no `disk free … < required` line is logged (next
+subsection): no volume of the collection takes writes, and no slot is left to
+grow one. Low disk fails writes with the same message, and the `disk free` line
+is what tells the two apart; in `volume.list` low disk shows as `active:0`, with
+every volume `ReadOnly:true`. Raising `-volume.max` is a change to
+`compose.yaml`; issue #2786 tracks it.
+
+**The API's temporary files.** On the object backend the API spools whole
+archives in its container's temporary directory. That directory and the store's
+volume are both under Docker's data root (`/var/lib/docker` by default), so on a
+single host they draw on the same free space. Concurrent spools add up.
+
+- A backup's `.tar.gz` is built there whole, uploaded, then deleted: a backup of
+  N bytes needs about 2N free while it is made, and N afterwards. A server
+  delete packs its `final.tar.gz` the same way.
+- A snapshot publish holds the world's tar, uncompressed, while it uploads the
+  files in it.
+- A restore or a backup health check holds one archive while it runs.
+
+**Container logs.** Each compose service keeps at most 250 MB of `json-file`
+log (`max-size` 50m, `max-file` 5), 2 GB for the eight services. `seaweedfs`
+keeps a second copy on top: `weed` writes its own log files (INFO, WARNING and
+ERROR) in the container's `/tmp`, which that bound does not cover. `weed -h`
+gives their limits as `-log_max_size_mb` 1800 and `-log_max_files` 5 per
+severity; issue #4206 tracks bounding them. Each Minecraft server container
+keeps up to 250 MB at the worker's defaults
+(`driver.container.log_max_size` 50m, `driver.container.log_max_file` 5). See
+[Container log rotation](#container-log-rotation).
+
 #### Not provided: disk-usage alerting
 
-There is **no automated early warning** before the disk fills — host disk-usage
-alerting is not provided. Check capacity by hand on a regular cadence: `df -h`
-on the host for overall free space, and `volume.list` from the SeaweedFS shell
-(as in Diagnosis above) for the per-volume garbage backlog.
+There is **no automated early warning** before the disk fills: the stack does
+not watch the host's disk. Set up a check on the host. This script checks the
+directory of each volume in `VOLUMES` and each path in `EXTRA_DIRS`, measured
+as SeaweedFS measures it. It prints a line for each one with less than
+`THRESHOLD` percent free and for each one it could not measure, and exits 1 if
+it printed any. On a single host the volumes share one filesystem, so a full
+disk prints one line per volume. It runs as root, because the volume
+directories under `/var/lib/docker` are closed to other users.
+
+- `VOLUMES` holds Docker volume names, `<project>_<volume>`. They are
+  `mcsd_seaweedfs-data` and `mcsd_db-data` for the `mcsd` project that
+  `compose.yaml` pins. A stack started with `-p <name>` or
+  `COMPOSE_PROJECT_NAME=<name>` has `<name>_seaweedfs-data` and
+  `<name>_db-data` instead; `docker volume ls` lists them.
+- `EXTRA_DIRS` holds plain paths. Add `MCSD_SCRATCH_DIR` there when it is on a
+  filesystem of its own, for example `EXTRA_DIRS="/opt/mcsd/scratch"`.
+
+```sh
+#!/bin/sh
+# /usr/local/sbin/mcsd-disk-check
+THRESHOLD=15
+VOLUMES="mcsd_seaweedfs-data mcsd_db-data"
+EXTRA_DIRS=""
+dirs=$(docker volume inspect --format '{{ .Mountpoint }}' $VOLUMES) && [ -n "$dirs" ] || {
+  echo "mcsd-disk-check: cannot find the directories of: $VOLUMES"
+  exit 1
+}
+status=0
+for dir in $dirs $EXTRA_DIRS; do
+  df -P "$dir" | awk -v t="$THRESHOLD" -v d="$dir" '
+    NR == 2 { free = $4 * 100 / $2
+              if (free < t) { printf "%s: %.2f%% free, below %d%%\n", d, int(free * 100) / 100, t; low = 1 } }
+    END { if (NR < 2) { printf "%s: df gave no figures\n", d; exit 1 }
+          exit low }' || status=1
+done
+exit "$status"
+```
+
+A systemd timer runs it every ten minutes. A run that exits 1 shows in
+`systemctl --failed`, and its output in `journalctl -u mcsd-disk-check`:
+
+```ini
+# /etc/systemd/system/mcsd-disk-check.service
+[Unit]
+Description=Free-space check for the mcsd stack
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/mcsd-disk-check
+```
+
+```ini
+# /etc/systemd/system/mcsd-disk-check.timer
+[Unit]
+Description=Run mcsd-disk-check every ten minutes
+
+[Timer]
+OnCalendar=*:0/10
+
+[Install]
+WantedBy=timers.target
+```
+
+```sh
+sudo chmod 755 /usr/local/sbin/mcsd-disk-check
+sudo systemctl daemon-reload
+sudo systemctl enable --now mcsd-disk-check.timer
+```
+
+For mail instead, run it from cron, which mails a job's output to `MAILTO` (this
+needs a working local mail transfer agent). The script prints nothing while
+every directory is measured and above the threshold:
+
+```sh
+# /etc/cron.d/mcsd-disk-check
+MAILTO=ops@example.com
+*/10 * * * * root /usr/local/sbin/mcsd-disk-check
+```
+
+The store's own log shows when it has stopped writing. While the store is low,
+the filer retries its metadata-log write about every 0.75 s, and each retry
+logs `No writable volumes` twice: on the filer's `metadata log write failed`
+line, and on the master's assign line. Both name the metadata log's empty
+collection, as `for collection: replication:…`, where a write to the bucket
+names it, as `for collection:mcsd replication:…`. The second `grep` drops both
+kinds:
+
+```sh
+docker compose logs seaweedfs \
+  | grep -i -E 'disk free .* < required|disk status:|no writable volumes' \
+  | grep -v -e 'for collection: replication:' -e 'metadata log write failed'
+```
+
+- `dir /data disk free 3.21% < required 5.00%`: the volumes are read-only for
+  low disk. Logged once a minute while it lasts.
+- `disk status:` followed by the filesystem's figures: more than 95% of it is
+  used, the same point as the 5% minimum. Logged at every free-space check while
+  it lasts.
+- `No writable volumes and no free volumes left for …`: a write found no
+  writable volume and no free slot to grow one. With the low-disk line it is low
+  disk; without it, the volume slots are used up (Disk headroom above). Other
+  writes failing at the same moment can log the shorter `No writable volumes`.
+- `no writable volumes for …, volume growth in progress`: a write came while
+  SeaweedFS was still creating volumes, with slots free. It is transient, and not
+  a sign that the store is full.
+
+`volume.list` from the SeaweedFS shell (as in Diagnosis above) shows the
+per-volume garbage backlog.
 
 ## 6. First-run bootstrap (create the platform admin)
 
@@ -1618,6 +1845,28 @@ container was replaced, so the existing stamp still describes what is running.
 > deletes nothing, but once the store is claimed the GCs reclaim every object no
 > row of this database names, so never run it against a store another
 > deployment uses.
+
+> **Caveat — the object store now stops at 5% free, not 1%.** The update that
+> brings `-volume.minFreeSpace=5` (issue #4149) recreates `seaweedfs` with it.
+> If less than 5% of the filesystem that holds the `seaweedfs-data` volume is
+> free, every volume comes up read-only, and snapshots, backups and uploads fail
+> until space is freed. Check before updating (the volume is
+> `<name>_seaweedfs-data` for a stack under another project name):
+>
+> ```sh
+> sudo df -P "$(docker volume inspect --format '{{ .Mountpoint }}' mcsd_seaweedfs-data)" \
+>   | awk 'NR == 2 { free = $4 * 100 / $2
+>                    printf "%.2f%% free: %s\n", int(free * 100) / 100, (free < 5 ? "BELOW 5%, free space first" : "ok") }
+>          END { if (NR < 2) print "no figures: check the volume name" }'
+> ```
+>
+> SeaweedFS treats anything strictly below 5% as low. The verdict compares the
+> full figure the same way, and the figure is cut, not rounded, to two decimals:
+> 4.97% prints `4.97% free: BELOW 5%, free space first`, and 4.999% prints
+> `4.99% free: BELOW 5%, free space first`.
+> For a verdict of BELOW, free space first (Section 5, "Recovery"). Once 5% is
+> free, writes resume up to about 65 seconds later (a minute until the next
+> check, plus a heartbeat), with no restart. See Section 5, "Disk headroom".
 
 > **Caveat — Bedrock is opt-in on the relay.** The relay's
 > Bedrock QUIC/UDP tunnel listener is gated on `bedrock.enabled` (`relay.toml`) /
