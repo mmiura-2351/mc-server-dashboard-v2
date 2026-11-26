@@ -316,6 +316,17 @@ class _StoreOwnership(abc.ABC):
 
         return _refusal(self._location, await self._read(), self._installation_id)
 
+    async def refusal_for(self, installation_id: uuid.UUID) -> str | None:
+        """Why an operator command's destructive pass must not run, or ``None``.
+
+        For a command that never claims the store (issue #4107): the pass may
+        run only while the marker names ``installation_id``, the installation of
+        the database the command was pointed at. It reads the marker and writes
+        nothing.
+        """
+
+        return _refusal(self._location, await self._read(), installation_id)
+
     @abc.abstractmethod
     async def _read(self) -> bytes | None:
         """The marker's bytes, or ``None`` if there is none."""

@@ -2,9 +2,11 @@
 
 The plugin-cache and resource-pack GCs delete every stored blob no row of this
 database names, so in a bucket another database also uses they would delete that
-database's blobs. The bucket's owner marker settles whose bucket it is
-(STORAGE.md Section 4.3, issue #3870); the wiring binds this Port to it at the
-edge.
+database's blobs. The dangling-row repair (``integrity_sweep_cli
+--delete-dangling --apply``, issue #4107) binds it too: a store that is not this
+database's answers NotFound for every backup, so the repair would delete every
+row. The store's owner marker settles whose store it is (STORAGE.md Section 4.3,
+issue #3870); the wiring binds this Port to it at the edge.
 """
 
 from __future__ import annotations

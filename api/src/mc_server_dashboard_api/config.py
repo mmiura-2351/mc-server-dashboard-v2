@@ -476,9 +476,18 @@ class ScheduleSettings(_Section):
     a warning fires up to one tick late (always strictly before the action),
     and a step whose offset is smaller than the tick can be skipped entirely —
     logged, never silent.
+
+    ``shutdown_drain_seconds`` is how long an API shutdown waits for the tick
+    in flight, a scheduled backup for one, before it cancels it (issue #4109).
+    The default, zero, cancels at once: the api service has no
+    ``stop_grace_period`` in ``compose.yaml`` (issue #2934), so Docker kills it
+    10 s after the stop. A non-zero drain needs a grace above the drain, the
+    backup's cleanup bound and the teardown, or Docker kills the API mid-drain
+    and no cleanup runs (Decide #4185).
     """
 
     tick_seconds: int = Field(default=20, gt=0, le=300)
+    shutdown_drain_seconds: int = Field(default=0, ge=0)
 
 
 class ReconcilerSettings(_Section):
@@ -594,10 +603,15 @@ class StorageSweepSettings(_Section):
     default matches the sibling GC loops. A pass that overlaps a live publish
     keeps the snapshot it is still filling (issue #3893). Runs for both backends
     unconditionally. The resource-pack GC (issue #3277) runs on the same
-    interval, on the object backend only.
+    interval, on the object backend only. Each pass, and the startup sweep, is
+    followed by the row-less backup archive reclaim (issue #4106), which deletes
+    a live server's archives no backup row names once they are older than
+    ``rowless_archive_grace_seconds`` (7 days by default). The grace must be
+    longer than any backup takes to write.
     """
 
     interval_seconds: int = Field(default=86400, gt=0)
+    rowless_archive_grace_seconds: int = Field(default=604800, gt=0)
 
 
 class PortsSettings(_Section):

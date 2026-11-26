@@ -510,7 +510,7 @@ function CreateUserDialog({
         </>
       }
     >
-      <form id="admin-create-user" onSubmit={onSubmit} noValidate>
+      <form id="admin-create-user" method="post" onSubmit={onSubmit} noValidate>
         {errors.general !== undefined ? (
           <div className="error" role="alert">
             {errors.general}

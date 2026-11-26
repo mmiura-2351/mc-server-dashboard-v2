@@ -463,7 +463,7 @@ assigned Worker.
 | `backup_retention` | jsonb nullable | the scheduled-backup retention policy: `{"keep_last": N}` (keep the newest N, N ≥ 1) **or** `{"daily": D, "weekly": W, "monthly": M}` (keep the newest scheduled backup per UTC calendar day / ISO week / calendar month over those windows; each ≥ 0, at least one > 0). Rows are chosen as keepers in three ranks: first those whose `size_bytes` is recorded and whose `health` is `healthy`, `unknown` or `unreadable`, then a `quarantined` row whose `size_bytes` is recorded, then a row whose `size_bytes` is NULL, whatever its `health`; a row keeps only a slot or bucket no row of a rank above it is left to fill (Section 8). `NULL` means no retention — scheduled backups accumulate unbounded. Applies **only** to `source = scheduled` backup rows (Section 8); manual / uploaded / event rows are never auto-pruned. Validated in the domain (`RetentionPolicy`), not by a CHECK — the free-form `config` posture |
 | `desired_state` | text | what the operator wants: `running` / `stopped` (CHECK enum) |
 | `observed_state` | text | last state reported by the Worker: `starting` / `running` / `stopping` / `stopped` / `restarting` / `crashed` / `unknown` (CHECK enum) |
-| `observed_at` | timestamptz nullable | when `observed_state` was last updated |
+| `observed_at` | timestamptz nullable | when `observed_state` was last updated; for a Worker's report, when it reached the API ([`CONTROL_PLANE.md`](CONTROL_PLANE.md) Section 4.2) |
 | `assigned_worker_id` | uuid nullable | the assigned Worker (FR-WRK-3); **no FK** — there is no `worker` table (Section 7). A soft reference to the in-memory fleet registry; kept when the Worker disconnects, and cleared when a stop releases the server or a failed start is undone (FR-WRK-4) |
 | `crash_reason` | text nullable | the last crash's reason as the Worker classified it: `forge_install_failed` / `forge_install_out_of_memory` / `forge_install_java_incompatible` (CHECK enum, mirroring the control-plane `CrashReason`, [`CONTROL_PLANE.md`](CONTROL_PLANE.md) Section 6). `NULL` for an unclassified crash, and whenever `observed_state` is not `crashed` |
 | `crash_detail` | text nullable | the last crash's free-text detail from the Worker, bounded to **4 KiB** of UTF-8: a longer one is cut on a character boundary and ends ` … [truncated]`, and NUL is dropped. `NULL` when the Worker sent none, and whenever `observed_state` is not `crashed` |
@@ -906,7 +906,8 @@ still raise, as when its answer is lost with the connection or the caller is
 cancelled while awaiting it. The archive is then kept and a WARNING logged, so a
 row that did land keeps its archive. A crash, a delete that fails, or an
 unconfirmed COMMIT that did not apply leaves an archive with no row instead: no
-listing shows it, and the server's delete prunes it (STORAGE.md Section 3.3).
+listing shows it, and the row-less archive reclaim deletes it once it is older
+than its grace (STORAGE.md Section 4.3).
 
 Backups are downloadable and uploadable: download streams the
 archive in its native `tar.gz` form (no recompression); upload validates the
@@ -950,11 +951,19 @@ committed ahead of an archive it never wrote. Two legacy populations can be NULL
 and still have an archive: a create before issue #4119 that wrote its archive
 but was interrupted before its separate size update, and a row from the day
 between backups landing (issue #123) and creates recording a size (issue #283).
-The prune ranks the rows as loaded and does not size them first, so such a row
-ranks behind too until a listing sizes it (issue #661). A row whose archive went
-missing after its size was recorded, as when a delete is interrupted between its
-archive removal and its row removal, still ranks by its `health`.
+The prune sizes the NULL-size rows before it ranks them (below), so such a row
+ranks as the sized row it is. A row whose archive went missing after its size
+was recorded, as when a delete is interrupted between its archive removal and
+its row removal, still ranks by its `health`.
 Manual / uploaded / event rows are never auto-pruned.
+
+Before it ranks, the prune sizes each scheduled row whose `size_bytes` is NULL,
+as a listing does (issue #4107): a storage HEAD per row, with no unit of work
+open across it (the lifecycle lock's own connection stays held), and the sizes
+recorded in a short transaction of their own. A row whose archive the store
+reports missing stays NULL, so it ranks last. Any other store failure stops the
+prune before it selects or deletes anything, with a WARNING; the next run
+retries.
 
 ### `file_edit_history` — Storage-layer only (no DB table)
 
@@ -1068,8 +1077,11 @@ backup does not retry every tick — it gets the runner's bounded retry (one,
 
 #### `schedule_run`
 
-One row per fired occurrence, written after it completes. History is capped at
-50 rows per schedule by the runner's prune, not by the schema.
+One row per run (an occurrence, a backup's retry, or a skip the runner decides
+itself), written after it completes. The runner mints the `id` once per run and
+inserts the row `ON CONFLICT (id) DO NOTHING`, so a record that is retried
+writes no second row. History is capped at 50 rows per schedule by the runner's
+prune, not by the schema.
 
 | Column | Type | Notes |
 |---|---|---|

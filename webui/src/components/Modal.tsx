@@ -44,9 +44,10 @@ export function setToastZone(zone: HTMLElement | null): void {
 }
 
 // `:disabled`, unlike `[disabled]`, also matches a control inside a disabled
-// fieldset.
+// fieldset. A control with tabindex -1, as a visually hidden field, is out of
+// the Tab order, so it is never a stop (#4180).
 const CONTROLS =
-  'a[href], button:not(:disabled), input:not(:disabled):not([type="hidden"]), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
+  ':is(a[href], button:not(:disabled), input:not(:disabled):not([type="hidden"]), select:not(:disabled), textarea:not(:disabled), [tabindex]):not([tabindex="-1"])';
 
 // The controls under `root`, and the scrollers the browser also stops Tab on,
 // in document order.

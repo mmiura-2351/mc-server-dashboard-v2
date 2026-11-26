@@ -40,7 +40,12 @@ import {
   type PluginJarSource,
   pluginErrorPresentation,
 } from "./serverPluginsErrorPresentation.ts";
-import { atRestWriteRefusal, normalizeState } from "./serverState.ts";
+import {
+  atRestWriteRefusal,
+  finalSnapshotRefusal,
+  normalizeState,
+  serverAssignedKey,
+} from "./serverState.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
 type PluginResponse = components["schemas"]["PluginResponse"];
@@ -434,7 +439,11 @@ export function ServerPluginsTab({
       {writeRefusal !== null && (
         <p className="field-hint plugins-notice">
           {writeRefusal === "server_assigned"
-            ? t("common.serverAssigned")
+            ? t(
+                serverAssignedKey(
+                  finalSnapshotRefusal(server.final_snapshot_refusal),
+                ),
+              )
             : tn("plugins.serverNotStopped")}
         </p>
       )}

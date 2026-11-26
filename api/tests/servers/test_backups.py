@@ -28,6 +28,7 @@ import tracemalloc
 import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 import pytest
 
@@ -93,7 +94,9 @@ from tests.servers.fakes import (
     FakeControlPlane,
     FakeServerRepository,
     FakeUnitOfWork,
+    HangingSizeStore,
     OutageUnitOfWork,
+    SessionTrackingUnitOfWork,
 )
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -489,7 +492,7 @@ async def test_list_backfills_null_size_when_archive_exists() -> None:
     persisted = await uow.backups.get_by_id(backup.id)
     assert persisted is not None
     assert persisted.size_bytes == 42
-    # The backfill committed the write inside the open uow (the fake makes
+    # The backfill committed the write in a unit of work of its own (the fake makes
     # update_size visible regardless, so only the commit count proves the durability).
     assert uow.commits == 1
 
@@ -557,6 +560,47 @@ async def test_server_statistics_backfills_null_size_into_total() -> None:
     # longer counted as unknown.
     assert stats.total_bytes == 15
     assert stats.unknown_size_count == 0
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        pytest.param(ListBackups, id="list"),
+        pytest.param(ServerBackupStatistics, id="statistics"),
+    ],
+)
+async def test_a_hanging_size_probe_holds_no_unit_of_work_open(
+    read: type[ListBackups] | type[ServerBackupStatistics],
+) -> None:
+    # The backfill's size probe is a storage HEAD, which can hang for as long as
+    # the store's timeouts allow. It runs with no unit of work open, so a hanging
+    # HEAD keeps no pool connection checked out (issue #4107); the size is then
+    # written in a short unit of work of its own.
+    server = _at_rest()
+    uow = SessionTrackingUnitOfWork()
+    uow.servers.seed(server)
+    archive = HangingSizeStore()
+    backup = _seed_null_size_row(
+        uow.backups, archive, server.id, storage_ref="legacy", archive_bytes=b"x" * 42
+    )
+
+    reading = asyncio.create_task(
+        read(uow=uow, backup_store=archive)(
+            community_id=_COMMUNITY, server_id=server.id
+        )
+    )
+    try:
+        await archive.probing.wait()
+        open_while_probing = uow.open
+    finally:
+        archive.release.set()
+    await reading
+
+    assert open_while_probing is False
+    persisted = await uow.backups.get_by_id(backup.id)
+    assert persisted is not None
+    assert persisted.size_bytes == 42
+    assert uow.commits == 1
 
 
 async def test_list_fails_when_the_store_is_unavailable() -> None:
@@ -2277,3 +2321,138 @@ async def test_a_backup_cancelled_before_its_commit_is_sent_deletes_its_archive(
     assert backups.by_id == {}
     assert len(archive.deleted) == 1
     assert archive.archives == set()
+
+
+# The delete of a cancelled backup's archive is shielded and bounded (issue
+# #4109): a later cancellation stops only the wait, and a store that does not
+# answer holds the backup, and the shutdown that cancelled it, no longer than
+# the bound. After any other failure the delete is awaited as before #4109,
+# with no bound. Every wait here is bounded too, so a regression fails in
+# seconds rather than at the suite's timeout.
+
+_WAIT_SECONDS = 5
+
+
+async def _within_seconds(event: asyncio.Event) -> None:
+    await asyncio.wait_for(event.wait(), _WAIT_SECONDS)
+
+
+class _DeleteWaitsForRelease(FakeBackupArchiveStore):
+    """Its archive delete waits for ``release``; a base for the fakes below."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.deleting = asyncio.Event()
+        self.release = asyncio.Event()
+        self.done = asyncio.Event()
+
+    async def delete(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> None:
+        self.deleting.set()
+        await self.release.wait()
+        await super().delete(
+            community_id=community_id, server_id=server_id, storage_ref=storage_ref
+        )
+        self.done.set()
+
+
+class _DeleteWaitsAfterAnOutage(
+    _DeleteWaitsForRelease, _WritesThenTakesTheDatabaseDown
+):
+    """Writes the archive, the database goes down, and the delete waits."""
+
+
+def _backup_hanging_at_its_insert(
+    kind: str, archive: FakeBackupArchiveStore
+) -> tuple[asyncio.Task[Backup], asyncio.Event]:
+    """A backup whose row's INSERT never answers, so its COMMIT is never sent."""
+
+    server = _at_rest()
+    backups = _HangsInInsert()
+    uow = FakeUnitOfWork(backups=backups)
+    uow.servers.seed(server)
+    return asyncio.create_task(_back_up(kind, uow, archive, server)), backups.entered
+
+
+def _backup_failing_after_its_write(
+    kind: str,
+) -> tuple[asyncio.Task[Backup], _DeleteWaitsAfterAnOutage]:
+    server = _at_rest()
+    uow = _outage_uow(server)
+    archive = _DeleteWaitsAfterAnOutage(uow)
+    return asyncio.create_task(_back_up(kind, uow, archive, server)), archive
+
+
+def _backup_warnings(caplog: pytest.LogCaptureFixture) -> list[int]:
+    return [r.levelno for r in caplog.records if r.name == backups_module.__name__]
+
+
+@_KINDS
+async def test_a_backup_cancelled_again_while_deleting_its_archive_deletes_it(
+    kind: str,
+) -> None:
+    archive = _DeleteWaitsForRelease()
+    backup, entered = _backup_hanging_at_its_insert(kind, archive)
+    await _within_seconds(entered)
+    backup.cancel()
+    await _within_seconds(archive.deleting)
+
+    backup.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await backup
+    archive.release.set()
+    await _within_seconds(archive.done)
+
+    assert archive.archives == set()
+
+
+@_KINDS
+async def test_a_cancelled_backup_whose_archive_delete_never_answers_ends_at_the_bound(
+    kind: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(backups_module, "_DISCARD_TIMEOUT_SECONDS", 0.01)
+    backup, entered = _backup_hanging_at_its_insert(kind, _DeleteWaitsForRelease())
+    await _within_seconds(entered)
+
+    backup.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        async with asyncio.timeout(_WAIT_SECONDS):
+            await backup
+
+    assert _backup_warnings(caplog) == [logging.WARNING]
+
+
+@_KINDS
+async def test_a_failed_backup_waits_for_its_archive_delete_past_the_bound(
+    kind: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A slow store delays the failure's answer, as before issue #4109.
+    monkeypatch.setattr(backups_module, "_DISCARD_TIMEOUT_SECONDS", 0.01)
+    backup, archive = _backup_failing_after_its_write(kind)
+    await _within_seconds(archive.deleting)
+    # Twenty bounds.
+    await asyncio.sleep(0.2)
+    assert not backup.done()
+
+    archive.release.set()
+    with pytest.raises(DatabaseOutageError):
+        async with asyncio.timeout(_WAIT_SECONDS):
+            await backup
+
+    assert archive.archives == set()
+    assert _backup_warnings(caplog) == []
+
+
+@_KINDS
+async def test_a_failed_backup_cancelled_while_deleting_its_archive_ends_cancelled(
+    kind: str,
+) -> None:
+    backup, archive = _backup_failing_after_its_write(kind)
+    await _within_seconds(archive.deleting)
+
+    backup.cancel()
+    # The cancellation ends the backup, not the outage that began its cleanup.
+    with pytest.raises(asyncio.CancelledError):
+        async with asyncio.timeout(_WAIT_SECONDS):
+            await backup

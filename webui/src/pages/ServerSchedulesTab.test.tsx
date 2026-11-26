@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -26,6 +27,7 @@ const SID = "s1";
 const mockApi = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
+  put: vi.fn(),
   patch: vi.fn(),
   delete: vi.fn(),
 }));
@@ -72,7 +74,7 @@ function canFor(codes: PermissionCode[]): Can {
   return (code) => codes.includes(code);
 }
 
-function server() {
+function server(overrides: Record<string, unknown> = {}) {
   return {
     id: SID,
     community_id: CID,
@@ -89,6 +91,7 @@ function server() {
     crash_reason: null,
     crash_detail: null,
     crash_not_restarted: false,
+    final_snapshot_refusal: null,
     creation_incomplete: false,
     config: {},
     join_hostname: null,
@@ -96,6 +99,10 @@ function server() {
     bedrock_port: null,
     cpu_millis: null,
     memory_limit_mb: null,
+    // A policy, so a backup create offers no retention step unless a test
+    // asks for a keep-all server (#4084).
+    backup_retention: { keep_last: 7 },
+    ...overrides,
   };
 }
 
@@ -133,35 +140,58 @@ function run(overrides: Record<string, unknown> = {}) {
   };
 }
 
-// Route api.get by path: schedule list vs. run history.
-function routeGet(opts: { schedules?: object[]; runs?: object[] } = {}) {
+// Route api.get by path: run history, the backups list and server read the
+// create dialog's retention step makes, and the schedule list.
+function routeGet(
+  opts: {
+    schedules?: object[];
+    runs?: object[];
+    backups?: object[];
+    srv?: object;
+  } = {},
+) {
   mockApi.get.mockImplementation((path: string) => {
     if (path.endsWith("/runs")) {
       return Promise.resolve(opts.runs ?? [run()]);
+    }
+    if (path.endsWith("/backups")) {
+      return Promise.resolve({ backups: opts.backups ?? [] });
+    }
+    // The retention step's read before its PUT: by default still keep-all,
+    // as the keep-all server a test renders for the step.
+    if (path.endsWith(`/servers/${SID}`)) {
+      return Promise.resolve(opts.srv ?? server({ backup_retention: null }));
     }
     return Promise.resolve(opts.schedules ?? [schedule()]);
   });
 }
 
-function renderTab(can: Can) {
-  const queryClient = new QueryClient({
+function testQueryClient() {
+  return new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  return render(
+}
+
+function renderTab(can: Can, srv = server(), queryClient = testQueryClient()) {
+  const tree = (current: Can) => (
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
         <ToastProvider>
-          <ServerSchedulesTab server={server()} communityId={CID} can={can} />
+          <ServerSchedulesTab server={srv} communityId={CID} can={current} />
         </ToastProvider>
       </QueryClientProvider>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
+  const view = render(tree(can));
+  // Capabilities that change under an open tab keep its state and cache.
+  return { ...view, rerenderCan: (next: Can) => view.rerender(tree(next)) };
 }
 
 beforeEach(() => {
   setAccessToken("tok-1");
   mockApi.get.mockReset();
   mockApi.post.mockReset();
+  mockApi.put.mockReset();
   mockApi.patch.mockReset();
   mockApi.delete.mockReset();
 });
@@ -1237,5 +1267,977 @@ describe("ServerSchedulesTab timezone select", () => {
       .map((o) => o.textContent);
     expect(options).toContain("Pacific/Auckland");
     expect(tzSelect).toHaveValue("Pacific/Auckland");
+  });
+});
+
+describe("ServerSchedulesTab keep-all retention (#4084)", () => {
+  const RETENTION_PATH = `/api/communities/${CID}/servers/${SID}/backups/retention`;
+  // backup:read lets the retention step count the backups it would prune.
+  const CAN_COUNT = canFor([...ALL_CODES, "backup:read"]);
+  const scheduled = (count: number) =>
+    Array.from({ length: count }, (_, i) => ({
+      id: `b${i}`,
+      source: "scheduled",
+    }));
+  const createButton = () =>
+    screen.getByRole("button", { name: t("schedules.dialog.create") });
+  const pruneAck = () =>
+    screen.queryByRole("checkbox", {
+      name: t("schedules.dialog.retentionPruneAck"),
+    });
+  // The live region that says what keep-last N deletes.
+  const pruneLine = () =>
+    within(screen.getByRole("dialog")).getByRole("status");
+  const warning = () =>
+    screen.queryByText(t("backups.retention.unboundedWarning"));
+  const createCalls = () =>
+    mockApi.post.mock.calls.filter(
+      (call) => !(call[0] as string).includes("/preview"),
+    );
+  const backupsRead = () =>
+    mockApi.get.mock.calls.some((call) =>
+      (call[0] as string).endsWith("/backups"),
+    );
+
+  async function openBackupCreate() {
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("schedules.create") }),
+    );
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.nameLabel")), {
+      target: { value: "nightly backup" },
+    });
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.actionLabel")), {
+      target: { value: "backup" },
+    });
+  }
+
+  // Create is held while the step still asks to confirm a prune, so wait for
+  // the backups list to be counted first.
+  async function submitCreate() {
+    await waitFor(() => expect(createButton()).toBeEnabled());
+    fireEvent.click(createButton());
+  }
+
+  it("warns only for an enabled backup schedule on a server with no retention", async () => {
+    routeGet({ schedules: [schedule()] });
+    const keepAll = renderTab(
+      canFor(ALL_CODES),
+      server({ backup_retention: null }),
+    );
+    await screen.findByText("nightly backup");
+    expect(warning()).toBeInTheDocument();
+    keepAll.unmount();
+
+    // A disabled backup schedule takes no backups.
+    routeGet({ schedules: [schedule({ enabled: false })] });
+    const disabled = renderTab(
+      canFor(ALL_CODES),
+      server({ backup_retention: null }),
+    );
+    await screen.findByText("nightly backup");
+    expect(warning()).not.toBeInTheDocument();
+    disabled.unmount();
+
+    // A retention policy bounds what the schedule keeps.
+    routeGet({ schedules: [schedule()] });
+    const bounded = renderTab(
+      canFor(ALL_CODES),
+      server({ backup_retention: { keep_last: 7 } }),
+    );
+    await screen.findByText("nightly backup");
+    expect(warning()).not.toBeInTheDocument();
+    bounded.unmount();
+
+    // An enabled schedule of another action takes no backups.
+    routeGet({ schedules: [schedule({ action: "restart" })] });
+    renderTab(canFor(ALL_CODES), server({ backup_retention: null }));
+    await screen.findByText("nightly backup");
+    expect(warning()).not.toBeInTheDocument();
+  });
+
+  it("links the warning to the Backups tab only for a member who can set retention", async () => {
+    const link = () =>
+      screen.queryByRole("link", {
+        name: t("schedules.retentionWarning.link"),
+      });
+    routeGet({ schedules: [schedule()] });
+    const editor = renderTab(
+      canFor([...ALL_CODES, "backup:read"]),
+      server({ backup_retention: null }),
+    );
+    await screen.findByText("nightly backup");
+    expect(link()).toHaveAttribute("href", "/#backups");
+    editor.unmount();
+
+    renderTab(canFor(["schedule:read"]), server({ backup_retention: null }));
+    await screen.findByText("nightly backup");
+    expect(warning()).toBeInTheDocument();
+    expect(link()).not.toBeInTheDocument();
+  });
+
+  it("needs both backup:read and backup:schedule for the link", async () => {
+    const link = () =>
+      screen.queryByRole("link", {
+        name: t("schedules.retentionWarning.link"),
+      });
+    // backup:schedule without backup:read: the Backups tab shows no editor.
+    routeGet({ schedules: [schedule()] });
+    const noRead = renderTab(
+      canFor(["schedule:read", "backup:schedule"]),
+      server({ backup_retention: null }),
+    );
+    await screen.findByText("nightly backup");
+    expect(warning()).toBeInTheDocument();
+    expect(link()).not.toBeInTheDocument();
+    noRead.unmount();
+
+    // backup:read without backup:schedule: the editor is not offered.
+    renderTab(
+      canFor(["schedule:read", "backup:read"]),
+      server({ backup_retention: null }),
+    );
+    await screen.findByText("nightly backup");
+    expect(warning()).toBeInTheDocument();
+    expect(link()).not.toBeInTheDocument();
+  });
+
+  it("prefills keep-last 7 and sets it after creating the backup schedule", async () => {
+    routeGet({ schedules: [] });
+    routePost({ create: schedule() });
+    mockApi.put.mockResolvedValue({ keep_last: 7 });
+    renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    expect(screen.getByLabelText(t("backups.retention.modeLabel"))).toHaveValue(
+      "keepLast",
+    );
+    expect(
+      screen.getByLabelText(t("backups.retention.keepLastLabel")),
+    ).toHaveValue(7);
+    await submitCreate();
+
+    await waitFor(() => expect(mockApi.put).toHaveBeenCalledTimes(1));
+    const [path, init] = mockApi.put.mock.calls[0];
+    expect(path).toBe(RETENTION_PATH);
+    expect(JSON.parse(init.body)).toEqual({ keep_last: 7 });
+    // The schedule is created first; the retention follows it.
+    expect(createCalls().length).toBe(1);
+    const createOrder =
+      mockApi.post.mock.invocationCallOrder[
+        mockApi.post.mock.calls.indexOf(createCalls()[0])
+      ];
+    expect(createOrder).toBeLessThan(mockApi.put.mock.invocationCallOrder[0]);
+  });
+
+  it("sets the edited keep-last value", async () => {
+    routeGet({ schedules: [] });
+    routePost({ create: schedule() });
+    mockApi.put.mockResolvedValue({ keep_last: 3 });
+    renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    fireEvent.change(
+      screen.getByLabelText(t("backups.retention.keepLastLabel")),
+      { target: { value: "3" } },
+    );
+    await submitCreate();
+
+    await waitFor(() => expect(mockApi.put).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(mockApi.put.mock.calls[0][1].body)).toEqual({
+      keep_last: 3,
+    });
+  });
+
+  it("sets no retention when keep all is chosen", async () => {
+    routeGet({ schedules: [] });
+    routePost({ create: schedule() });
+    renderTab(canFor(ALL_CODES), server({ backup_retention: null }));
+
+    await openBackupCreate();
+    fireEvent.change(screen.getByLabelText(t("backups.retention.modeLabel")), {
+      target: { value: "none" },
+    });
+    expect(
+      screen.queryByLabelText(t("backups.retention.keepLastLabel")),
+    ).not.toBeInTheDocument();
+    await submitCreate();
+
+    expect(await screen.findByText(t("schedules.created"))).toBeInTheDocument();
+    expect(createCalls().length).toBe(1);
+    expect(mockApi.put).not.toHaveBeenCalled();
+  });
+
+  it("refuses a keep-last below 1 before creating anything", async () => {
+    routeGet({ schedules: [] });
+    routePost({ create: schedule() });
+    renderTab(canFor(ALL_CODES), server({ backup_retention: null }));
+
+    await openBackupCreate();
+    fireEvent.change(
+      screen.getByLabelText(t("backups.retention.keepLastLabel")),
+      { target: { value: "0" } },
+    );
+    await submitCreate();
+
+    expect(
+      await screen.findByText(t("backups.retention.error.keepLast")),
+    ).toBeInTheDocument();
+    expect(createCalls().length).toBe(0);
+    expect(mockApi.put).not.toHaveBeenCalled();
+  });
+
+  it("refuses a fractional keep-last before creating anything", async () => {
+    routeGet({ schedules: [] });
+    routePost({ create: schedule() });
+    renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    fireEvent.change(
+      screen.getByLabelText(t("backups.retention.keepLastLabel")),
+      { target: { value: "2.5" } },
+    );
+    await submitCreate();
+
+    expect(
+      await screen.findByText(t("backups.retention.error.keepLast")),
+    ).toBeInTheDocument();
+    expect(createCalls().length).toBe(0);
+    expect(mockApi.put).not.toHaveBeenCalled();
+  });
+
+  it("keeps the created schedule and the warning when the retention cannot be set", async () => {
+    let schedules: object[] = [];
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.endsWith("/backups")) {
+        return Promise.resolve({ backups: [] });
+      }
+      if (path.endsWith(`/servers/${SID}`)) {
+        return Promise.resolve(server({ backup_retention: null }));
+      }
+      return Promise.resolve(schedules);
+    });
+    mockApi.post.mockImplementation((path: string) => {
+      if (path.includes("/preview")) {
+        return Promise.resolve({ next_runs: [] });
+      }
+      schedules = [schedule()];
+      return Promise.resolve(schedule());
+    });
+    mockApi.put.mockRejectedValue(
+      new ApiError(503, { reason: "storage_unavailable" }),
+    );
+    renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    await submitCreate();
+
+    expect(
+      await screen.findByText(t("schedules.error.retentionNotSet")),
+    ).toBeInTheDocument();
+    // The dialog closes on the created schedule; it is not rolled back.
+    expect(
+      screen.queryByRole("button", { name: t("schedules.dialog.create") }),
+    ).not.toBeInTheDocument();
+    expect(mockApi.delete).not.toHaveBeenCalled();
+    expect(await screen.findByText("nightly backup")).toBeInTheDocument();
+    expect(warning()).toBeInTheDocument();
+  });
+
+  it("offers no retention step on a server that already has a policy", async () => {
+    routeGet({ schedules: [] });
+    routePost({ create: schedule() });
+    renderTab(
+      CAN_COUNT,
+      server({ backup_retention: { daily: 7, weekly: 4, monthly: 0 } }),
+    );
+
+    await openBackupCreate();
+    expect(
+      screen.queryByLabelText(t("backups.retention.modeLabel")),
+    ).not.toBeInTheDocument();
+    await submitCreate();
+
+    expect(await screen.findByText(t("schedules.created"))).toBeInTheDocument();
+    expect(mockApi.put).not.toHaveBeenCalled();
+    // With no step, nothing is counted.
+    expect(backupsRead()).toBe(false);
+  });
+
+  it("offers no retention step when creating a schedule of another action", async () => {
+    routeGet({ schedules: [] });
+    routePost({ create: schedule({ action: "restart" }) });
+    renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("schedules.create") }),
+    );
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.nameLabel")), {
+      target: { value: "nightly restart" },
+    });
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.actionLabel")), {
+      target: { value: "restart" },
+    });
+    expect(
+      screen.queryByLabelText(t("backups.retention.modeLabel")),
+    ).not.toBeInTheDocument();
+    await submitCreate();
+
+    expect(await screen.findByText(t("schedules.created"))).toBeInTheDocument();
+    expect(createCalls().length).toBe(1);
+    expect(mockApi.put).not.toHaveBeenCalled();
+    expect(backupsRead()).toBe(false);
+  });
+
+  it("offers no retention step when editing a backup schedule", async () => {
+    routeGet({ schedules: [schedule()] });
+    routePost();
+    renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await screen.findByText("nightly backup");
+    fireEvent.click(screen.getByRole("button", { name: t("schedules.edit") }));
+    expect(
+      screen.getByRole("button", { name: t("schedules.dialog.save") }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText(t("backups.retention.modeLabel")),
+    ).not.toBeInTheDocument();
+    expect(backupsRead()).toBe(false);
+  });
+
+  it("asks to confirm the scheduled backups the policy deletes now", async () => {
+    // Ten scheduled backups and two manual ones: keep-last 7 prunes three.
+    routeGet({
+      schedules: [],
+      backups: [
+        ...scheduled(10),
+        { id: "m1", source: "manual" },
+        { id: "u1", source: "uploaded" },
+      ],
+    });
+    routePost({ create: schedule() });
+    mockApi.put.mockResolvedValue({ keep_last: 7 });
+    renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    expect(
+      await screen.findByText(
+        t("schedules.dialog.retentionPrune", { count: 3 }),
+      ),
+    ).toBeInTheDocument();
+    expect(createButton()).toBeDisabled();
+
+    fireEvent.click(pruneAck() as HTMLElement);
+    expect(createButton()).toBeEnabled();
+    await submitCreate();
+
+    await waitFor(() => expect(mockApi.put).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(mockApi.put.mock.calls[0][1].body)).toEqual({
+      keep_last: 7,
+    });
+  });
+
+  it("holds Create again when the acknowledgement is unticked", async () => {
+    routeGet({ schedules: [], backups: scheduled(10) });
+    routePost({ create: schedule() });
+    renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    await screen.findByText(t("schedules.dialog.retentionPrune", { count: 3 }));
+    fireEvent.click(pruneAck() as HTMLElement);
+    expect(createButton()).toBeEnabled();
+
+    fireEvent.click(pruneAck() as HTMLElement);
+    expect(pruneAck()).not.toBeChecked();
+    expect(createButton()).toBeDisabled();
+  });
+
+  it("describes the acknowledgement by the line that announces the count", async () => {
+    routeGet({ schedules: [], backups: scheduled(10) });
+    routePost({ create: schedule() });
+    renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    const line = await screen.findByText(
+      t("schedules.dialog.retentionPrune", { count: 3 }),
+    );
+    // A live region, so a count that arrives and unticks the box is heard.
+    expect(line).toHaveAttribute("role", "status");
+    expect(pruneAck()).toHaveAccessibleDescription(
+      t("schedules.dialog.retentionPrune", { count: 3 }),
+    );
+  });
+
+  it("keeps the live region through keep all, so the count is heard on coming back", async () => {
+    routeGet({ schedules: [], backups: scheduled(10) });
+    routePost({ create: schedule() });
+    renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    const line = await screen.findByText(
+      t("schedules.dialog.retentionPrune", { count: 3 }),
+    );
+    const mode = screen.getByLabelText(t("backups.retention.modeLabel"));
+    fireEvent.change(mode, { target: { value: "none" } });
+    expect(pruneLine()).toBe(line);
+    expect(line).toBeEmptyDOMElement();
+
+    // A region inserted with its text is not reliably read out; a text
+    // change in one already there is.
+    fireEvent.change(mode, { target: { value: "keepLast" } });
+    expect(pruneLine()).toBe(line);
+    expect(line).toHaveTextContent(
+      t("schedules.dialog.retentionPrune", { count: 3 }),
+    );
+  });
+
+  it("asks again when the number to keep changes", async () => {
+    routeGet({ schedules: [], backups: scheduled(10) });
+    routePost({ create: schedule() });
+    renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    await screen.findByText(t("schedules.dialog.retentionPrune", { count: 3 }));
+    fireEvent.click(pruneAck() as HTMLElement);
+    expect(createButton()).toBeEnabled();
+
+    fireEvent.change(
+      screen.getByLabelText(t("backups.retention.keepLastLabel")),
+      { target: { value: "5" } },
+    );
+    expect(
+      screen.getByText(t("schedules.dialog.retentionPrune", { count: 5 })),
+    ).toBeInTheDocument();
+    expect(pruneAck()).not.toBeChecked();
+    expect(createButton()).toBeDisabled();
+  });
+
+  it("asks again after a change while the backups cannot be counted", async () => {
+    routeGet({ schedules: [] });
+    routePost({ create: schedule() });
+    renderTab(canFor(ALL_CODES), server({ backup_retention: null }));
+
+    await openBackupCreate();
+    fireEvent.click(pruneAck() as HTMLElement);
+    expect(createButton()).toBeEnabled();
+
+    // A new number to keep: the generic line is the same, the deletion is not.
+    fireEvent.change(
+      screen.getByLabelText(t("backups.retention.keepLastLabel")),
+      { target: { value: "3" } },
+    );
+    expect(pruneAck()).not.toBeChecked();
+    expect(createButton()).toBeDisabled();
+
+    // Leaving keep-last N and coming back asks again too.
+    fireEvent.click(pruneAck() as HTMLElement);
+    const mode = screen.getByLabelText(t("backups.retention.modeLabel"));
+    fireEvent.change(mode, { target: { value: "none" } });
+    fireEvent.change(mode, { target: { value: "keepLast" } });
+    expect(pruneAck()).not.toBeChecked();
+    expect(createButton()).toBeDisabled();
+  });
+
+  it("asks again once the backups that were loading are counted", async () => {
+    let answer: (list: object) => void = () => {};
+    routeGet({ schedules: [] });
+    const get = mockApi.get.getMockImplementation() as (
+      path: string,
+    ) => Promise<unknown>;
+    mockApi.get.mockImplementation((path: string) =>
+      path.endsWith("/backups")
+        ? new Promise((resolve) => {
+            answer = resolve;
+          })
+        : get(path),
+    );
+    routePost({ create: schedule() });
+    renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    // Confirmed against the counting line while the list loads.
+    expect(
+      screen.getByText(t("schedules.dialog.retentionPruneCounting")),
+    ).toBeInTheDocument();
+    fireEvent.click(pruneAck() as HTMLElement);
+    expect(createButton()).toBeEnabled();
+
+    // The count arrives: that confirmation does not cover three deletions.
+    await act(async () => answer({ backups: scheduled(10) }));
+    expect(
+      await screen.findByText(
+        t("schedules.dialog.retentionPrune", { count: 3 }),
+      ),
+    ).toBeInTheDocument();
+    expect(pruneAck()).not.toBeChecked();
+    expect(createButton()).toBeDisabled();
+  });
+
+  it("needs no confirmation when the policy deletes nothing", async () => {
+    // Exactly as many scheduled backups as keep-last 7 keeps.
+    routeGet({ schedules: [], backups: scheduled(7) });
+    routePost({ create: schedule() });
+    mockApi.put.mockResolvedValue({ keep_last: 7 });
+    renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    await waitFor(() =>
+      expect(
+        mockApi.get.mock.calls.some((call) =>
+          (call[0] as string).endsWith("/backups"),
+        ),
+      ).toBe(true),
+    );
+    await waitFor(() => expect(pruneAck()).not.toBeInTheDocument());
+    expect(
+      screen.queryByText(t("schedules.dialog.retentionPruneUnknown")),
+    ).not.toBeInTheDocument();
+    expect(createButton()).toBeEnabled();
+    await submitCreate();
+    await waitFor(() => expect(mockApi.put).toHaveBeenCalledTimes(1));
+  });
+
+  it("needs no confirmation to keep all", async () => {
+    routeGet({ schedules: [], backups: scheduled(10) });
+    routePost({ create: schedule() });
+    renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    await screen.findByText(t("schedules.dialog.retentionPrune", { count: 3 }));
+    fireEvent.change(screen.getByLabelText(t("backups.retention.modeLabel")), {
+      target: { value: "none" },
+    });
+    expect(pruneAck()).not.toBeInTheDocument();
+    expect(createButton()).toBeEnabled();
+  });
+
+  it("asks to confirm when the backups cannot be counted", async () => {
+    const unknown = () =>
+      screen.queryByText(t("schedules.dialog.retentionPruneUnknown"));
+
+    // Without backup:read the list cannot be read at all.
+    routeGet({ schedules: [] });
+    routePost({ create: schedule() });
+    mockApi.put.mockResolvedValue({ keep_last: 7 });
+    const noRead = renderTab(
+      canFor(ALL_CODES),
+      server({ backup_retention: null }),
+    );
+    await openBackupCreate();
+    expect(unknown()).toBeInTheDocument();
+    expect(createButton()).toBeDisabled();
+    fireEvent.click(pruneAck() as HTMLElement);
+    await submitCreate();
+    await waitFor(() => expect(mockApi.put).toHaveBeenCalledTimes(1));
+    expect(
+      mockApi.get.mock.calls.some((call) =>
+        (call[0] as string).endsWith("/backups"),
+      ),
+    ).toBe(false);
+    noRead.unmount();
+
+    // The list fails.
+    mockApi.get.mockImplementation((path: string) =>
+      path.endsWith("/backups")
+        ? Promise.reject(new ApiError(503, { reason: "storage_unavailable" }))
+        : Promise.resolve([]),
+    );
+    const failed = renderTab(CAN_COUNT, server({ backup_retention: null }));
+    await openBackupCreate();
+    await waitFor(() => expect(unknown()).toBeInTheDocument());
+    expect(createButton()).toBeDisabled();
+    failed.unmount();
+
+    // The list has not answered yet: loading never reads as nothing to prune,
+    // and says it is counting rather than that it could not count.
+    mockApi.get.mockImplementation((path: string) =>
+      path.endsWith("/backups") ? new Promise(() => {}) : Promise.resolve([]),
+    );
+    renderTab(CAN_COUNT, server({ backup_retention: null }));
+    await openBackupCreate();
+    expect(
+      screen.getByText(t("schedules.dialog.retentionPruneCounting")),
+    ).toBeInTheDocument();
+    expect(unknown()).not.toBeInTheDocument();
+    expect(createButton()).toBeDisabled();
+  });
+
+  it("stops counting when backup:read is revoked while the dialog is open", async () => {
+    routeGet({ schedules: [], backups: scheduled(10) });
+    routePost({ create: schedule() });
+    const view = renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    await screen.findByText(t("schedules.dialog.retentionPrune", { count: 3 }));
+    fireEvent.click(pruneAck() as HTMLElement);
+    expect(createButton()).toBeEnabled();
+
+    // The capabilities refetch without backup:read: the list read under it
+    // is no longer counted, and the tick given for three deletions does not
+    // cover a count that is unknown.
+    view.rerenderCan(canFor(ALL_CODES));
+    expect(
+      screen.getByText(t("schedules.dialog.retentionPruneUnknown")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("schedules.dialog.retentionPrune", { count: 3 })),
+    ).not.toBeInTheDocument();
+    expect(pruneAck()).not.toBeChecked();
+    expect(createButton()).toBeDisabled();
+  });
+
+  it("stops saying it is counting when backup:read is revoked during the read", async () => {
+    routeGet({ schedules: [] });
+    const get = mockApi.get.getMockImplementation() as (
+      path: string,
+    ) => Promise<unknown>;
+    mockApi.get.mockImplementation((path: string) =>
+      path.endsWith("/backups") ? new Promise(() => {}) : get(path),
+    );
+    routePost({ create: schedule() });
+    const view = renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    expect(
+      screen.getByText(t("schedules.dialog.retentionPruneCounting")),
+    ).toBeInTheDocument();
+
+    // The read still in flight is not counted, whatever it answers.
+    view.rerenderCan(canFor(ALL_CODES));
+    expect(
+      screen.getByText(t("schedules.dialog.retentionPruneUnknown")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("schedules.dialog.retentionPruneCounting")),
+    ).not.toBeInTheDocument();
+    expect(createButton()).toBeDisabled();
+  });
+
+  describe("with a backups list cached by the Backups tab", () => {
+    // The dialog shares the Backups tab's list cache; a visit there leaves
+    // a list that may be out of date by the time the dialog opens.
+    function renderCached(cached: object[]) {
+      const queryClient = testQueryClient();
+      queryClient.setQueryData(["backups", CID, SID], { backups: cached });
+      renderTab(CAN_COUNT, server({ backup_retention: null }), queryClient);
+    }
+
+    // The dialog's own read of the backups list, answered by the test.
+    function holdBackupsRead() {
+      const read: {
+        answer: (list: object) => void;
+        fail: (error: unknown) => void;
+      } = { answer: () => {}, fail: () => {} };
+      routeGet({ schedules: [] });
+      const get = mockApi.get.getMockImplementation() as (
+        path: string,
+      ) => Promise<unknown>;
+      mockApi.get.mockImplementation((path: string) =>
+        path.endsWith("/backups")
+          ? new Promise((resolve, reject) => {
+              read.answer = resolve;
+              read.fail = reject;
+            })
+          : get(path),
+      );
+      routePost({ create: schedule() });
+      return read;
+    }
+
+    it("does not count the cached list while it is read again", async () => {
+      // Seven cached would prune nothing; the fresh read has not answered.
+      holdBackupsRead();
+      renderCached(scheduled(7));
+
+      await openBackupCreate();
+      expect(
+        screen.getByText(t("schedules.dialog.retentionPruneCounting")),
+      ).toBeInTheDocument();
+      expect(pruneAck()).not.toBeChecked();
+      expect(createButton()).toBeDisabled();
+    });
+
+    it("does not count the cached list when reading it again fails", async () => {
+      // Ten cached would read as three deletions, stated as a fact.
+      const read = holdBackupsRead();
+      renderCached(scheduled(10));
+
+      await openBackupCreate();
+      await act(async () =>
+        read.fail(new ApiError(503, { reason: "storage_unavailable" })),
+      );
+      expect(
+        await screen.findByText(t("schedules.dialog.retentionPruneUnknown")),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByText(t("schedules.dialog.retentionPrune", { count: 3 })),
+      ).not.toBeInTheDocument();
+      expect(createButton()).toBeDisabled();
+    });
+
+    it("counts the list read again, and asks again for what it deletes", async () => {
+      const read = holdBackupsRead();
+      renderCached(scheduled(7));
+
+      await openBackupCreate();
+      fireEvent.click(pruneAck() as HTMLElement);
+      expect(createButton()).toBeEnabled();
+
+      // The fresh read finds three more than the cache held.
+      await act(async () => read.answer({ backups: scheduled(10) }));
+      expect(
+        await screen.findByText(
+          t("schedules.dialog.retentionPrune", { count: 3 }),
+        ),
+      ).toBeInTheDocument();
+      expect(pruneAck()).not.toBeChecked();
+      expect(createButton()).toBeDisabled();
+    });
+  });
+
+  describe("with the backups list read again while the dialog is open", () => {
+    // Each read of the backups list answers what `reply` returns at the
+    // time, so a test changes it between reads.
+    let reply: () => Promise<unknown>;
+    const answer = (count: number) => () =>
+      Promise.resolve({ backups: scheduled(count) });
+
+    // Renders the tab and returns a refetch of the backups list, as a
+    // return to the browser tab makes.
+    function renderReadAgain() {
+      routeGet({ schedules: [] });
+      const get = mockApi.get.getMockImplementation() as (
+        path: string,
+      ) => Promise<unknown>;
+      mockApi.get.mockImplementation((path: string) =>
+        path.endsWith("/backups") ? reply() : get(path),
+      );
+      routePost({ create: schedule() });
+      const queryClient = testQueryClient();
+      renderTab(CAN_COUNT, server({ backup_retention: null }), queryClient);
+      return () =>
+        act(() =>
+          queryClient.refetchQueries({ queryKey: ["backups", CID, SID] }),
+        );
+    }
+
+    it("asks again when a count comes back to the one confirmed", async () => {
+      reply = answer(10);
+      const readAgain = renderReadAgain();
+
+      await openBackupCreate();
+      await screen.findByText(
+        t("schedules.dialog.retentionPrune", { count: 3 }),
+      );
+      fireEvent.click(pruneAck() as HTMLElement);
+      expect(createButton()).toBeEnabled();
+
+      // Twelve: five deletions, which the tick for three does not cover.
+      reply = answer(12);
+      await readAgain();
+      expect(
+        await screen.findByText(
+          t("schedules.dialog.retentionPrune", { count: 5 }),
+        ),
+      ).toBeInTheDocument();
+      expect(pruneAck()).not.toBeChecked();
+
+      // Ten again: the dialog asked again and got no answer, so the box
+      // stays unticked.
+      reply = answer(10);
+      await readAgain();
+      expect(
+        await screen.findByText(
+          t("schedules.dialog.retentionPrune", { count: 3 }),
+        ),
+      ).toBeInTheDocument();
+      expect(pruneAck()).not.toBeChecked();
+      expect(createButton()).toBeDisabled();
+    });
+
+    it("asks again when a count that unticked the box turns unknown", async () => {
+      let release: (list: object) => void = () => {};
+      reply = () =>
+        new Promise((resolve) => {
+          release = resolve;
+        });
+      const readAgain = renderReadAgain();
+
+      // Ticked against the counting line; the count of three unticks it.
+      await openBackupCreate();
+      fireEvent.click(pruneAck() as HTMLElement);
+      await act(async () => release({ backups: scheduled(10) }));
+      expect(
+        await screen.findByText(
+          t("schedules.dialog.retentionPrune", { count: 3 }),
+        ),
+      ).toBeInTheDocument();
+      expect(pruneAck()).not.toBeChecked();
+
+      // The next read fails: the count is unknown as when the box was
+      // ticked, but the tick was taken back by the count in between.
+      reply = () =>
+        Promise.reject(new ApiError(503, { reason: "storage_unavailable" }));
+      await readAgain();
+      expect(
+        await screen.findByText(t("schedules.dialog.retentionPruneUnknown")),
+      ).toBeInTheDocument();
+      expect(pruneAck()).not.toBeChecked();
+      expect(createButton()).toBeDisabled();
+    });
+
+    it("announces in one live region each line the reads lead to", async () => {
+      let release: (list: object) => void = () => {};
+      reply = () =>
+        new Promise((resolve) => {
+          release = resolve;
+        });
+      const readAgain = renderReadAgain();
+
+      await openBackupCreate();
+      const line = pruneLine();
+      expect(line).toHaveTextContent(
+        t("schedules.dialog.retentionPruneCounting"),
+      );
+
+      // Seven: nothing to prune and nothing to say, but the region stays.
+      await act(async () => release({ backups: scheduled(7) }));
+      await waitFor(() => expect(pruneAck()).not.toBeInTheDocument());
+      expect(pruneLine()).toBe(line);
+      expect(line).toBeEmptyDOMElement();
+
+      // A refetch finds ten: Create is held again, and the same region says
+      // why.
+      reply = answer(10);
+      await readAgain();
+      await screen.findByText(
+        t("schedules.dialog.retentionPrune", { count: 3 }),
+      );
+      expect(pruneLine()).toBe(line);
+      expect(createButton()).toBeDisabled();
+    });
+  });
+
+  it("leaves a policy that was set after the dialog read the server", async () => {
+    // Another session set a tiered policy; the cached server still reads none.
+    routeGet({
+      schedules: [],
+      srv: server({ backup_retention: { daily: 7, weekly: 4, monthly: 0 } }),
+    });
+    routePost({ create: schedule() });
+    const invalidate = vi.spyOn(QueryClient.prototype, "invalidateQueries");
+    renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    await submitCreate();
+
+    // The number chosen is not set, and the toast says why.
+    expect(
+      await screen.findByText(t("schedules.createdRetentionKept")),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(t("schedules.created"))).not.toBeInTheDocument();
+    expect(createCalls().length).toBe(1);
+    expect(mockApi.put).not.toHaveBeenCalled();
+    expect(
+      screen.queryByText(t("schedules.error.retentionNotSet")),
+    ).not.toBeInTheDocument();
+    // The server is read again, so the warning reflects the policy found.
+    expect(
+      invalidate.mock.calls.map(([filters]) => filters?.queryKey),
+    ).toContainEqual(["server", CID, SID]);
+    invalidate.mockRestore();
+  });
+
+  it("keeps the schedule when the server cannot be read before the write", async () => {
+    routeGet({ schedules: [] });
+    const get = mockApi.get.getMockImplementation() as (
+      path: string,
+    ) => Promise<unknown>;
+    mockApi.get.mockImplementation((path: string) =>
+      path.endsWith(`/servers/${SID}`)
+        ? Promise.reject(new ApiError(503, { reason: "db_unavailable" }))
+        : get(path),
+    );
+    routePost({ create: schedule() });
+    renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    await submitCreate();
+
+    expect(
+      await screen.findByText(t("schedules.error.retentionNotSet")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: t("schedules.dialog.create") }),
+    ).not.toBeInTheDocument();
+    expect(mockApi.put).not.toHaveBeenCalled();
+  });
+
+  it("refreshes the server list, backups list and statistics after the policy prunes", async () => {
+    routeGet({ schedules: [] });
+    routePost({ create: schedule() });
+    mockApi.put.mockResolvedValue({ keep_last: 7 });
+    const invalidate = vi.spyOn(QueryClient.prototype, "invalidateQueries");
+    renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    await submitCreate();
+
+    expect(await screen.findByText(t("schedules.created"))).toBeInTheDocument();
+    const keys = invalidate.mock.calls.map(([filters]) => filters?.queryKey);
+    expect(keys).toContainEqual(["communities", CID, "servers"]);
+    expect(keys).toContainEqual(["backups", CID, SID]);
+    expect(keys).toContainEqual(["backups", CID, SID, "statistics"]);
+    invalidate.mockRestore();
+  });
+
+  it("refetches the capabilities when the retention write is refused", async () => {
+    routeGet({ schedules: [] });
+    routePost({ create: schedule() });
+    mockApi.put.mockRejectedValue(
+      new ApiError(403, { permission: "backup:schedule" }),
+    );
+    const invalidate = vi.spyOn(QueryClient.prototype, "invalidateQueries");
+    renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    await submitCreate();
+
+    expect(
+      await screen.findByText(
+        t("permissions.deniedNamed", { permission: "backup:schedule" }),
+      ),
+    ).toBeInTheDocument();
+    // The schedule exists, so the retention failure is still reported.
+    expect(
+      screen.getByText(t("schedules.error.retentionNotSet")),
+    ).toBeInTheDocument();
+    expect(
+      invalidate.mock.calls.map(([filters]) => filters?.queryKey),
+    ).toContainEqual(["capabilities", CID]);
+    invalidate.mockRestore();
+  });
+
+  it("explains what the chosen retention does", async () => {
+    routeGet({ schedules: [] });
+    routePost();
+    renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    expect(
+      screen.getByText(t("schedules.dialog.retentionKeepLastHint")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("schedules.dialog.retentionKeepAllHint")),
+    ).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(t("backups.retention.modeLabel")), {
+      target: { value: "none" },
+    });
+    expect(
+      screen.getByText(t("schedules.dialog.retentionKeepAllHint")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("schedules.dialog.retentionKeepLastHint")),
+    ).not.toBeInTheDocument();
   });
 });

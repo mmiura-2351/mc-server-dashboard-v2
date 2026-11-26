@@ -98,7 +98,10 @@ it has run, or once its claim (below) finds the schedule disabled or no longer a
 backup. A claim that raises, canonically on a database still down, has attempted
 nothing, and nor has an execution whose first server read raises: the retry
 stays armed for the next tick (issue #4098). A claim that keeps raising logs one
-WARNING line on its first tick, and DEBUG on the later ones.
+WARNING line on its first tick, and DEBUG on the later ones. A retry whose record
+raises is owed like an occurrence (below), without the advance (issue #4140): it
+was spent before its record, so later ticks retry only the record, with the
+retry's outcome and times, and the retry never runs again.
 
 Delivery is at most once per process, and at least once across a restart (issue
 #4108). The run executes before its record and its advance, which commit in one
@@ -117,9 +120,17 @@ DEBUG. One INFO line marks the record that commits. A precondition skip
 :class:`ExecuteScheduleAction` returns is owed like any other outcome, so the
 decision is recorded once, as it was made. A skip the runner decides itself,
 whether stale or past a deferral's bound, attempted nothing, so its record is
-not owed: the next tick evaluates the occurrence again. An API restart or crash
-loses the owed record, so the occurrence runs once more on restart, at most once
-per restart.
+not owed: the next tick evaluates it again. An API restart or crash loses the
+owed record. An owed occurrence then runs once more on restart, at most once per
+restart. An owed retry does not: it was spent, and its occurrence had advanced,
+so its record is lost with the audit event, notification and prune that would
+follow it. The run keeps the id it was given when it finished, and its row is
+inserted once per id (issue #4141): a COMMIT that applied although it raised,
+its answer lost with the connection, leaves its row, and the record retried
+after it writes no second one. A retry's skip past the bound keeps its id while
+the retry stays armed (issue #4166), so the next tick, deciding the same skip
+again, writes no second row either. The audit event and the notification go out
+once, after the record that returns.
 Accepted: a replayed ``backup`` is one more archive, not a harmless duplicate. It
 takes storage, and under a keep-last retention it can push an older backup out.
 A replayed lifecycle/command occurrence is bounded by the same
@@ -431,17 +442,21 @@ _SKIPPED_ASSIGNED = ActionResult(ScheduleRunOutcome.SKIPPED, "server_assigned", 
 
 @dataclass(frozen=True)
 class _Ran:
-    """An occurrence the runner executed, with what its run record needs.
+    """An occurrence or backup retry the runner executed, with what its record needs.
 
     ``schedule`` is the schedule as polled: its ``next_run_at`` is the
-    occurrence that ran, which guards the record's advance. Kept as owed while
-    the record raises (issue #4108).
+    occurrence that ran, which guards the record's advance. ``run_id`` is the id
+    of its run row, minted once when it finished, so a record that is retried
+    writes no second row (issue #4141). A ``retry`` records without advancing.
+    Kept as owed while the record raises (issues #4108, #4140).
     """
 
     schedule: Schedule
     result: ActionResult
     started_at: dt.datetime
     finished_at: dt.datetime
+    run_id: ScheduleRunId
+    retry: bool = False
 
 
 @dataclass(frozen=True)
@@ -658,8 +673,12 @@ class RunScheduleTick:
     # prune failure never turns the successful backup run into a failure (owner
     # spec), and prune emits nothing on the notification stream.
     prune_backups: PruneScheduledBackups | None = None
-    # Per-schedule pending backup-retry instant; in-memory (lost on restart).
-    _backup_retry: dict[ScheduleId, dt.datetime] = field(default_factory=dict)
+    # Per-schedule pending backup retry: its armed instant, and the run id of
+    # its skip past a deferral's bound once that skip is decided (issue #4166),
+    # else None. In-memory (lost on restart).
+    _backup_retry: dict[ScheduleId, tuple[dt.datetime, ScheduleRunId | None]] = field(
+        default_factory=dict
+    )
     # Per schedule, the backup a hold defers and when it was first deferred
     # (issue #4047): the occurrence's due instant or the retry's armed one. A
     # deferral of another instant starts over. Dropped once the deferral ends in
@@ -668,15 +687,16 @@ class RunScheduleTick:
     _deferred: dict[ScheduleId, tuple[dt.datetime, dt.datetime]] = field(
         default_factory=dict
     )
-    # Per schedule, the occurrence that ran but whose record and advance raised
-    # (issue #4108), and when that was last logged at WARNING. Each tick
-    # records it again before its poll, and the schedule runs nothing while it
-    # is owed. Dropped once the record returns. In-memory, like _backup_retry:
-    # a restart runs the occurrence once more.
+    # Per schedule, the occurrence or backup retry that ran but whose record
+    # raised (issues #4108, #4140), and when that was last logged at WARNING.
+    # Each tick records it again before its poll, and the schedule runs nothing
+    # while it is owed. Dropped once the record returns. In-memory, like
+    # _backup_retry: a restart runs an owed occurrence once more, and loses an
+    # owed retry's record.
     _owed: dict[ScheduleId, tuple[_Ran, dt.datetime]] = field(default_factory=dict)
     # Per schedule, the armed instant of a backup retry whose claim raised
     # (issue #4098): later ticks that fail to claim it log at DEBUG only.
-    # Dropped once a claim returns.
+    # Dropped once a claim returns, and with the retry or the schedule.
     _retry_unclaimed: dict[ScheduleId, dt.datetime] = field(default_factory=dict)
     # Schedules currently in a failing state, so a sustained failure notifies once
     # rather than every occurrence (issue #2269). Each maps to the outcome already
@@ -758,11 +778,11 @@ class RunScheduleTick:
 
         # Fire any pending backup retry that has come due and was not already
         # superseded by a scheduled occurrence handled above.
-        for schedule_id, retry_at in list(self._backup_retry.items()):
+        for schedule_id, (retry_at, skip_id) in list(self._backup_retry.items()):
             if schedule_id in handled or schedule_id in self._owed or retry_at > now:
                 continue
             try:
-                await self._run_retry(schedule_id, retry_at)
+                await self._run_retry(schedule_id, retry_at, skip_id)
             except Exception:  # noqa: BLE001 - one schedule must not stop the tick
                 _LOG.exception(
                     "schedule %s retry failed; continuing", schedule_id.value
@@ -803,6 +823,7 @@ class RunScheduleTick:
                     stale_result,
                     stale_now,
                     stale_now,
+                    run_id=ScheduleRunId.new(),
                     advance=True,
                     last_run_at=schedule.last_run_at,
                 )
@@ -840,37 +861,30 @@ class RunScheduleTick:
         else:
             # The hold, if there was one, has ended.
             self._deferred.pop(schedule.id, None)
-        ran = _Ran(schedule, result, started_at, finished_at)
+        ran = _Ran(schedule, result, started_at, finished_at, ScheduleRunId.new())
         try:
             recorded = await self._settle(ran)
         except Exception:
             if not gave_up:
-                # It ran, and a second run would repeat it (a backup as one
-                # more archive): only the record is retried (issue #4108). A
-                # precondition skip is owed too, so it is recorded as decided.
+                # A precondition skip is owed too, so it is recorded as decided.
                 # A skip past the bound attempted nothing, so it runs again.
-                self._owed[schedule.id] = (ran, self.clock.now())
-                _LOG.warning(
-                    "schedule %s: the %s run of its %s could not be recorded; "
-                    "the record is retried each tick, and the %s is not run again",
-                    schedule.id.value,
-                    result.outcome.value,
-                    schedule.action.value,
-                    schedule.action.value,
-                )
+                self._owe(ran)
             raise
         if gave_up:
             self._end_deferral(schedule, "occurrence", recorded=recorded)
             # One skipped run stands for the backup the schedule owes: a retry
             # already due would meet the same hold. One not yet due keeps its
             # own time (issue #4047).
-            retry_at = self._backup_retry.get(schedule.id)
-            if retry_at is not None and retry_at <= now:
+            pending = self._backup_retry.get(schedule.id)
+            if pending is not None and pending[0] <= now:
                 del self._backup_retry[schedule.id]
+                self._retry_unclaimed.pop(schedule.id, None)
 
     async def _settle(self, ran: _Ran) -> bool:
         """Record and advance an occurrence that ran, then arm its retry and prune.
 
+        A backup retry is only recorded and pruned after: it is a catch-up for
+        the failed occurrence, not a new occurrence, and it fires at most once.
         Returns :meth:`_record`'s answer. A record that raises propagates, with
         nothing else done.
         """
@@ -882,20 +896,39 @@ class RunScheduleTick:
                 ran.result,
                 ran.started_at,
                 ran.finished_at,
-                advance=True,
+                run_id=ran.run_id,
+                advance=not ran.retry,
                 last_run_at=ran.started_at,
             )
-        if recorded and schedule.action is ScheduleAction.BACKUP:
+        if recorded and not ran.retry and schedule.action is ScheduleAction.BACKUP:
             self._reschedule_retry(schedule.id, ran.result, ran.finished_at)
         async with self._bookkeeping_lock:
             await self._prune_after_backup(schedule, ran.result)
         return recorded
 
-    async def _record_owed(self, ran: _Ran, warned_at: dt.datetime) -> None:
-        """Record an occurrence that ran on an earlier tick (issue #4108).
+    def _owe(self, ran: _Ran) -> None:
+        """Keep a run whose record raised owed, for later ticks to record.
 
-        With the outcome and times of that run. A record that raises again
-        leaves it owed, logged at WARNING at most once per
+        It ran, and a second run would repeat it (a backup as one more
+        archive): only the record is retried (issues #4108, #4140).
+        """
+
+        schedule = ran.schedule
+        self._owed[schedule.id] = (ran, self.clock.now())
+        _LOG.warning(
+            "schedule %s: the %s run of its %s could not be recorded; "
+            "the record is retried each tick, and the %s is not run again",
+            schedule.id.value,
+            ran.result.outcome.value,
+            schedule.action.value,
+            schedule.action.value,
+        )
+
+    async def _record_owed(self, ran: _Ran, warned_at: dt.datetime) -> None:
+        """Record an occurrence or backup retry that ran on an earlier tick.
+
+        With the outcome and times of that run (issues #4108, #4140). A record
+        that raises again leaves it owed, logged at WARNING at most once per
         :data:`_OWED_WARNING_INTERVAL` since ``warned_at``, and at DEBUG on the
         ticks between: an outage is logged by the poll each tick, but a record
         that keeps failing while the poll works holds the schedule until a
@@ -937,7 +970,12 @@ class RunScheduleTick:
                 self.clock.now() - ran.finished_at,
             )
 
-    async def _run_retry(self, schedule_id: ScheduleId, retry_at: dt.datetime) -> None:
+    async def _run_retry(
+        self,
+        schedule_id: ScheduleId,
+        retry_at: dt.datetime,
+        skip_id: ScheduleRunId | None,
+    ) -> None:
         try:
             schedule = await self._claim(schedule_id, "backup retry")
         except Exception:  # noqa: BLE001 - a claim that raises attempted nothing
@@ -972,34 +1010,42 @@ class RunScheduleTick:
         # server read meets a database that is down: nothing was attempted, so
         # the retry stays armed for the next tick.
         result, started_at, finished_at = await self._execute(schedule)
-        # One-shot: the single retry is spent once it ran, REGARDLESS of its
-        # outcome (even a skip on a transitional server consumes it) — the next
-        # regular occurrence takes over. A retry-of-the-retry chain is exactly
-        # the unbounded tail the owner-confirmed "retry once" bound excludes.
-        self._backup_retry.pop(schedule_id, None)
         gave_up = False
         if isinstance(result, Deferred):
             if not self._deferral_outlived(schedule, retry_at, finished_at, "retry"):
                 # Not spent: nothing was attempted (issue #3998).
-                self._backup_retry[schedule_id] = retry_at
                 return
             gave_up = True
             result = _SKIPPED_ASSIGNED
             # Armed until the skipped run is recorded: a record that fails
-            # leaves it to the next tick, still past the bound.
-            self._backup_retry[schedule_id] = retry_at
+            # leaves it to the next tick, still past the bound. The skip keeps
+            # the id it got first, so a record whose COMMIT applied although it
+            # raised leaves the one row (issue #4166).
+            run_id = ScheduleRunId.new() if skip_id is None else skip_id
+            self._backup_retry[schedule_id] = (retry_at, run_id)
         else:
+            # One-shot: the single retry is spent once it ran, REGARDLESS of its
+            # outcome (even a skip on a transitional server consumes it) — the
+            # next regular occurrence takes over. A retry-of-the-retry chain is
+            # exactly the unbounded tail the owner-confirmed "retry once" bound
+            # excludes.
+            self._backup_retry.pop(schedule_id, None)
             # The hold, if there was one, has ended.
             self._deferred.pop(schedule_id, None)
+            run_id = ScheduleRunId.new()
         # The retry records (and notifies on failure) but never moves next_run_at:
         # it is a catch-up for the failed occurrence, not a new occurrence.
-        recorded = await self._record(
-            schedule, result, started_at, finished_at, advance=False
-        )
+        ran = _Ran(schedule, result, started_at, finished_at, run_id, retry=True)
+        try:
+            recorded = await self._settle(ran)
+        except Exception:
+            if not gave_up:
+                # Spent above, so only its record is retried (issue #4140).
+                self._owe(ran)
+            raise
         if gave_up:
             self._backup_retry.pop(schedule_id, None)
             self._end_deferral(schedule, "retry", recorded=recorded)
-        await self._prune_after_backup(schedule, result)
 
     def _deferral_outlived(
         self, schedule: Schedule, owed: dt.datetime, now: dt.datetime, what: str
@@ -1073,6 +1119,7 @@ class RunScheduleTick:
 
         self._notifying.pop(schedule_id, None)
         self._backup_retry.pop(schedule_id, None)
+        self._retry_unclaimed.pop(schedule_id, None)
         self._deferred.pop(schedule_id, None)
 
     async def _prune_after_backup(
@@ -1208,6 +1255,7 @@ class RunScheduleTick:
         started_at: dt.datetime,
         finished_at: dt.datetime,
         *,
+        run_id: ScheduleRunId,
         advance: bool,
         last_run_at: dt.datetime | None = None,
     ) -> bool:
@@ -1215,11 +1263,14 @@ class RunScheduleTick:
 
         Returns whether the run was recorded: ``False`` when the schedule was
         deleted before the record could lock its row (module docstring). The
-        audit and notification still go out — the action did run.
+        audit and notification still go out — the action did run. They go out
+        only after the record returns, so a record retried after it raised
+        emits them once, even when its COMMIT had applied and the retry inserts
+        no row (issue #4141).
         """
 
         run = ScheduleRun(
-            id=ScheduleRunId.new(),
+            id=run_id,
             schedule_id=schedule.id,
             started_at=started_at,
             finished_at=finished_at,
@@ -1333,9 +1384,10 @@ class RunScheduleTick:
         self, schedule_id: ScheduleId, result: ActionResult, now: dt.datetime
     ) -> None:
         if result.outcome is ScheduleRunOutcome.FAILURE and result.retryable:
-            self._backup_retry[schedule_id] = now + self.backup_retry_delay
+            self._backup_retry[schedule_id] = (now + self.backup_retry_delay, None)
         elif result.outcome is ScheduleRunOutcome.SUCCESS:
             self._backup_retry.pop(schedule_id, None)
+            self._retry_unclaimed.pop(schedule_id, None)
         # SKIPPED, UNKNOWN, or a non-retryable (deterministic) FAILURE such as a
         # corrupt working set (#2250): leave any pending retry untouched — a skip is
         # not a fresh failure, an unknown outcome may still have run so a retry

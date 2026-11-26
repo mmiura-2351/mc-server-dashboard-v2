@@ -88,6 +88,56 @@ export function atRestWriteRefusal(
   return null;
 }
 
+/** Why the Worker a stop still holds refused its final snapshot (#4054). */
+export type FinalSnapshotRefusal = "busy" | "unavailable";
+
+/**
+ * The server's `final_snapshot_refusal`, or `null` for none. The API records
+ * one only while a stop holds its Worker and clears it with the release
+ * (#4054), so a refusal means the server is held for that snapshot, with no
+ * bound, until a retry of it succeeds or someone releases the server without
+ * it (#4056). A value this client does not know reads as none.
+ */
+export function finalSnapshotRefusal(
+  value: string | null | undefined,
+): FinalSnapshotRefusal | null {
+  return value === "busy" || value === "unavailable" ? value : null;
+}
+
+/**
+ * Whether the API releases the server without its final snapshot
+ * (`…/release-without-snapshot`, #4055): at rest under a stopped intent, still
+ * assigned, and held by a refusal. It is that route's precondition, so the
+ * release is offered exactly where the API accepts it.
+ */
+export function releaseWithoutSnapshotApplies(
+  state: ObservedState,
+  desired: string,
+  assigned: boolean,
+  refusal: FinalSnapshotRefusal | null,
+): boolean {
+  return refusal !== null && assigned && atRest(state, desired);
+}
+
+/**
+ * The reason beside a control a stop's Worker still holds (409
+ * `server_assigned`, #4003): worded by the refusal when the Worker refused the
+ * final snapshot, since then the wait has no bound (#4057), and the neutral
+ * reason while that snapshot has yet to settle.
+ */
+export function serverAssignedKey(
+  refusal: FinalSnapshotRefusal | null,
+): TranslationKey {
+  return refusal === null
+    ? "common.serverAssigned"
+    : `common.serverHeld.${refusal}`;
+}
+
+/** The server detail's held notice for a refusal (#4057). */
+export function heldNoticeKey(refusal: FinalSnapshotRefusal): TranslationKey {
+  return `serverDetail.held.${refusal}`;
+}
+
 /**
  * Whether the server has yet to converge on its intent — the "applying…" hint
  * (WEBUI_SPEC.md 6.4). A running intent is reached only by `running`. A

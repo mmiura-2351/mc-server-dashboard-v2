@@ -454,6 +454,76 @@ describe("useServerEvents", () => {
     });
   });
 
+  // The held notice follows the refusal live (#4057): a refusal recorded
+  // while the stop holds its Worker, and the release that clears it.
+  it("patches the detail query final_snapshot_refusal from a refusal frame and the release (#4057)", () => {
+    const { queryClient } = setup();
+    queryClient.setQueryData(serverKey(CID, SID), {
+      id: SID,
+      observed_state: "stopped",
+      desired_state: "stopped",
+      assigned_worker_id: "w1",
+      final_snapshot_refusal: null,
+    });
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        frame("status", { final_snapshot_refusal: "busy" }),
+      );
+    });
+    expect(queryClient.getQueryData(serverKey(CID, SID))).toEqual({
+      id: SID,
+      observed_state: "stopped",
+      desired_state: "stopped",
+      assigned_worker_id: "w1",
+      final_snapshot_refusal: "busy",
+    });
+    act(() => {
+      MockWebSocket.last().message(
+        frame("status", {
+          assigned_worker_id: null,
+          final_snapshot_refusal: null,
+        }),
+      );
+    });
+    expect(queryClient.getQueryData(serverKey(CID, SID))).toEqual({
+      id: SID,
+      observed_state: "stopped",
+      desired_state: "stopped",
+      assigned_worker_id: null,
+      final_snapshot_refusal: null,
+    });
+  });
+
+  it("patches the detail query final_snapshot_refusal from a snapshot frame (#4057)", () => {
+    const { queryClient } = setup();
+    queryClient.setQueryData(serverKey(CID, SID), {
+      id: SID,
+      observed_state: "stopped",
+      desired_state: "stopped",
+      assigned_worker_id: "w1",
+      final_snapshot_refusal: null,
+    });
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        frame("snapshot", {
+          state: "stopped",
+          desired_state: "stopped",
+          assigned_worker_id: "w1",
+          final_snapshot_refusal: "unavailable",
+        }),
+      );
+    });
+    expect(queryClient.getQueryData(serverKey(CID, SID))).toEqual({
+      id: SID,
+      observed_state: "stopped",
+      desired_state: "stopped",
+      assigned_worker_id: "w1",
+      final_snapshot_refusal: "unavailable",
+    });
+  });
+
   it("clears windowed metrics when a snapshot shows the server at rest", () => {
     setup();
     act(() => {
@@ -807,6 +877,7 @@ type Detail = {
   crash_reason?: string | null;
   crash_detail?: string | null;
   crash_not_restarted?: boolean;
+  final_snapshot_refusal?: string | null;
 };
 
 function LiveProbe({ queryFn }: { queryFn: QueryFunction<Detail> }) {
@@ -968,6 +1039,25 @@ describe("useServerEvents with REST reads in flight (#3213)", () => {
     ).toBeNull();
   });
 
+  it("keeps a refusal frame that arrives before the cold detail load lands (#4057)", async () => {
+    const { queryClient, respond } = setupDeferred();
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        frame("status", { final_snapshot_refusal: "busy" }),
+      );
+    });
+    // The cold read captured the row before the refusal.
+    await respond("stopped", {
+      assigned_worker_id: "w1",
+      final_snapshot_refusal: null,
+    });
+    expect(
+      queryClient.getQueryData<Detail>(serverKey(CID, SID))
+        ?.final_snapshot_refusal,
+    ).toBe("busy");
+  });
+
   it("lets a REST read started after the frame supersede it", async () => {
     // A worker disconnect commits `unknown` without a frame; a read that
     // started after the last frame is the newer truth.
@@ -994,6 +1084,7 @@ describe("useServerEvents with REST reads in flight (#3213)", () => {
   it.each([
     ["desired_state", "desired_state", "stopped", "running"],
     ["assigned_worker_id", "assigned_worker_id", null, "w1"],
+    ["final_snapshot_refusal", "final_snapshot_refusal", null, "busy"],
   ] as const)(
     "lets a REST read started after the frame supersede its %s",
     async (_name, field, stored, live) => {

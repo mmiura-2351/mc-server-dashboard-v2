@@ -129,6 +129,13 @@ export const en = {
   // (#4003). One key on every surface, so a hold can be worded by its cause.
   "common.serverAssigned":
     "The server is still assigned to a Worker. Wait for it to be released, then try again.",
+  // The same hold once the Worker refused the final snapshot BUSY or
+  // UNAVAILABLE (#4056): the server stays held, with no bound, until a retry
+  // of the snapshot succeeds (#4057).
+  "common.serverHeld.busy":
+    "The server's host is still busy with it and has not taken its final save, so the server stays held. The save is retried automatically; wait for it to succeed, then try again.",
+  "common.serverHeld.unavailable":
+    "The server's host could not take its final save, so the server stays held. The save is retried automatically; wait for it to succeed, then try again.",
 
   // Upload progress (issue #1207). `{loaded}`/`{total}` are humanized byte
   // sizes; `{percent}` is an integer; `{seconds}` is the elapsed seconds.
@@ -292,6 +299,12 @@ export const en = {
   // instead of the contradictory generic state-changed toast.
   "dashboard.lifecycle.startAlreadyRunning":
     "The server is already running or starting up, so there is nothing to start.",
+  // 409 final_snapshot_refused on stop (#4056): a stop of a server held by a
+  // refused final snapshot retried it, and the Worker refused it again. The
+  // server stays held and the API keeps retrying; the release without the
+  // snapshot is the way out (#4057).
+  "dashboard.lifecycle.finalSnapshotRefused":
+    "The server's host refused the final save again, so the server stays held. The save is retried automatically. To free the server without it, use “Release without saving…” on the server's page.",
   // 409 failed_stop_orphan (issue #2466): the host could not confirm an earlier
   // stop, so the server's process may still be running — it never went down, and
   // repeating the same action is refused identically. Asking the operator to stop
@@ -340,6 +353,11 @@ export const en = {
   // and the precondition itself: not every reader has the repository docs.
   "dashboard.lifecycle.stopWorkerOffline":
     "The server host is not reachable. The stop still stands: if the host comes back in time, the stop completes there with a final snapshot, and stopping again once it is back does that at once. If the host is down for good, stop the server again to release it now, without that snapshot, then start it to move it to another host. Do this only once you know the old host is down; otherwise the same world may run on two hosts.",
+  // The same 503 for a stop of a server held by a refused final snapshot
+  // (#4111): the stop releases nothing, so "stop again to release" is wrong
+  // there. The copy names what does release it instead (#4057).
+  "dashboard.lifecycle.stopHeldWorkerOffline":
+    "The server host is not reachable, and the server stays held: the host refused its final save, so stopping again releases nothing. It is released when the host comes back and takes the save, without the save once the host has been away for the full reconcile wait (about 11 minutes by default), or when someone allowed to stop it releases it without saving.",
   "dashboard.lifecycle.restartWorkerOffline":
     "The server host is not reachable, so the system cannot restart the server. Restart it again once the host is back. To move it to another host instead, stop it, stop it again, then start it. Do this only once you know the old host is down; otherwise the same world may run on two hosts.",
   // Live-status degraded indicator: WS down, polling fallback (SPEC 6.2 / 7.2).
@@ -480,6 +498,28 @@ export const en = {
   "serverDetail.forceStop.dialogBody":
     "Force stop kills the server process immediately without a graceful shutdown. Unsaved data (chunks, player progress) may be lost.",
   "serverDetail.forceStop.confirm": "Force Stop",
+  // A stop's Worker refused the final snapshot BUSY or UNAVAILABLE and holds
+  // the server until a retry succeeds (#4056): the notice in place of the
+  // release wait above, by refusal (#4057).
+  "serverDetail.held.busy":
+    "The server's host is still busy with this server, so it has not taken the final save. The save is retried automatically. Until it succeeds, the server cannot be started, edited, backed up or deleted.",
+  "serverDetail.held.unavailable":
+    "The server's host could not take the final save. The save is retried automatically. Until it succeeds, the server cannot be started, edited, backed up or deleted.",
+  // The release of a held server without its final snapshot (#4055, #4057).
+  // Its own dialog, never the force-stop one: it names what the release gives
+  // up (WEBUI_SPEC.md 2.3).
+  "serverDetail.release.button": "Release without saving…",
+  "serverDetail.release.dialogTitle":
+    "Release this server without its final save?",
+  "serverDetail.release.dialogBody":
+    "The server's host has not saved this server's latest world. If you release it now, changes since the last snapshot can be lost: they are gone if the server next starts on another host, or as soon as its files are edited or restored. A copy of the server may still be running on that host, so starting it elsewhere could run the same world twice. This cannot be undone.",
+  "serverDetail.release.confirm": "Release without saving",
+  // 409 invalid_transition: no refusal holds the server any more.
+  "serverDetail.release.error.notHeld":
+    "The server is no longer held for a refused final save, so nothing was released. Its final save may have succeeded in the meantime.",
+  // 409 transition_conflict: a stop or a final snapshot of it is in flight.
+  "serverDetail.release.error.inFlight":
+    "A stop or a final save of this server is still in progress, so nothing was released. Wait a moment and try again.",
   "serverDetail.restart": "Restart",
   "serverDetail.export": "Export",
   "serverDetail.delete": "Delete",
@@ -538,7 +578,8 @@ export const en = {
   "serverDetail.danger.deleteDesc":
     "Permanently removes the server, its data and backups.",
   "serverDetail.danger.deleteButton": "Delete…",
-  // Delete held while a Worker is assigned, and the 409 server_assigned (#3852).
+  // Delete held while a Worker is assigned (#3852). The 409 server_assigned
+  // toasts common.serverAssigned (#4003).
   "serverDetail.danger.deleteAwaitsRelease":
     "Stop the server and wait for it to be released before deleting it.",
   "serverDetail.delete.dialogTitle": "Delete server",
@@ -665,6 +706,11 @@ export const en = {
   "backups.retention.error.tiered":
     "Enter whole numbers (0 or more), with at least one above 0.",
   "backups.retention.error.invalid": "That retention policy is not valid.",
+  // An enabled backup schedule with no retention policy (keep all) grows
+  // without bound (#4084): warned on both the Backups and Schedules tabs.
+  "backups.retention.unboundedWarning":
+    "A backup schedule is enabled but no retention policy is set, so scheduled backups accumulate without bound and can fill the disk.",
+  "backups.retention.unboundedSetBelow": "Set a retention policy below.",
   // Restore dialog (stopped-only; two-step stop-then-restore).
   "backups.restoreDialog.title": "Restore backup",
   "backups.restoreDialog.blocked":
@@ -750,6 +796,8 @@ export const en = {
   "schedules.empty": "No schedules yet.",
   "schedules.none": "—",
   "schedules.create": "+ Create schedule",
+  "schedules.retentionWarning.link":
+    "Set a retention policy on the Backups tab",
   "schedules.edit": "Edit",
   "schedules.delete": "Delete",
   "schedules.history": "Run history",
@@ -773,6 +821,9 @@ export const en = {
   "schedules.cadence.everyMinutes": "Every {count} min",
   "schedules.cadence.everyHours": "Every {count} h",
   "schedules.created": "Schedule created.",
+  // The retention step found a policy set since the dialog opened (#4084).
+  "schedules.createdRetentionKept":
+    "Schedule created. The server already had a retention policy, which was left in place instead of the one chosen here.",
   "schedules.updated": "Schedule updated.",
   "schedules.deleted": "Schedule deleted.",
   "schedules.toggle.enabled": "Schedule enabled.",
@@ -818,6 +869,24 @@ export const en = {
     "Back up only while the server is running",
   "schedules.dialog.onlyWhenRunningHint":
     "If the server is stopped at the scheduled time, the run is recorded as skipped instead of taking a backup.",
+  // Create only, for a backup schedule on a server with no retention policy
+  // (#4084): keep the last N (prefilled 7) or opt out to keep all. The hint
+  // follows the choice.
+  "schedules.dialog.retentionKeepLastHint":
+    "This server has no retention policy yet. Creating the schedule sets one that keeps the last N scheduled backups and deletes the other scheduled backups, existing ones included. Scheduled backups marked Damaged are kept only when there are not enough other scheduled backups to reach N. Manual, uploaded and event backups are never deleted.",
+  "schedules.dialog.retentionKeepAllHint":
+    "This server has no retention policy, so every scheduled backup is kept until it is deleted or a policy is set on the Backups tab.",
+  // Keep-last N prunes at once: the count of existing scheduled backups it
+  // deletes, a counting line while the backups list loads, or a generic line
+  // when it cannot be read; each gates Create behind the acknowledgement.
+  "schedules.dialog.retentionPrune":
+    "This deletes {count} existing scheduled backup(s) now.",
+  "schedules.dialog.retentionPruneCounting":
+    "Counting the existing scheduled backups this may delete now…",
+  "schedules.dialog.retentionPruneUnknown":
+    "The existing scheduled backups could not be counted, so this may delete some of them now.",
+  "schedules.dialog.retentionPruneAck":
+    "I understand that the existing scheduled backups beyond this number are deleted.",
   "schedules.dialog.warningsLabel": "Player warnings",
   "schedules.dialog.warningsHint":
     "Broadcast a message this many minutes before the action (up to 5 steps).",
@@ -843,6 +912,8 @@ export const en = {
   "schedules.error.invalidWarnings":
     "Warnings need distinct offsets of 1–120 minutes (shorter than the interval) with a message.",
   "schedules.error.generic": "Something went wrong. Please try again.",
+  "schedules.error.retentionNotSet":
+    "The schedule was created, but its retention policy could not be set, so scheduled backups are still kept without limit. Set one on the Backups tab.",
   "schedules.deleteDialog.title": "Delete schedule",
   "schedules.deleteDialog.body":
     "Delete “{name}”? Its run history is removed with it.",
@@ -866,7 +937,7 @@ export const en = {
   // conflicts with sibling tab PRs minimal.
   "files.denied": "You do not have permission to view this server's files.",
   "files.runningNotice":
-    "Server is running — file edits apply to the running server immediately. Upload and folder creation require stopping the server first.",
+    "While the server is running, file edits apply to it immediately. Uploading, downloading, creating folders, renaming, moving, deleting, extracting, pasting and rolling back require the server to be stopped.",
   "files.root": "/",
   "files.loading": "Loading…",
   "files.listError": "Could not list this directory. Try refreshing.",
@@ -932,8 +1003,14 @@ export const en = {
   "files.renamed": "Renamed.",
   "files.deleted": "Deleted.",
   "files.rolledBack": "Rolled back to the selected version.",
-  "files.error.serverMustBeStopped":
-    "Stop the server before uploading files or creating folders.",
+  // Why a Files operation is refused, or its control disabled, while the server
+  // is not at rest (issue #4183). It names no action, since the downloads show
+  // it too: the sibling tabs' wording.
+  "files.error.notStopped": "The server must be stopped for this operation.",
+  // A rollback republishes the at-rest copy (issue #4147): its own words, not
+  // the neutral ones.
+  "files.error.rollbackServerMustBeStopped":
+    "Stop the server before rolling back a file.",
   "files.error.contentDirProtected":
     "This directory is managed by the {noun} tab. Use the {noun} tab to add or remove content.",
   "files.error.goToContentTab": "Go to {noun} tab",
@@ -1386,6 +1463,8 @@ export const en = {
   "communitySettings.audit.op.server:stop": "Stop server",
   "communitySettings.audit.op.server:restart": "Restart server",
   "communitySettings.audit.op.server:command": "Send console command",
+  "communitySettings.audit.op.server:release_without_snapshot":
+    "Release server without final save",
   "communitySettings.audit.op.server:export": "Export server",
   "communitySettings.audit.op.server:import": "Import server",
   "communitySettings.audit.op.backup:create": "Create backup",

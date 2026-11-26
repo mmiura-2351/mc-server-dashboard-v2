@@ -16,16 +16,17 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import logging
 import os
 import uuid
 from typing import Any
 
 import grpc
 import pytest
+from sqlalchemy import text
 
 from mc_server_dashboard_api.fleet.adapters import grpc_server
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
-from mc_server_dashboard_api.fleet.domain.clock import Clock as FleetClock
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     Command as FleetCommand,
 )
@@ -55,11 +56,13 @@ from mc_server_dashboard_api.servers.application.unrecorded_stops import (
 )
 from mc_server_dashboard_api.servers.domain.control_plane import ControlPlane
 from mc_server_dashboard_api.servers.domain.value_objects import (
+    DesiredState,
     ObservedState,
+    ServerId,
     WorkerId,
 )
 from mcsd.controlplane.v1 import control_plane_pb2 as pb
-from tests.fleet.fakes import FakeClock as FleetFakeClock
+from tests.contracts.server_repositories import server as contract_server
 from tests.fleet.fakes import FakeServerStateSink
 from tests.fleet.test_grpc_session import (
     _CREDENTIAL,
@@ -98,20 +101,6 @@ _ANSWER_GUARD_SECONDS = 10.0
 # Well past every instant the test reads from the world's clock, which
 # advances one second a read, and so past any grace from the session's end.
 _TICK_AT = _T0 + dt.timedelta(hours=1)
-
-
-class _WorldClock(FleetClock):
-    """The world's clock, for the registry.
-
-    The session's end the write is stamped with is the registry's reading, and
-    the guard compares it with the sink's stamps: one clock, as in production.
-    """
-
-    def __init__(self, world: _World) -> None:  # noqa: F811
-        self._world = world
-
-    def now(self) -> dt.datetime:
-        return self._world.clock.now()
 
 
 class _FailingTeardownSink(FakeServerStateSink):
@@ -224,10 +213,9 @@ async def test_a_gone_workers_servers_end_unknown_when_its_teardown_wrote_nothin
     server = await world.server("survival", worker=_WORKER)
     server_id = str(server.id.value)
     sink = _FailingTeardownSink(world.sink(), refuse_second=teardown == "skipped")
-    registry = InMemoryWorkerRegistry(
-        clock=_WorldClock(world), heartbeat_timeout=_TIMEOUT
-    )
-    h = _Harness(registry, FleetFakeClock(_T0), state_sink=sink)
+    clock = world.fleet_clock()
+    registry = InMemoryWorkerRegistry(clock=clock, heartbeat_timeout=_TIMEOUT)
+    h = _Harness(registry, clock, state_sink=sink)
     try:
         stub = await h.start()
         old = await _registered(stub)
@@ -264,11 +252,14 @@ async def test_a_gone_workers_servers_end_unknown_when_its_teardown_wrote_nothin
 
 async def test_the_mark_keeps_a_report_newer_than_the_sessions_end(
     world: _World,  # noqa: F811
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     # The write's guard on PostgreSQL: a server observed after the session's
     # end is kept, and one observed before it is marked and announced. The
     # kept one leaves the Worker selected, and the write it repeats on the
-    # next tick changes nothing and announces nothing.
+    # next tick changes nothing, announces nothing and logs no mark (issue
+    # #4144).
+    caplog.set_level(logging.INFO, logger="mc_server_dashboard_api")
     worker = uuid.uuid4()
     before = await world.server("before", worker=worker, reported="running")
     ended_at = world.clock.now()
@@ -292,10 +283,71 @@ async def test_the_mark_keeps_a_report_newer_than_the_sessions_end(
         _status("unknown")
     ]
     world.assert_published_after_commit()
+    assert len(_marks(caplog)) == 1
 
+    caplog.clear()
     watching = world.watch_all()
     await reconciler.tick()
 
     assert await _load(world.engine, before.id) == marked
     assert await _load(world.engine, after.id) == kept
     assert await _received(watching) == []
+    assert _marks(caplog) == []
+
+
+def _marks(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if "marked them unknown" in r.getMessage()]
+
+
+async def _row_version(world: _World, server_id: ServerId) -> str:  # noqa: F811
+    """The row's ``xmin``: any UPDATE of it, even to the same values, moves it."""
+
+    async with world.engine.connect() as conn:
+        version = await conn.scalar(
+            text("SELECT xmin::text FROM server WHERE id = :id"),
+            {"id": server_id.value},
+        )
+    assert isinstance(version, str)
+    return version
+
+
+@pytest.mark.parametrize(
+    ("state", "desired"),
+    [
+        (ObservedState.UNKNOWN, DesiredState.RUNNING),
+        (ObservedState.CRASHED, DesiredState.STOPPED),
+    ],
+    ids=["unknown", "crashed-under-stopped-intent"],
+)
+async def test_a_repeated_mark_writes_no_row_again(
+    world: _World,  # noqa: F811
+    state: ObservedState,
+    desired: DesiredState,
+) -> None:
+    # Issue #4144: a server the write leaves in its state, already at the
+    # write's stamp, holds what the write would set. The reconciler repeats
+    # the write on every tick while a kept server leaves the Worker selected,
+    # and the repeat must change nothing: the row is not updated again, so
+    # its stamps stay and so does its row version.
+    item = contract_server(world.community)
+    assert item.assigned_worker_id is not None
+    item.observed_state = state
+    item.desired_state = desired
+    item.observed_at = _TICK_AT
+    if state is not ObservedState.CRASHED:
+        item.crash_reason = None
+        item.crash_detail = None
+    async with world.uow() as uow:
+        await uow.servers.add(item)
+        await uow.commit()
+    before = (await _row_version(world, item.id), await _load(world.engine, item.id))
+
+    async with world.uow() as uow:
+        marked = await uow.servers.mark_worker_servers_unknown(
+            item.assigned_worker_id, _TICK_AT
+        )
+        await uow.commit()
+
+    assert marked == 0
+    after = (await _row_version(world, item.id), await _load(world.engine, item.id))
+    assert after == before

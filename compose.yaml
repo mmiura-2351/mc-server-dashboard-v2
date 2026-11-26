@@ -113,7 +113,7 @@ services:
     # CopyObject-heavy and small-object-heavy (thousands of region/.mca per world).
     # Pinned to an explicit version tag (never `latest`) so a rebuild is
     # reproducible.
-    image: chrislusf/seaweedfs:4.53
+    image: chrislusf/seaweedfs:4.54
     restart: unless-stopped
     logging: *bounded-logging
     # Gated behind the `object` compose profile so an fs-backend operator can drop
@@ -297,6 +297,21 @@ services:
     # own teardown is prompt: it cancels its background tasks, stops the gRPC
     # server with grace=None (every RPC aborted immediately, so the long-lived
     # worker/relay session streams do not hold it) and disposes the engine.
+    #
+    # Issue #4109 adds code-level bounds to that teardown: the scheduler's
+    # shutdown drain, schedule.shutdown_drain_seconds, and then up to 5 s for a
+    # scheduled backup it cancels to delete its archive. The drain defaults to 0,
+    # which cancels at once, so the default adds the 5 s. They are not the whole
+    # teardown. It also waits for the Worker sessions' teardowns, up to 10 s plus
+    # 2 s (#3555), which normally take milliseconds; and a cancel that lands
+    # during a backup's archive write is not under the 5 s at all: the store
+    # finishes or abandons that write itself (#4186). test_compose_api_stop_grace.py
+    # (api/tests) pins only a necessary condition, that the default drain plus
+    # the 5 s stay below this service's grace. An operator who sets the drain
+    # must also give this service a stop_grace_period above the drain, the 5 s
+    # and the rest of the teardown, or Docker kills the API mid-drain and no
+    # cleanup runs. Whether to ship such a grace and a non-zero drain by default
+    # is Decide #4185.
     environment:
       # An entry below with a LITERAL value is a pin this deployment owns, not a
       # default: setting that same MCD_API_* name in .env changes nothing,
@@ -695,7 +710,7 @@ services:
         condition: service_healthy
 
   cloudflared:
-    image: cloudflare/cloudflared:2026.10.7
+    image: cloudflare/cloudflared:2026.11.0
     restart: unless-stopped
     logging: *bounded-logging
     # Gated behind the `tunnel` compose profile so default bring-up is unchanged

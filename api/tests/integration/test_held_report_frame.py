@@ -48,12 +48,24 @@ from mc_server_dashboard_api.servers.adapters.late_snapshot_result_sink import (
 from mc_server_dashboard_api.servers.adapters.server_state_sink import (
     ServersServerStateSink,
 )
+from mc_server_dashboard_api.servers.adapters.unit_of_work import (
+    SqlAlchemyUnitOfWork,
+)
+from mc_server_dashboard_api.servers.application.lifecycle import StopServer
 from mc_server_dashboard_api.servers.application.stop_convergence import (
     StopConvergenceGuard,
+)
+from mc_server_dashboard_api.servers.application.unannounced_refusals import (
+    UnannouncedRefusals,
 )
 from mc_server_dashboard_api.servers.application.unrecorded_stops import (
     UnrecordedStops,
 )
+from mc_server_dashboard_api.servers.domain.control_plane import (
+    CommandOutcome,
+    CommandStatus,
+)
+from mc_server_dashboard_api.servers.domain.errors import FinalSnapshotRefusedError
 from mc_server_dashboard_api.servers.domain.value_objects import (
     FinalSnapshotRefusal,
     ObservedState,
@@ -168,7 +180,7 @@ async def test_a_commit_answered_after_the_deadline_still_reaches_subscribers(
     watching = world.watch(server)
     h = _Harness(
         InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
-        FakeClock(_T0),
+        world.fleet_clock(),
         state_sink=_RealWriteSink(sink),
         database_ping=FakeDatabasePing(reachable=True),
     )
@@ -301,7 +313,7 @@ async def test_a_report_whose_commit_answer_was_lost_reaches_subscribers(
         )
         h = _Harness(
             InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
-            FakeClock(_T0),
+            world.fleet_clock(),
             state_sink=_RealWriteSink(sink),
             database_ping=FakeDatabasePing(reachable=True),
         )
@@ -335,7 +347,7 @@ async def test_a_repeated_report_through_the_servicer_publishes_nothing(
     watching = world.watch(server)
     h = _Harness(
         InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
-        FakeClock(_T0),
+        world.fleet_clock(),
         state_sink=_RealWriteSink(world.sink()),
     )
     try:
@@ -373,6 +385,7 @@ async def test_a_late_snapshot_release_whose_commit_answer_was_lost_is_announced
                 clock=world.clock,
                 stop_convergence=StopConvergenceGuard(),
                 unrecorded_stops=UnrecordedStops(),
+                unannounced_refusals=UnannouncedRefusals(),
                 real_time_events=world.bus,
             )
         )
@@ -426,6 +439,7 @@ async def test_a_retry_that_changes_the_state_publishes_one_frame(
         worker_id=_WORKER_ID,
         state="running",
         retry=True,
+        observed_at=world.clock.now(),
     )
 
     assert [event.payload for event in await _received(watching)] == [
@@ -448,6 +462,7 @@ async def test_a_retry_that_makes_the_release_publishes_one_frame(
         clock=world.clock,
         stop_convergence=StopConvergenceGuard(),
         unrecorded_stops=UnrecordedStops(),
+        unannounced_refusals=UnannouncedRefusals(),
         real_time_events=world.bus,
     )
     watching = world.watch(server)
@@ -457,6 +472,7 @@ async def test_a_retry_that_makes_the_release_publishes_one_frame(
         worker_id=_WORKER_ID,
         code=CommandResultCode.OK,
         message=None,
+        received_at=world.clock.now(),
         retry=True,
     )
 
@@ -483,6 +499,7 @@ async def test_a_retry_leaves_a_row_another_worker_holds(
         clock=world.clock,
         stop_convergence=StopConvergenceGuard(),
         unrecorded_stops=UnrecordedStops(),
+        unannounced_refusals=UnannouncedRefusals(),
         real_time_events=world.bus,
     )
     watching = world.watch(server)
@@ -492,6 +509,7 @@ async def test_a_retry_leaves_a_row_another_worker_holds(
         worker_id=_WORKER_ID,
         code=CommandResultCode.TRANSFER_FAILED,
         message="upload aborted by transfer bound",
+        received_at=world.clock.now(),
         retry=True,
     )
 
@@ -514,6 +532,7 @@ def _late_sink(world: _World) -> ServersLateSnapshotResultSink:  # noqa: F811
         clock=world.clock,
         stop_convergence=StopConvergenceGuard(),
         unrecorded_stops=UnrecordedStops(),
+        unannounced_refusals=UnannouncedRefusals(),
         real_time_events=world.bus,
     )
 
@@ -526,6 +545,7 @@ async def _late_refusal(
         worker_id=_WORKER_ID,
         code=CommandResultCode.BUSY,
         message="a leftover container may still run",
+        received_at=_T0,
         retry=retry,
     )
 
@@ -549,6 +569,7 @@ async def test_a_late_refusal_whose_commit_answer_was_lost_is_announced(
                 clock=world.clock,
                 stop_convergence=StopConvergenceGuard(),
                 unrecorded_stops=UnrecordedStops(),
+                unannounced_refusals=UnannouncedRefusals(),
                 real_time_events=world.bus,
             )
         )
@@ -622,3 +643,45 @@ async def test_a_retry_that_records_the_refusal_publishes_one_frame(
     row = await _load(world.engine, server.id)
     assert row is not None
     assert row.final_snapshot_refusal is FinalSnapshotRefusal.BUSY
+
+
+# --- An in-time refusal after a lost COMMIT answer (issue #4152) --------------
+
+
+async def test_an_in_time_refusal_whose_commit_answer_was_lost_is_announced_once(
+    world: _World,  # noqa: F811
+) -> None:
+    # The stale-stop arm's snapshot is refused, and the COMMIT of the refusal it
+    # records lands with its answer lost: nothing is published. The next
+    # refused attempt finds the refusal recorded and announces it all the same,
+    # and the one after it publishes nothing.
+    server = await _wedged_stop(world, uuid.UUID(_WORKER_ID), "stopped")
+    frames: list[list[object]] = []
+    async with _first_commit_answer_lost() as (proxy, engine):
+        stop = StopServer(
+            uow=SqlAlchemyUnitOfWork(create_session_factory(engine), world.bus),
+            control_plane=FakeControlPlane(
+                outcomes={"snapshot": CommandOutcome(status=CommandStatus.BUSY)}
+            ),
+            clock=world.clock,
+        )
+        for attempt in range(3):
+            watching = world.watch(server)
+            with pytest.raises(FinalSnapshotRefusedError):
+                await stop.clear_stale_assignment(
+                    community_id=world.community,
+                    server_id=server.id,
+                    worker_connected=True,
+                )
+            frames.append([event.payload for event in await _received(watching)])
+            if attempt == 0:
+                # The cut answer was the refusal's COMMIT, which landed.
+                assert proxy.cuts == 1
+                row = await _load(world.engine, server.id)
+                assert row is not None
+                assert row.final_snapshot_refusal is FinalSnapshotRefusal.BUSY
+
+    assert frames == [[], [_BUSY_REFUSAL], []]
+    row = await _load(world.engine, server.id)
+    assert row is not None and row.assigned_worker_id is not None
+    assert row.assigned_worker_id.value == uuid.UUID(_WORKER_ID)

@@ -27,10 +27,10 @@ committed ahead of an archive it never wrote. Two legacy populations can be
 NULL and still have an archive: a create before issue #4119 that wrote its
 archive but was interrupted before its separate size update, and a row from
 the day between backups landing (issue #123) and creates recording a size
-(issue #283). The prune ranks the rows as loaded and does not size them first,
-so such a row ranks behind too until a listing sizes it (issue #661). A row
-whose archive went missing after its size was recorded still ranks by its
-health alone.
+(issue #283). The prune sizes the NULL-size rows before it ranks them (issue
+#4107), so such a row ranks as the sized row it is, and only a row whose archive
+the store reports missing keeps its NULL size. A row whose archive went missing
+after its size was recorded still ranks by its health alone.
 
 :func:`backups_to_prune` is the pure selection: given a policy, a server's
 backup rows, and ``now``, it returns the rows the policy prunes. Only

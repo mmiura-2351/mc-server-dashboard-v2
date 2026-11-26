@@ -398,8 +398,8 @@ class SqlAlchemyServerRepository(ServerRepository):
             values["final_snapshot_refusal"] = None
         # A release owes no hydrate, and a running instance's working set is the
         # one its snapshots will capture, whatever the store holds (issue #3890).
-        # The write is stamped when it lands, so one residue is accepted (r2 review,
-        # question 3): the Worker's event channel outlives a session, and a
+        # A report is stamped as it reaches the API, so one residue is accepted (r2
+        # review, question 3): the Worker's event channel outlives a session, and a
         # ``running`` queued while it was disconnected, for an instance that has
         # ended since, is delivered after the reconnect, ahead of its terminal
         # event. It clears the mark of a placement on that Worker only if the
@@ -410,18 +410,28 @@ class SqlAlchemyServerRepository(ServerRepository):
         # Monotonic guard (issue #216): drop a write stamped no later than the row's
         # current observed_at, so a stale convergence write (stop SERVER_NOT_FOUND,
         # redispatch_start INVALID_STATE) cannot clobber a fresher StatusChange that
-        # already landed. All observed-state writers stamp clock.now(). A never-
-        # observed row has observed_at IS NULL and must still accept its first write.
-        # Strict ``<`` (not ``<=``) is right here: observed_at is timestamptz with
-        # microsecond resolution and every writer uses the same API clock, so equal
-        # timestamps mean a genuine same-instant duplicate that is safe to drop. The
-        # guard and the unassign live in one UPDATE, so a stale write's unassign
-        # decision is dropped atomically with the state write.
+        # already landed. All observed-state writers stamp the API clock: a Worker
+        # report with the instant the API read it (issue #4118), a convergence of
+        # the Worker's answer with the instant the API read that answer (issue
+        # #4117), a kept placement's ``unknown`` with the placement's own stamp
+        # (issue #3890), a disconnect's bulk ``unknown`` with the session's end,
+        # and any other write as it is made. A never-observed row has observed_at
+        # IS NULL and must still accept its first write. Strict ``<`` (not ``<=``)
+        # is right here: observed_at is timestamptz with microsecond resolution and
+        # every writer uses the same API clock, so equal timestamps mean a genuine
+        # same-instant duplicate that is safe to drop. A retry is the exception: it
+        # carries its first attempt's stamp, and that attempt may have committed
+        # with its answer lost (issue #4062), so a row at that very stamp holds the
+        # attempt's own write, which the retry makes again. The guard and the
+        # unassign live in one UPDATE, so a stale write's unassign decision is
+        # dropped atomically with the state write.
         conditions = [
             ServerModel.id == server_id.value,
             or_(
                 ServerModel.observed_at.is_(None),
-                ServerModel.observed_at < observed_at,
+                ServerModel.observed_at <= observed_at
+                if retry
+                else ServerModel.observed_at < observed_at,
             ),
         ]
         # Ownership condition (issue #1708), mirroring
@@ -735,7 +745,7 @@ class SqlAlchemyServerRepository(ServerRepository):
 
     async def mark_worker_servers_unknown(
         self, worker_id: WorkerId, observed_at: dt.datetime
-    ) -> None:
+    ) -> int:
         # A row observed later than this write's stamp is left alone (issue #4092):
         # the disconnected session's own reports were all stamped before it, so a
         # later stamp is a report of the Worker's next session, which this write,
@@ -744,6 +754,13 @@ class SqlAlchemyServerRepository(ServerRepository):
         # the locking read, which re-checks it once a lock is granted, so it holds
         # against a report that commits while this write waits; and it covers both
         # writes below, so the crashed row's stamp never moves back either.
+        # A row this write leaves in its state (unknown, or crashed under a stopped
+        # intent) is written only to move its stamp, so at this very stamp it is
+        # not locked or written again (issue #4144): the reconciler repeats the
+        # write on every tick while a row it keeps leaves the Worker selected. At
+        # an earlier stamp it still takes this one: a report read before the
+        # disconnect that lands after this write is then dropped by the
+        # monotonic guard, not applied over the unknown (issue #4118).
         # A crashed row keeps its state (issue #3885), as the startup reset leaves
         # it: the Worker has already forgotten the crashed instance, so the row
         # stays truthful, and its stored crash keeps explaining it.
@@ -759,6 +776,7 @@ class SqlAlchemyServerRepository(ServerRepository):
         # id-ordered locker (mark_sync_pending's FOR KEY SHARE), as the second
         # would ask for a lower id after a higher one.
         crashed = ObservedState.CRASHED.value
+        kept_states = [ObservedState.UNKNOWN.value, crashed]
         locked = (
             await self._session.execute(
                 select(ServerModel.id, ServerModel.observed_state)
@@ -770,7 +788,11 @@ class SqlAlchemyServerRepository(ServerRepository):
                     ),
                     or_(
                         ServerModel.observed_at.is_(None),
-                        ServerModel.observed_at <= observed_at,
+                        ServerModel.observed_at < observed_at,
+                        and_(
+                            ServerModel.observed_at == observed_at,
+                            ServerModel.observed_state.notin_(kept_states),
+                        ),
                     ),
                 )
                 .order_by(ServerModel.id)
@@ -790,6 +812,7 @@ class SqlAlchemyServerRepository(ServerRepository):
                 .where(ServerModel.id.in_(stamped))
                 .values(observed_at=observed_at)
             )
+        return sum(row.observed_state not in kept_states for row in locked)
 
     async def workers_with_trusted_observed_state(self) -> set[WorkerId]:
         stmt = (

@@ -41,6 +41,9 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
     StartServer,
     StopServer,
 )
+from mc_server_dashboard_api.servers.application.release_held_server import (
+    ReleaseHeldServer,
+)
 from mc_server_dashboard_api.servers.application.stop_convergence import (
     StopConvergenceGuard,
 )
@@ -49,6 +52,9 @@ from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
 )
 from mc_server_dashboard_api.servers.application.stop_intents import (
     StopIntentCounter,
+)
+from mc_server_dashboard_api.servers.application.unannounced_refusals import (
+    UnannouncedRefusals,
 )
 from mc_server_dashboard_api.servers.application.unrecorded_stops import (
     UnrecordedStops,
@@ -91,6 +97,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 )
 from tests.servers.contract_table import worker_message, worker_status
 from tests.servers.fakes import (
+    CommitAnswerLostUnitOfWork,
     DatabaseOutageError,
     ExitHookUnitOfWork,
     FakeBedrockTunnelSync,
@@ -8506,6 +8513,238 @@ async def test_a_held_retry_of_a_late_refusal_leaves_a_released_row_alone(
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
+# --- A refusal written unannounced (issue #4152) -----------------------------
+
+
+async def _refused_stale_stops(
+    stop: StopServer,
+    community: uuid.UUID,
+    server_id: uuid.UUID,
+    *raised: type[BaseException],
+) -> None:
+    """Run the stale-stop arm once per entry of ``raised``, which it raises."""
+
+    for error in raised:
+        with pytest.raises(error):
+            await stop.clear_stale_assignment(
+                community_id=CommunityId(community),
+                server_id=ServerId(server_id),
+                worker_connected=True,
+            )
+
+
+@pytest.mark.parametrize("code", list(_REFUSALS), ids=lambda c: c.value)
+async def test_a_refusal_whose_commit_answer_was_lost_is_announced_by_the_next_retry(
+    code: CommandStatus,
+) -> None:
+    # The write of the refusal commits, and its answer is lost: the row holds
+    # the refusal, and no frame was published. The next refused retry finds it
+    # recorded and writes it as a retry, which announces it. The one after that
+    # finds it announced and writes nothing.
+    community, server_id, worker = _ids()
+    repo = RefusalWriteFailsRepository()
+    repo.seed(_held(community, server_id, worker, refusal=None))
+    uow = CommitAnswerLostUnitOfWork(servers=repo)
+    uow.lost_answer = DatabaseOutageError("connection closed mid-operation")
+    refusals = UnannouncedRefusals()
+    stop = StopServer(
+        uow=uow,
+        control_plane=_ScriptedSnapshots([_refused(code)] * 3),
+        clock=FakeClock(_NOW),
+        unannounced_refusals=refusals,
+    )
+
+    await _refused_stale_stops(
+        stop, community, server_id, *[FinalSnapshotRefusedError] * 3
+    )
+
+    assert repo.refusal_retries == [False, True]
+    assert repo.by_id[ServerId(server_id)].final_snapshot_refusal is _REFUSALS[code]
+    assert not refusals.pending(ServerId(server_id))
+
+
+async def test_a_stop_cancelled_at_the_refusal_s_commit_owes_its_frame() -> None:
+    # A caller cancelled at the COMMIT's await may leave it landed with no
+    # answer read, as a lost one does: the next refused retry announces it.
+    community, server_id, worker = _ids()
+    repo = RefusalWriteFailsRepository()
+    repo.seed(_held(community, server_id, worker, refusal=None))
+    uow = CommitAnswerLostUnitOfWork(servers=repo)
+    uow.lost_answer = asyncio.CancelledError()
+    refusals = UnannouncedRefusals()
+    stop = StopServer(
+        uow=uow,
+        control_plane=_ScriptedSnapshots([_refused(CommandStatus.BUSY)] * 2),
+        clock=FakeClock(_NOW),
+        unannounced_refusals=refusals,
+    )
+
+    await _refused_stale_stops(
+        stop, community, server_id, asyncio.CancelledError, FinalSnapshotRefusedError
+    )
+
+    assert repo.refusal_retries == [False, True]
+    assert not refusals.pending(ServerId(server_id))
+
+
+async def test_a_refusal_write_that_fails_before_its_commit_is_not_retried() -> None:
+    # A write that fails before its COMMIT is sent changed nothing: the row
+    # keeps the refusal it held, announced when it was written. A retry refused
+    # the same way again finds it recorded, and writes nothing.
+    community, server_id, worker = _ids()
+    repo = RefusalWriteFailsRepository(DatabaseOutageError("database unreachable"))
+    repo.seed(_held(community, server_id, worker, refusal=FinalSnapshotRefusal.BUSY))
+    refusals = UnannouncedRefusals()
+    stop = StopServer(
+        uow=FakeUnitOfWork(servers=repo),
+        control_plane=_ScriptedSnapshots(
+            [_refused(CommandStatus.UNAVAILABLE), _refused(CommandStatus.BUSY)]
+        ),
+        clock=FakeClock(_NOW),
+        unannounced_refusals=refusals,
+    )
+
+    await _refused_stale_stops(
+        stop, community, server_id, *[FinalSnapshotRefusedError] * 2
+    )
+
+    assert repo.refusal_retries == [False]
+    assert not refusals.pending(ServerId(server_id))
+
+
+@pytest.mark.parametrize("answer", ["timed-out", "session-ended"])
+async def test_a_retry_left_unanswered_keeps_the_announcement_owed(
+    answer: str,
+) -> None:
+    # A retry left unanswered keeps the hold (issue #4111), and with it the
+    # frame the lost answer still owes: the refused retry after it announces the
+    # refusal.
+    community, server_id, worker = _ids()
+    unanswered = _timed_out(worker) if answer == "timed-out" else _session_ended(worker)
+    repo = RefusalWriteFailsRepository()
+    repo.seed(_held(community, server_id, worker, refusal=None))
+    uow = CommitAnswerLostUnitOfWork(servers=repo)
+    uow.lost_answer = DatabaseOutageError("connection closed mid-operation")
+    refusals = UnannouncedRefusals()
+    stop = StopServer(
+        uow=uow,
+        control_plane=_ScriptedSnapshots(
+            [_refused(CommandStatus.BUSY), unanswered, _refused(CommandStatus.BUSY)]
+        ),
+        clock=FakeClock(_NOW),
+        unannounced_refusals=refusals,
+    )
+
+    await _refused_stale_stops(
+        stop,
+        community,
+        server_id,
+        FinalSnapshotRefusedError,
+        WorkerUnavailableError,
+        FinalSnapshotRefusedError,
+    )
+
+    assert repo.refusal_retries == [False, True]
+    assert not refusals.pending(ServerId(server_id))
+
+
+@pytest.mark.parametrize(
+    "release",
+    [
+        # An operator's release without the snapshot (issue #4055).
+        "without-snapshot",
+        # The stale-stop arm's own snapshot publishes, then Step C's release.
+        "stale-stop",
+        # A Worker back after a drop: the owed stop, then the release after the
+        # final snapshot (``_clear_held_assignment``).
+        "after-a-drop",
+        # The late result of an abandoned final snapshot publishes.
+        "late-result",
+    ],
+)
+async def test_a_release_forgets_the_refusal_owed_its_frame(release: str) -> None:
+    # A release publishes its own frame and clears the refusal, so a later
+    # hold's refusal is no retry of this one.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _held(
+            community,
+            server_id,
+            worker,
+            refusal=FinalSnapshotRefusal.BUSY,
+            observed=(
+                ObservedState.UNKNOWN
+                if release == "after-a-drop"
+                else ObservedState.STOPPED
+            ),
+        )
+    )
+    refusals = UnannouncedRefusals()
+    refusals.record(ServerId(server_id))
+    stop = StopServer(
+        uow=uow,
+        control_plane=_ScriptedSnapshots(
+            [CommandOutcome(status=CommandStatus.OK)],
+            stop=CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND),
+        ),
+        clock=FakeClock(_NOW),
+        unannounced_refusals=refusals,
+    )
+    c, s = CommunityId(community), ServerId(server_id)
+
+    if release == "without-snapshot":
+        await ReleaseHeldServer(
+            uow=uow,
+            stop_convergence=StopConvergenceGuard(),
+            unannounced_refusals=refusals,
+        )(community_id=c, server_id=s)
+    elif release == "stale-stop":
+        await stop.clear_stale_assignment(
+            community_id=c, server_id=s, worker_connected=True
+        )
+    elif release == "after-a-drop":
+        await stop(community_id=c, server_id=s)
+    else:
+        await stop.clear_assignment_after_late_snapshot(
+            server_id=s,
+            worker_id=WorkerId(worker),
+            outcome=CommandOutcome(status=CommandStatus.OK),
+        )
+
+    assert uow.servers.by_id[s].assigned_worker_id is None
+    assert not refusals.pending(s)
+
+
+async def test_a_late_refusal_announces_a_refusal_whose_commit_answer_was_lost() -> (
+    None
+):
+    # The next refused attempt after the lost answer is a late result. Its first
+    # attempt writes as a retry, which announces the refusal, and the late
+    # refusal after it writes as a first attempt again.
+    community, server_id, worker = _ids()
+    repo = RefusalWriteFailsRepository()
+    repo.seed(_held(community, server_id, worker, refusal=FinalSnapshotRefusal.BUSY))
+    refusals = UnannouncedRefusals()
+    refusals.record(ServerId(server_id))
+    stop = StopServer(
+        uow=FakeUnitOfWork(servers=repo),
+        control_plane=FakeControlPlane(),
+        clock=FakeClock(_NOW),
+        unannounced_refusals=refusals,
+    )
+
+    for _ in range(2):
+        await stop.clear_assignment_after_late_snapshot(
+            server_id=ServerId(server_id),
+            worker_id=WorkerId(worker),
+            outcome=_refused(CommandStatus.BUSY),
+        )
+
+    assert repo.refusal_retries == [True, False]
+    assert not refusals.pending(ServerId(server_id))
+
+
 @pytest.mark.parametrize(
     "observed",
     # A drop rewrites the held row to unknown, but a crashed one stays crashed;
@@ -8936,3 +9175,140 @@ async def test_start_invalid_state_no_sync_without_bedrock_port() -> None:
     # no-op, and the real BedrockTunnelSyncer returns early on bedrock_port=None.
     assert len(tunnel_sync.calls) == 1
     assert tunnel_sync.calls[0][2] is None  # bedrock_port
+
+
+# --- a convergence carries its answer's instant (issues #4117, #4118) -------
+#
+# A write that converges observed state from the Worker's answer is stamped
+# with the instant the API read that answer, which the outcome carries, and not
+# when the write is made. Each answer here was read a second before the clock
+# reads, so a write stamped as it is made would read ``_NOW``.
+
+_ANSWERED_AT = _NOW - dt.timedelta(seconds=1)
+
+# Each call site of a convergence, by the one path that reaches it: the row it
+# starts from (desired, observed, assigned), the command the Worker answers, its
+# answer, and the observed state written from it.
+_CONVERGENCES = {
+    # StartServer.__call__: the start, or the hydrate before it, is refused
+    # because an instance already runs.
+    "start": (
+        DesiredState.STOPPED,
+        ObservedState.STOPPED,
+        False,
+        "start",
+        CommandStatus.INVALID_STATE,
+        ObservedState.RUNNING,
+    ),
+    "start-hydrate": (
+        DesiredState.STOPPED,
+        ObservedState.STOPPED,
+        False,
+        "hydrate",
+        CommandStatus.INVALID_STATE,
+        ObservedState.RUNNING,
+    ),
+    # The reconciler's placement of a running intent no Worker holds.
+    "placement-hydrate": (
+        DesiredState.RUNNING,
+        ObservedState.UNKNOWN,
+        False,
+        "hydrate",
+        CommandStatus.INVALID_STATE,
+        ObservedState.RUNNING,
+    ),
+    # The reconciler's re-sent start.
+    "redispatch-start": (
+        DesiredState.RUNNING,
+        ObservedState.CRASHED,
+        True,
+        "start",
+        CommandStatus.INVALID_STATE,
+        ObservedState.RUNNING,
+    ),
+    # StopServer.__call__, confirmed or answered that no instance remains.
+    "stop-confirmed": (
+        DesiredState.RUNNING,
+        ObservedState.RUNNING,
+        True,
+        "stop",
+        CommandStatus.OK,
+        ObservedState.STOPPED,
+    ),
+    "stop-not-found": (
+        DesiredState.RUNNING,
+        ObservedState.RUNNING,
+        True,
+        "stop",
+        CommandStatus.SERVER_NOT_FOUND,
+        ObservedState.STOPPED,
+    ),
+    # The reconciler's re-sent stop, which an operator's stop of a row already
+    # stopped also runs.
+    "redispatch-stop-confirmed": (
+        DesiredState.STOPPED,
+        ObservedState.RUNNING,
+        True,
+        "stop",
+        CommandStatus.OK,
+        ObservedState.STOPPED,
+    ),
+    "redispatch-stop-not-found": (
+        DesiredState.STOPPED,
+        ObservedState.RUNNING,
+        True,
+        "stop",
+        CommandStatus.SERVER_NOT_FOUND,
+        ObservedState.STOPPED,
+    ),
+}
+
+
+async def _converge(
+    entry: str,
+    uow: FakeUnitOfWork,
+    cp: FakeControlPlane,
+    community: uuid.UUID,
+    server_id: uuid.UUID,
+) -> None:
+    c, s = CommunityId(community), ServerId(server_id)
+    stop = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+    start = _start_server(uow, cp)
+    if entry.startswith("redispatch-stop"):
+        await stop.redispatch_stop(community_id=c, server_id=s)
+    elif entry.startswith("stop"):
+        await stop(community_id=c, server_id=s)
+    elif entry == "redispatch-start":
+        await start.redispatch_start(community_id=c, server_id=s)
+    elif entry == "placement-hydrate":
+        await start.place_and_start(community_id=c, server_id=s)
+    elif entry == "start-hydrate":
+        with pytest.raises(InvalidLifecycleTransitionError):
+            await start(community_id=c, server_id=s)
+    else:
+        await start(community_id=c, server_id=s)
+
+
+@pytest.mark.parametrize("entry", list(_CONVERGENCES))
+async def test_a_convergence_is_stamped_when_its_answer_was_read(entry: str) -> None:
+    community, server_id, worker = _ids()
+    desired, observed, assigned, kind, status, converged = _CONVERGENCES[entry]
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=desired,
+            observed=observed,
+            worker_id=worker if assigned else None,
+        )
+    )
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        outcomes={kind: CommandOutcome(status=status, answered_at=_ANSWERED_AT)},
+    )
+
+    await _converge(entry, uow, cp, community, server_id)
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert (stored.observed_state, stored.observed_at) == (converged, _ANSWERED_AT)

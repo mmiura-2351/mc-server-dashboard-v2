@@ -8,12 +8,16 @@ import {
   bucketOf,
   converging,
   crashNotRestarted,
+  finalSnapshotRefusal,
+  heldNoticeKey,
   isTransitional,
   KNOWN,
   normalizeState,
   type ObservedState,
+  releaseWithoutSnapshotApplies,
   STATE_BUCKETS,
   type StateBucket,
+  serverAssignedKey,
   startRefusal,
   statePill,
   statesForBucket,
@@ -253,6 +257,75 @@ describe("atRestWriteRefusal", () => {
       "server_assigned",
     );
     expect(atRestWriteRefusal("stopped", "stopped", false)).toBeNull();
+  });
+});
+
+describe("finalSnapshotRefusal", () => {
+  // The two refusals the API records (#4054); anything else, a missing field
+  // included, is no refusal.
+  it.each([
+    ["busy", "busy"],
+    ["unavailable", "unavailable"],
+    [null, null],
+    [undefined, null],
+    ["timeout", null],
+  ] as const)("reads %s as %s", (value, refusal) => {
+    expect(finalSnapshotRefusal(value)).toBe(refusal);
+  });
+});
+
+describe("releaseWithoutSnapshotApplies", () => {
+  // The precondition of the API's `…/release-without-snapshot` (#4055): at
+  // rest under a stopped intent, still assigned, and held by a refusal.
+  const atRestStates: readonly ObservedState[] = [
+    "stopped",
+    "crashed",
+    "unknown",
+  ];
+  const rows = ["running", "stopped"].flatMap((desired) =>
+    KNOWN.flatMap((observed) =>
+      [false, true].flatMap((assigned) =>
+        ([null, "busy", "unavailable"] as const).map((refusal) => ({
+          desired,
+          observed,
+          assigned,
+          refusal,
+          applies:
+            desired === "stopped" &&
+            atRestStates.includes(observed) &&
+            assigned &&
+            refusal !== null,
+        })),
+      ),
+    ),
+  );
+
+  it.each(rows)(
+    "$desired / $observed / assigned=$assigned / refusal=$refusal answers $applies",
+    ({ desired, observed, assigned, refusal, applies }) => {
+      expect(
+        releaseWithoutSnapshotApplies(observed, desired, assigned, refusal),
+      ).toBe(applies);
+    },
+  );
+});
+
+describe("serverAssignedKey", () => {
+  // A hold whose refusal is known is worded by it (#4057); one without, a
+  // final snapshot not settled yet, keeps the neutral reason (#4003).
+  it("names the refusal a held server is held for", () => {
+    expect(serverAssignedKey(null)).toBe("common.serverAssigned");
+    expect(serverAssignedKey("busy")).toBe("common.serverHeld.busy");
+    expect(serverAssignedKey("unavailable")).toBe(
+      "common.serverHeld.unavailable",
+    );
+  });
+});
+
+describe("heldNoticeKey", () => {
+  it("words the held notice by the refusal", () => {
+    expect(heldNoticeKey("busy")).toBe("serverDetail.held.busy");
+    expect(heldNoticeKey("unavailable")).toBe("serverDetail.held.unavailable");
   });
 });
 

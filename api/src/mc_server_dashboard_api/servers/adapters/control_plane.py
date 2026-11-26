@@ -150,6 +150,7 @@ def _to_outcome(result: CommandResult) -> CommandOutcome:
         file_access_reason=_REASON_BY_FLEET_REASON[result.file_access_reason],
         held_generation=result.held_generation,
         swap_began=result.swap_began,
+        answered_at=result.answered_at,
     )
 
 

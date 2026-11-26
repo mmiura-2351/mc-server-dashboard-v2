@@ -142,10 +142,10 @@ _SECTION_LOADING_CASES = [
     ),
     pytest.param(
         "schedule",
-        {"tick_seconds": 20},
-        {"tick_seconds": 30},
-        {"tick_seconds": "40"},
-        {"tick_seconds": 40},
+        {"tick_seconds": 20, "shutdown_drain_seconds": 0},
+        {"tick_seconds": 30, "shutdown_drain_seconds": 120},
+        {"tick_seconds": "40", "shutdown_drain_seconds": "60"},
+        {"tick_seconds": 40, "shutdown_drain_seconds": 60},
         id="schedule-tick",
     ),
     pytest.param(
@@ -188,10 +188,10 @@ _SECTION_LOADING_CASES = [
     ),
     pytest.param(
         "storage_sweep",
-        {"interval_seconds": 86400},
-        {"interval_seconds": 1800},
-        {"interval_seconds": "3600"},
-        {"interval_seconds": 3600},
+        {"interval_seconds": 86400, "rowless_archive_grace_seconds": 604800},
+        {"interval_seconds": 1800, "rowless_archive_grace_seconds": 7200},
+        {"interval_seconds": "3600", "rowless_archive_grace_seconds": "5400"},
+        {"interval_seconds": 3600, "rowless_archive_grace_seconds": 5400},
         id="storage-sweep",
     ),
     pytest.param(
@@ -467,6 +467,12 @@ _SCALAR_INVALID_CASES = [
         id="schedule-tick-exceeds-grace",
     ),
     pytest.param(
+        "schedule",
+        "shutdown_drain_seconds = -1",
+        "shutdown_drain_seconds",
+        id="negative-schedule-shutdown-drain",
+    ),
+    pytest.param(
         "reconciler",
         "interval_seconds = 0",
         "interval_seconds",
@@ -513,6 +519,12 @@ _SCALAR_INVALID_CASES = [
         "interval_seconds = 0",
         "interval_seconds",
         id="zero-storage-sweep-interval",
+    ),
+    pytest.param(
+        "storage_sweep",
+        "rowless_archive_grace_seconds = 0",
+        "rowless_archive_grace_seconds",
+        id="zero-rowless-archive-grace",
     ),
     pytest.param("ports", "range_start = 0", "range_start", id="zero-game-range-start"),
     pytest.param(
@@ -779,6 +791,14 @@ _SCALAR_VALID_CASES = [
         "tick_seconds",
         300,
         id="schedule-tick-at-grace",
+    ),
+    # No drain, the default: the shutdown cancels a scheduled run at once.
+    pytest.param(
+        "schedule",
+        "shutdown_drain_seconds = 0",
+        "shutdown_drain_seconds",
+        0,
+        id="no-schedule-shutdown-drain",
     ),
     pytest.param(
         "control",

@@ -42,6 +42,9 @@ from mc_server_dashboard_api.servers.application.release_held_server import (
 from mc_server_dashboard_api.servers.application.stop_convergence import (
     StopConvergenceGuard,
 )
+from mc_server_dashboard_api.servers.application.unannounced_refusals import (
+    UnannouncedRefusals,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     InvalidLifecycleTransitionError,
@@ -96,6 +99,7 @@ def _release(
     return ReleaseHeldServer(
         uow=FakeUnitOfWork(servers=repo),
         stop_convergence=guard or StopConvergenceGuard(),
+        unannounced_refusals=UnannouncedRefusals(),
     )
 
 
@@ -314,6 +318,7 @@ async def test_a_release_refuses_while_a_final_snapshot_is_outstanding() -> None
             success=False,
             error=pb.CommandError(code=pb.COMMAND_ERROR_CODE_UNAVAILABLE),
         ),
+        received_at=_NOW,
     )
     await snapshot
 
@@ -327,7 +332,7 @@ async def test_a_release_refuses_while_a_final_snapshot_is_outstanding() -> None
     assert worker.queue.empty()
 
 
-async def test_the_http_release_shares_the_app_guard_and_event_bus(
+async def test_the_http_release_shares_the_app_guard_bus_and_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The in-flight check and the release frame only work on the app's guard and
@@ -343,6 +348,7 @@ async def test_the_http_release_shares_the_app_guard_and_event_bus(
     app.state.engine = create_async_engine("postgresql+asyncpg://u:p@h/db")
     app.state.real_time_events = InProcessRealTimeEvents()
     app.state.stop_convergence = StopConvergenceGuard()
+    app.state.unannounced_refusals = UnannouncedRefusals()
     request = Request(scope={"type": "http", "app": app})
 
     try:
@@ -351,4 +357,7 @@ async def test_the_http_release_shares_the_app_guard_and_event_bus(
         await app.state.engine.dispose()
 
     assert release.stop_convergence is app.state.stop_convergence
+    # The stops' record of a refusal written unannounced, which the release
+    # forgets (issue #4152).
+    assert release.unannounced_refusals is app.state.unannounced_refusals
     assert buses == [app.state.real_time_events]

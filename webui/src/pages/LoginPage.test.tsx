@@ -190,6 +190,34 @@ describe("LoginPage", () => {
     expect(screen.queryByText(t("login.sessionExpired"))).toBeNull();
   });
 
+  // Stable names next to the autocomplete hints, as on the other credential
+  // forms, for password managers (#4121).
+  it("names the credential inputs next to their autocomplete hints", async () => {
+    bootstrapSignedOut();
+    renderLogin();
+
+    await screen.findByRole("button", { name: t("login.submit") });
+    const username = screen.getByLabelText(t("auth.fieldUsername"));
+    expect(username).toHaveAttribute("name", "username");
+    expect(username).toHaveAttribute("autocomplete", "username");
+    const password = screen.getByLabelText(t("auth.fieldPassword"));
+    expect(password).toHaveAttribute("name", "current-password");
+    expect(password).toHaveAttribute("autocomplete", "current-password");
+  });
+
+  // A script's form.submit() fires no submit event, so a GET form would put
+  // the named credentials in the URL (#4180).
+  it("posts the sign-in form", async () => {
+    bootstrapSignedOut();
+    renderLogin();
+
+    await screen.findByRole("button", { name: t("login.submit") });
+    const password = screen.getByLabelText(
+      t("auth.fieldPassword"),
+    ) as HTMLInputElement;
+    expect(password.form).toHaveAttribute("method", "post");
+  });
+
   it("exposes a top-level heading naming the app (a11y; #647)", async () => {
     bootstrapSignedOut();
     renderLogin();

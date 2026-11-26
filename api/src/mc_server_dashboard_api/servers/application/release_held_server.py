@@ -36,6 +36,9 @@ from dataclasses import dataclass
 from mc_server_dashboard_api.servers.application.stop_convergence import (
     StopConvergenceGuard,
 )
+from mc_server_dashboard_api.servers.application.unannounced_refusals import (
+    UnannouncedRefusals,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     InvalidLifecycleTransitionError,
@@ -57,11 +60,14 @@ class ReleaseHeldServer:
 
     ``stop_convergence`` is the process-wide exclusion every stop convergence
     holds (``stop_convergence.py``), so the release refuses while one of them,
-    or a final snapshot of the server, is in flight.
+    or a final snapshot of the server, is in flight. ``unannounced_refusals``
+    is the stops' process-wide record of a refusal written unannounced
+    (``unannounced_refusals.py``), which the release forgets.
     """
 
     uow: UnitOfWork
     stop_convergence: StopConvergenceGuard
+    unannounced_refusals: UnannouncedRefusals
 
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId
@@ -94,6 +100,9 @@ class ReleaseHeldServer:
                 if not released:
                     raise LifecycleTransitionConflictError(str(server_id.value))
                 await self.uow.commit()
+        # Its frame clears the refusal, so no later refusal is owed one for a
+        # write whose COMMIT failed (issue #4152).
+        self.unannounced_refusals.forget(server_id)
         # The release wrote these, and nothing else (issue #4056).
         server.assigned_worker_id = None
         server.awaiting_hydrate = False

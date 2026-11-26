@@ -242,7 +242,7 @@ function PasswordSection({
   };
 
   return (
-    <form className="card" onSubmit={onSubmit}>
+    <form className="card" method="post" onSubmit={onSubmit}>
       <h2>{t("account.password.heading")}</h2>
       {/* The signed-in username, for password managers to match the saved
           credential and save a new one against (#4093, #4094). Visually
@@ -388,6 +388,7 @@ function DangerZone({ user, showToast, onDeleted }: DangerZoneProps) {
         confirmLabel={t("account.delete.confirm")}
         promptLabel={t("account.delete.prompt")}
         passwordLabel={t("account.delete.password")}
+        username={user.username}
         onConfirm={(password) => mutation.mutate(password)}
         onClose={() => setOpen(false)}
       />

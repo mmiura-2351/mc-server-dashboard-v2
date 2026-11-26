@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { type FormEvent, useState } from "react";
 import { t } from "../i18n/index.ts";
 import { Modal } from "./Modal.tsx";
 import { PasswordInput } from "./PasswordInput.tsx";
@@ -11,6 +11,17 @@ import { PasswordInput } from "./PasswordInput.tsx";
 // is rendered and the button additionally requires a non-empty password, which
 // is passed to onConfirm. Account deletion uses this (WEBUI_SPEC.md 6.11); the
 // other destructive flows omit it and the field never renders.
+//
+// The password field then sits in a form, so Enter in it confirms through the
+// confirm button, and password managers see a sign-in form: the field is named
+// and, when the caller passes the signed-in username, a hidden read-only
+// username field names the account (#4121, as on the change-password form).
+// The form posts, so a script's form.submit(), which fires no submit event,
+// never puts the credentials in the URL (#4180). The typed phrase stays
+// outside that form, unnamed and opted out of autofill: on account deletion it
+// is the username, and a filled phrase would bypass the typed confirm.
+
+const PASSWORD_FORM_ID = "confirm-dialog-password-form";
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -20,6 +31,7 @@ interface ConfirmDialogProps {
   confirmLabel: string;
   promptLabel: string;
   passwordLabel?: string;
+  username?: string;
   onConfirm: (password: string) => void;
   onClose: () => void;
 }
@@ -32,6 +44,7 @@ export function ConfirmDialog({
   confirmLabel,
   promptLabel,
   passwordLabel,
+  username,
   onConfirm,
   onClose,
 }: ConfirmDialogProps) {
@@ -54,6 +67,15 @@ export function ConfirmDialog({
     onConfirm(password);
   };
 
+  // A password manager may submit the form with the phrase still untyped, so
+  // the gate holds here too; the submit never leaves the page.
+  const onSubmit = (event: FormEvent) => {
+    event.preventDefault();
+    if (matches) {
+      confirm();
+    }
+  };
+
   return (
     <Modal
       open={open}
@@ -64,14 +86,25 @@ export function ConfirmDialog({
           <button type="button" className="btn ghost" onClick={close}>
             {t("common.cancel")}
           </button>
-          <button
-            type="button"
-            className="btn danger"
-            disabled={!matches}
-            onClick={confirm}
-          >
-            {confirmLabel}
-          </button>
+          {passwordLabel === undefined ? (
+            <button
+              type="button"
+              className="btn danger"
+              disabled={!matches}
+              onClick={confirm}
+            >
+              {confirmLabel}
+            </button>
+          ) : (
+            <button
+              type="submit"
+              form={PASSWORD_FORM_ID}
+              className="btn danger"
+              disabled={!matches}
+            >
+              {confirmLabel}
+            </button>
+          )}
         </>
       }
     >
@@ -80,21 +113,39 @@ export function ConfirmDialog({
         {promptLabel}
         <input
           type="text"
+          autoComplete="off"
           value={typed}
           placeholder={confirmPhrase}
           onChange={(event) => setTyped(event.target.value)}
         />
       </label>
       {passwordLabel !== undefined && (
-        <label className="field" htmlFor="confirm-dialog-password">
-          {passwordLabel}
-          <PasswordInput
-            id="confirm-dialog-password"
-            autoComplete="current-password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-          />
-        </label>
+        <form id={PASSWORD_FORM_ID} method="post" onSubmit={onSubmit}>
+          {/* Visually hidden rather than type="hidden", which some managers
+              ignore; out of the tab order and the accessibility tree. */}
+          {username !== undefined && (
+            <input
+              type="text"
+              name="username"
+              autoComplete="username"
+              value={username}
+              readOnly
+              tabIndex={-1}
+              aria-hidden="true"
+              className="visually-hidden"
+            />
+          )}
+          <label className="field" htmlFor="confirm-dialog-password">
+            {passwordLabel}
+            <PasswordInput
+              id="confirm-dialog-password"
+              name="current-password"
+              autoComplete="current-password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+            />
+          </label>
+        </form>
       )}
     </Modal>
   );

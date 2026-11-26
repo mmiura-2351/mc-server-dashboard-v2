@@ -239,7 +239,7 @@ class ServerRepository(abc.ABC):
         assigned to that worker (an unassigned row never matches). The
         control-plane sink asserts the reporting worker here so a stop-unassign
         + re-place committing between its snapshot read and this write cannot
-        let the stale worker's (freshest-stamped) report overwrite the new
+        let the stale worker's report overwrite the new
         owner's state. API-driven convergence writers do not assert a worker:
         they converge their own dispatch outcome, not a worker's report.
 
@@ -383,16 +383,17 @@ class ServerRepository(abc.ABC):
         when the row changed, which is announced to live subscribers as a status
         event once the transaction commits.
 
-        ``retry`` marks a retry of a late result whose earlier attempt failed.
-        That attempt may have committed with its answer lost, so the same refusal
-        found recorded also counts, under the same guard, and is announced again
-        (issue #4104).
+        ``retry`` marks a write whose earlier attempt failed: a retry of a late
+        result (issue #4104), or the next refused attempt after a write whose
+        COMMIT failed (issue #4152). That attempt may have committed with its
+        answer lost, so the same refusal found recorded also counts, under the
+        same guard, and is announced again.
         """
 
     @abc.abstractmethod
     async def mark_worker_servers_unknown(
         self, worker_id: WorkerId, observed_at: dt.datetime
-    ) -> None:
+    ) -> int:
         """Set observed=unknown for the servers assigned to ``worker_id`` (FR-WRK-4).
 
         A ``crashed`` server keeps its state and stored crash (issue #3885): the
@@ -406,6 +407,11 @@ class ServerRepository(abc.ABC):
         stamp included (issue #4092): that is a report of the Worker's next
         session, made after the disconnect, which this write must not
         overwrite when it lands late.
+
+        Returns the number of servers whose state it changed to ``unknown``
+        (issue #4144). A server already ``unknown``, or a crashed one under a
+        stopped intent, at ``observed_at`` already holds what the write would
+        set and is not written again, so a repeat of the write changes nothing.
         """
 
     @abc.abstractmethod

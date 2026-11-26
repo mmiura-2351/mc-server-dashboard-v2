@@ -39,9 +39,11 @@ export function fileOperationErrorPresentation(
       return { key: "files.error.notFound" };
     case 409:
       switch (error.reason) {
+        // One action-neutral reason for every operation, the downloads
+        // included (#4183): the mapper does not know which one was refused.
         case "server_unsettled":
         case "server_not_stopped":
-          return { key: "files.error.serverMustBeStopped" };
+          return { key: "files.error.notStopped" };
         case "server_busy":
           return { key: "files.error.serverBusy" };
         // A write the stop's Worker still holds the server for (#3998):
@@ -144,6 +146,22 @@ export function fileSaveErrorPresentation(
     default:
       return undefined;
   }
+}
+
+/**
+ * Select the toast a failed rollback shows in place of the operation's, or
+ * `undefined` when it shows the operation's (issue #4147). A rollback refused
+ * because the server is not stopped names the rollback, not the neutral stop
+ * reason the operation's wording gives.
+ */
+export function fileRollbackErrorPresentation(
+  error: unknown,
+): FileErrorPresentation | undefined {
+  return error instanceof ApiError &&
+    error.status === 409 &&
+    error.reason === "server_not_stopped"
+    ? { key: "files.error.rollbackServerMustBeStopped" }
+    : undefined;
 }
 
 /**

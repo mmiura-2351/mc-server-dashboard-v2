@@ -7,6 +7,7 @@ import {
   fileListErrorPresentation,
   fileOperationErrorPresentation,
   fileReadErrorPresentation,
+  fileRollbackErrorPresentation,
   fileSaveErrorPresentation,
 } from "./serverFilesErrorPresentation.ts";
 
@@ -37,6 +38,28 @@ describe("fileSaveErrorPresentation", () => {
   });
 });
 
+describe("fileRollbackErrorPresentation", () => {
+  it("names the rollback when the server is not stopped (#4147)", () => {
+    expect(
+      fileRollbackErrorPresentation(
+        new ApiError(409, { reason: "server_not_stopped" }),
+      ),
+    ).toEqual({ key: "files.error.rollbackServerMustBeStopped" });
+  });
+
+  it.each([
+    ["another 409", new ApiError(409, { reason: "server_assigned" })],
+    [
+      "the reason on another status",
+      new ApiError(422, { reason: "server_not_stopped" }),
+    ],
+    ["a 403", new ApiError(403, { reason: "forbidden" })],
+    ["a non-API error", new Error("boom")],
+  ])("leaves %s to the operation's presentation", (_label, error) => {
+    expect(fileRollbackErrorPresentation(error)).toBeUndefined();
+  });
+});
+
 describe("fileOperationErrorPresentation", () => {
   it.each([
     [
@@ -55,14 +78,16 @@ describe("fileOperationErrorPresentation", () => {
       { key: "files.error.notFound" },
     ],
     [
-      "maps server_unsettled to the at-rest message",
+      // One neutral reason for every operation, upload and folder creation
+      // included (#4183).
+      "maps server_unsettled to the neutral stop message",
       new ApiError(409, { reason: "server_unsettled" }),
-      { key: "files.error.serverMustBeStopped" },
+      { key: "files.error.notStopped" },
     ],
     [
-      "maps server_not_stopped to the at-rest message",
+      "maps server_not_stopped to the neutral stop message",
       new ApiError(409, { reason: "server_not_stopped" }),
-      { key: "files.error.serverMustBeStopped" },
+      { key: "files.error.notStopped" },
     ],
     [
       "maps server_busy to the contention message",
