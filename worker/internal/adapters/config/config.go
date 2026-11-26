@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -121,6 +122,11 @@ type ContainerConfig struct {
 	// root: an unset key resolves to defaultContainerUser for a Worker running as
 	// root, and to the Worker's own uid:gid otherwise (see resolveContainerUser).
 	User ContainerUser
+	// LogMaxSize and LogMaxFile bound each MC container's json-file log: it
+	// rotates at LogMaxSize, a positive integer plus k, m or g, and keeps at most
+	// LogMaxFile files (issue #4150).
+	LogMaxSize string
+	LogMaxFile int
 }
 
 // ContainerUser is a numeric uid:gid. The zero value means "unset": uid 0 is
@@ -171,6 +177,8 @@ type fileConfig struct {
 			GameBindIP *string `toml:"game_bind_ip"`
 			Network    *string `toml:"network"`
 			User       *string `toml:"user"`
+			LogMaxSize *string `toml:"log_max_size"`
+			LogMaxFile *int    `toml:"log_max_file"`
 			// Images maps a Java major (string key, e.g. "21") to the base image
 			// ref. TOML table keys are strings; they are parsed to ints.
 			Images map[string]string `toml:"images"`
@@ -197,6 +205,8 @@ func defaults() Config {
 		Driver: DriverConfig{
 			Container: ContainerConfig{
 				GameBindIP: "127.0.0.1",
+				LogMaxSize: containerdriver.DefaultLogMaxSize,
+				LogMaxFile: containerdriver.DefaultLogMaxFile,
 			},
 		},
 		Log: LogConfig{
@@ -296,6 +306,10 @@ func applyFile(cfg *Config, path string) error {
 		}
 		cfg.Driver.Container.User = user
 	}
+	setString(&cfg.Driver.Container.LogMaxSize, fc.Driver.Container.LogMaxSize)
+	if fc.Driver.Container.LogMaxFile != nil {
+		cfg.Driver.Container.LogMaxFile = *fc.Driver.Container.LogMaxFile
+	}
 	if fc.Driver.Container.Images != nil {
 		images, err := parseMajorMap("driver.container.images", fc.Driver.Container.Images)
 		if err != nil {
@@ -356,6 +370,14 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 			return fmt.Errorf("config: driver.container.user: %sDRIVER_CONTAINER_USER: %w", EnvPrefix, err)
 		}
 		cfg.Driver.Container.User = user
+	}
+	setEnvString(&cfg.Driver.Container.LogMaxSize, getenv, "DRIVER_CONTAINER_LOG_MAX_SIZE")
+	if v := getenv(EnvPrefix + "DRIVER_CONTAINER_LOG_MAX_FILE"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("config: driver.container.log_max_file: %sDRIVER_CONTAINER_LOG_MAX_FILE: %w", EnvPrefix, err)
+		}
+		cfg.Driver.Container.LogMaxFile = n
 	}
 
 	// DRIVER_CONTAINER_IMAGES is a comma-separated list of major=image pairs, e.g.
@@ -517,8 +539,21 @@ func (c Config) validate() error {
 		return fmt.Errorf("config: driver.container.game_bind_ip: %q is not a valid IP address", c.Driver.Container.GameBindIP)
 	}
 
+	// The Engine would refuse a malformed bound at every container create, so
+	// every server start would fail; refuse it at boot instead (issue #4150).
+	if !logSize.MatchString(c.Driver.Container.LogMaxSize) {
+		return fmt.Errorf("config: driver.container.log_max_size: %q is not a size like 50m (a positive integer plus k, m or g)", c.Driver.Container.LogMaxSize)
+	}
+	if c.Driver.Container.LogMaxFile < 1 {
+		return fmt.Errorf("config: driver.container.log_max_file: %d is not a positive number of files", c.Driver.Container.LogMaxFile)
+	}
+
 	return nil
 }
+
+// logSize is a driver.container.log_max_size value: the json-file driver's
+// max-size, a positive integer plus a unit k, m or g, in either case.
+var logSize = regexp.MustCompile(`^[1-9][0-9]*[kKmMgG]$`)
 
 func setString(dst *string, src *string) {
 	if src != nil {

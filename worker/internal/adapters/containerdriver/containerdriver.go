@@ -231,6 +231,13 @@ type Options struct {
 	// uid:gid, or DefaultRunAsUID:DefaultRunAsGID when the Worker is root.
 	RunAsUID int
 	RunAsGID int
+	// LogMaxSize and LogMaxFile bound the json-file log of every container the
+	// driver creates: it rotates at LogMaxSize (a size such as "50m") and keeps
+	// at most LogMaxFile files, the live one included (issue #4150). The Worker's
+	// wiring sets them from driver.container.log_max_size and log_max_file. Zero
+	// uses DefaultLogMaxSize and DefaultLogMaxFile.
+	LogMaxSize string
+	LogMaxFile int
 	// Logger records the lazy base-image pull (image name, duration) at INFO (issue
 	// #904). Nil uses a discard logger.
 	Logger *slog.Logger
@@ -257,6 +264,8 @@ type Driver struct {
 	runAsUID int
 	runAsGID int
 	chownAt  func(dirFd int, name string, uid, gid int) error
+	// logConfig is the bounded json-file log every container gets (issue #4150).
+	logConfig *LogConfig
 	// conflictPoll and conflictDeadline bound the wait-for-name-free loop (#233).
 	conflictPoll     time.Duration
 	conflictDeadline time.Duration
@@ -336,6 +345,14 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 		logger = slog.New(slog.DiscardHandler)
 	}
 	runAsUID, runAsGID := resolveRunAs(opts.RunAsUID, opts.RunAsGID, os.Getuid(), os.Getgid())
+	logMaxSize := opts.LogMaxSize
+	if logMaxSize == "" {
+		logMaxSize = DefaultLogMaxSize
+	}
+	logMaxFile := opts.LogMaxFile
+	if logMaxFile <= 0 {
+		logMaxFile = DefaultLogMaxFile
+	}
 	d := &Driver{
 		docker:      docker,
 		images:      images,
@@ -356,6 +373,7 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 		runAsUID:                   runAsUID,
 		runAsGID:                   runAsGID,
 		chownAt:                    chownAtNoFollow,
+		logConfig:                  &LogConfig{Type: "json-file", Config: map[string]string{"max-size": logMaxSize, "max-file": strconv.Itoa(logMaxFile)}},
 		conflictPoll:               conflictPoll,
 		conflictDeadline:           conflictDeadline,
 		readinessTimeout:           readinessTimeout,
@@ -990,6 +1008,18 @@ const containerPidsLimit = 4096
 // container's memory limit, and the size bounds it for a server without one.
 var containerTmpfs = map[string]string{containerHomeDir: "rw,exec,nosuid,nodev,size=256m"}
 
+// DefaultLogMaxSize and DefaultLogMaxFile bound the json-file log of every
+// container the driver creates when the Worker sets no bound of its own
+// (Options.LogMaxSize, Options.LogMaxFile). A server writes its console to
+// stdout, and the json-file driver otherwise keeps all of it, on the host's root
+// filesystem, for as long as the container exists, which for a server that runs
+// for weeks is weeks (issue #4150). They match the bound compose.yaml gives its
+// own services: rotation at 50 MB and at most five files, 250 MB per container.
+const (
+	DefaultLogMaxSize = "50m"
+	DefaultLogMaxFile = 5
+)
+
 // createServerContainer is the one path every container the driver creates goes
 // through (TestEveryContainerCreateGoesThroughCreateServerContainer) — the launch
 // container and the Forge install container, first attempt or retry, all of which
@@ -1040,6 +1070,7 @@ func (d *Driver) createServerContainer(ctx context.Context, spec execution.Insta
 	create.PidsLimit = containerPidsLimit
 	create.ReadonlyRootfs = true
 	create.Tmpfs = containerTmpfs
+	create.LogConfig = d.logConfig
 	return d.createContainer(ctx, create)
 }
 

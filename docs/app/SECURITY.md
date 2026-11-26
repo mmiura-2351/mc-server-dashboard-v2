@@ -679,6 +679,12 @@ container, first attempt or retry — with these restrictions (issues #2600,
   directory, which neither the JVM nor the Forge installer uses (measured in
   all seven images, with a JVM probe of each under these settings). A plugin
   or mod that writes anywhere else outside `/data` and `/tmp` gets `EROFS`.
+- **A bounded log** (`LogConfig`: the `json-file` driver, rotated at
+  `driver.container.log_max_size` and keeping at most
+  `driver.container.log_max_file` files, `50m` and `5` by default;
+  [`CONFIGURATION.md`](CONFIGURATION.md) Section 6.3, issue #4150). What server
+  code prints to stdout and stderr stays within that bound instead of growing
+  on the host's root filesystem for as long as the container runs.
 
 **This is the premise the worker's own defences rest on**, stated exactly:
 server-controlled code runs as one unprivileged uid, with an empty capability

@@ -145,6 +145,11 @@ func assertHardened(t *testing.T, got CreateSpec) {
 	if want := map[string]string{"/tmp": "rw,exec,nosuid,nodev,size=256m"}; !reflect.DeepEqual(got.Tmpfs, want) {
 		t.Errorf("%s: Tmpfs = %v, want %v", got.Name, got.Tmpfs, want)
 	}
+	// A json-file log bounded at the defaults, so server code that floods its
+	// console cannot fill the host's disk (issue #4150).
+	if want := (&LogConfig{Type: "json-file", Config: map[string]string{"max-size": "50m", "max-file": "5"}}); !reflect.DeepEqual(got.LogConfig, want) {
+		t.Errorf("%s: LogConfig = %+v, want %+v", got.Name, got.LogConfig, want)
+	}
 	// The JVM is given a home: the run-as uid has no passwd entry in the image.
 	if len(got.Cmd) < 2 || got.Cmd[0] != "java" || got.Cmd[1] != "-Duser.home=/tmp" {
 		t.Errorf("%s: Cmd = %v, want it to start java -Duser.home=/tmp", got.Name, got.Cmd)
@@ -162,6 +167,24 @@ func TestLaunchContainerRunsNonRootWithoutCapabilities(t *testing.T) {
 	}
 
 	assertHardened(t, docker.createSpec)
+}
+
+// The container's log is bounded at the size and file count the Worker
+// configures, when it configures them (issue #4150).
+func TestContainerLogBoundIsTheConfiguredOne(t *testing.T) {
+	docker := newFakeDocker()
+	d := New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+		return nil, errors.New("no rcon")
+	}, Options{WorkerID: "w1", ReadinessTimeout: 20 * time.Millisecond, LogMaxSize: "10m", LogMaxFile: 3})
+
+	if _, err := d.Start(context.Background(), spec()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	want := &LogConfig{Type: "json-file", Config: map[string]string{"max-size": "10m", "max-file": "3"}}
+	if got := docker.createSpec.LogConfig; !reflect.DeepEqual(got, want) {
+		t.Fatalf("LogConfig = %+v, want %+v", got, want)
+	}
 }
 
 // Every container the driver creates goes through createServerContainer, which is

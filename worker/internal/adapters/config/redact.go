@@ -38,6 +38,8 @@ func (c Config) LogValue() slog.Value {
 				slog.String("game_bind_ip", c.Driver.Container.GameBindIP),
 				slog.String("network", c.Driver.Container.Network),
 				slog.String("user", c.Driver.Container.User.String()),
+				slog.String("log_max_size", c.Driver.Container.LogMaxSize),
+				slog.Int("log_max_file", c.Driver.Container.LogMaxFile),
 			),
 		),
 		slog.Group("log",

@@ -52,6 +52,12 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if cfg.Driver.Container.Network != "" {
 		t.Errorf("Driver.Container.Network = %q, want default empty", cfg.Driver.Container.Network)
 	}
+	if cfg.Driver.Container.LogMaxSize != "50m" {
+		t.Errorf("Driver.Container.LogMaxSize = %q, want default 50m", cfg.Driver.Container.LogMaxSize)
+	}
+	if cfg.Driver.Container.LogMaxFile != 5 {
+		t.Errorf("Driver.Container.LogMaxFile = %d, want default 5", cfg.Driver.Container.LogMaxFile)
+	}
 }
 
 func TestLoadFailsFastOnMissingRequired(t *testing.T) {
@@ -225,6 +231,13 @@ func TestLoadRejectsInvalidValue(t *testing.T) {
 		{name: "container user without gid", env: map[string]string{"MCD_WORKER_DRIVER_CONTAINER_USER": "1000"}, wantKeys: []string{"driver.container.user", "uid:gid"}},
 		{name: "unknown log level", env: map[string]string{"MCD_WORKER_LOG_LEVEL": "trace"}, wantKeys: []string{"log.level"}},
 		{name: "log level typo", env: map[string]string{"MCD_WORKER_LOG_LEVEL": "debgu"}, wantKeys: []string{"log.level"}},
+		{name: "container log size without unit", env: map[string]string{"MCD_WORKER_DRIVER_CONTAINER_LOG_MAX_SIZE": "50"}, wantKeys: []string{"driver.container.log_max_size"}},
+		{name: "container log size of zero", env: map[string]string{"MCD_WORKER_DRIVER_CONTAINER_LOG_MAX_SIZE": "0m"}, wantKeys: []string{"driver.container.log_max_size"}},
+		{name: "unlimited container log size", env: map[string]string{"MCD_WORKER_DRIVER_CONTAINER_LOG_MAX_SIZE": "-1"}, wantKeys: []string{"driver.container.log_max_size"}},
+		{name: "container log size with unknown unit", env: map[string]string{"MCD_WORKER_DRIVER_CONTAINER_LOG_MAX_SIZE": "50mb"}, wantKeys: []string{"driver.container.log_max_size"}},
+		{name: "malformed container log file count", env: map[string]string{"MCD_WORKER_DRIVER_CONTAINER_LOG_MAX_FILE": "five"}, wantKeys: []string{"driver.container.log_max_file", "LOG_MAX_FILE"}},
+		{name: "container log file count of zero", env: map[string]string{"MCD_WORKER_DRIVER_CONTAINER_LOG_MAX_FILE": "0"}, wantKeys: []string{"driver.container.log_max_file"}},
+		{name: "negative container log file count", env: map[string]string{"MCD_WORKER_DRIVER_CONTAINER_LOG_MAX_FILE": "-1"}, wantKeys: []string{"driver.container.log_max_file"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -491,6 +504,7 @@ func TestLoadContainerSettingFromFileOrEnv(t *testing.T) {
 		{"game_bind_ip", "MCD_WORKER_DRIVER_CONTAINER_GAME_BIND_IP", "0.0.0.0", func(c Config) string { return c.Driver.Container.GameBindIP }},
 		{"network", "MCD_WORKER_DRIVER_CONTAINER_NETWORK", "mcsd", func(c Config) string { return c.Driver.Container.Network }},
 		{"user", "MCD_WORKER_DRIVER_CONTAINER_USER", loadableContainerUser(), func(c Config) string { return c.Driver.Container.User.String() }},
+		{"log_max_size", "MCD_WORKER_DRIVER_CONTAINER_LOG_MAX_SIZE", "10M", func(c Config) string { return c.Driver.Container.LogMaxSize }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name+" from file", func(t *testing.T) {
@@ -538,6 +552,49 @@ drivers = ["container"]
 				t.Fatalf("%s = %q, want %q from env", tc.name, got, tc.value)
 			}
 		})
+	}
+}
+
+// driver.container.log_max_file, an integer, loads from the config file and from
+// its environment variable, which wins over the file.
+func TestLoadContainerLogMaxFileFromFileOrEnv(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "worker.toml")
+	body := `
+[api]
+grpc_endpoint = "api:50051"
+credential = "secret"
+
+[api.tls]
+insecure = true
+
+[worker]
+scratch_dir = "` + t.TempDir() + `"
+drivers = ["container"]
+
+[driver.container]
+log_max_file = 3
+
+[driver.container.images]
+21 = "eclipse-temurin:21-jre"
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path, emptyEnv)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.Driver.Container.LogMaxFile; got != 3 {
+		t.Fatalf("LogMaxFile = %d, want 3 from file", got)
+	}
+
+	cfg, err = Load(path, mapEnv(map[string]string{"MCD_WORKER_DRIVER_CONTAINER_LOG_MAX_FILE": "7"}))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.Driver.Container.LogMaxFile; got != 7 {
+		t.Fatalf("LogMaxFile = %d, want 7 from env", got)
 	}
 }
 

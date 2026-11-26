@@ -48,10 +48,26 @@
 # below (verified on Compose v5.1.4). See docs/dev/AGENTS.md Section 1.
 name: mcsd
 
+# Every service's container log is bounded (issue #4150). Docker's json-file
+# driver keeps one file per container that grows without limit, on the host's
+# root filesystem, unless the daemon's own log-opts say otherwise. This rotates
+# it at 50 MB and keeps at most five files (the live one included), so a
+# container holds at most 250 MB of log. A container's own setting takes
+# precedence over the daemon's log-opts. The Minecraft containers the worker
+# creates are not compose services: the worker bounds their logs itself, with
+# the driver.container.log_max_size / log_max_file keys forwarded below. See
+# docs/dev/DEPLOYMENT.md "Container log rotation".
+x-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
 services:
   db:
     image: postgres:18.6
     restart: unless-stopped
+    logging: *bounded-logging
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       # `:?` rejects unset OR empty so a blank DB password (which the api's
@@ -82,6 +98,7 @@ services:
       dockerfile: api/Dockerfile
     image: mcsd-api:dev
     restart: "no"
+    logging: *bounded-logging
     command: ["alembic", "upgrade", "head"]
     environment:
       MCD_API_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
@@ -98,6 +115,7 @@ services:
     # reproducible.
     image: chrislusf/seaweedfs:4.54
     restart: unless-stopped
+    logging: *bounded-logging
     # Gated behind the `object` compose profile so an fs-backend operator can drop
     # the service entirely (issue #940). `.env.example` ships COMPOSE_PROFILES=object
     # as the default, so the default experience is unchanged: seaweedfs runs and its
@@ -238,6 +256,7 @@ services:
       dockerfile: api/Dockerfile
     image: mcsd-api:dev
     restart: "no"
+    logging: *bounded-logging
     profiles: ["object"]
     command: ["python", "/app/scripts/provision_object_lifecycle.py"]
     volumes:
@@ -263,6 +282,7 @@ services:
       dockerfile: api/Dockerfile
     image: mcsd-api:dev
     restart: unless-stopped
+    logging: *bounded-logging
     # NO stop_grace_period, and this is the one service where that is the answer
     # (issue #2934, owner decision 2026-09-23). The worker and the relay each got
     # a value because each has a FINITE code-level bound to cover — 550 s and
@@ -449,6 +469,7 @@ services:
     build: ./worker
     image: mcsd-worker:dev
     restart: unless-stopped
+    logging: *bounded-logging
     # Covers Manager.Close's own worst case, which is 550 s (issue #2934, owner
     # decision 2026-09-23; lengthened by the progress-aware stop, issue #3436).
     # SIGTERM ends the control-plane session and then runs Close, which JOINS the
@@ -532,6 +553,10 @@ services:
       # keeps the worker's default for a root worker, 25565:25565; the worker
       # hands each working set under MCSD_SCRATCH_DIR to that user itself.
       MCD_WORKER_DRIVER_CONTAINER_USER: "${MCD_WORKER_DRIVER_CONTAINER_USER:-}"
+      # The bound on each MC container's json-file log (CONFIGURATION.md Section
+      # 6.3, issue #4150). Empty keeps the worker's defaults, 50m and 5 files.
+      MCD_WORKER_DRIVER_CONTAINER_LOG_MAX_SIZE: "${MCD_WORKER_DRIVER_CONTAINER_LOG_MAX_SIZE:-}"
+      MCD_WORKER_DRIVER_CONTAINER_LOG_MAX_FILE: "${MCD_WORKER_DRIVER_CONTAINER_LOG_MAX_FILE:-}"
       # Log verbosity and format (CONFIGURATION.md Section 6.4) — the same
       # forwarding gap the api had, fixed the same way (issue #2794). The Go
       # services' keys are FLAT, so these read LOG_LEVEL where the api's nested
@@ -583,6 +608,7 @@ services:
     build: ./relay
     image: mcsd-relay:dev
     restart: unless-stopped
+    logging: *bounded-logging
     # Covers the relay's own 30 s shutdown bound (issues #2934, #3169):
     # gameLn.Drain(drainTimeout) waits up to 20 s for in-flight handlers to tear
     # down, and only THEN does svcStop() release Reporter.Run into its separate
@@ -686,6 +712,7 @@ services:
   cloudflared:
     image: cloudflare/cloudflared:2026.11.0
     restart: unless-stopped
+    logging: *bounded-logging
     # Gated behind the `tunnel` compose profile so default bring-up is unchanged
     # (issue #1090). Add `tunnel` to COMPOSE_PROFILES in .env to enable it, then
     # set CLOUDFLARE_TUNNEL_TOKEN in .env (see .env.example). The tunnel's public
