@@ -151,6 +151,7 @@ the same mistake happens twice, propose a check for it (Section 5.3).
 | How to test, and how much | `docs/dev/TESTING.md` |
 | Step-by-step playbooks for development work | `.agents/skills/dev-mode/SKILL.md` |
 | How to review a change | `.agents/skills/review-change/SKILL.md` |
+| Dependency-update pull requests, when the owner asks | `.agents/skills/dependabot/SKILL.md` |
 
 Skills live in `.agents/skills/`. `.claude/skills/` holds symlinks to them,
 because Claude Code reads only that directory.
