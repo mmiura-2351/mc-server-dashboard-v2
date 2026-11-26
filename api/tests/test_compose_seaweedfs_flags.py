@@ -9,7 +9,9 @@ documents the headroom this reserve is part of.
 
 Static text parsing, like the other ``compose.yaml`` guards in this suite: the
 api has no YAML dependency. Only the ``exec weed server`` line is read, as the
-argv the shell passes, so a comment that names the flag cannot satisfy the test.
+argv the shell passes, with a ``#`` comment dropped as the shell drops it. A
+comment that names the flag, on its own line or after the command, therefore
+cannot satisfy the test.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ def _weed_server_argv() -> list[str]:
         for line in _compose_service("seaweedfs").splitlines()
         if line.strip().startswith("exec weed server ")
     )
-    return shlex.split(command)
+    return shlex.split(command, comments=True)
 
 
 def test_seaweedfs_keeps_five_percent_of_its_filesystem_free() -> None:
