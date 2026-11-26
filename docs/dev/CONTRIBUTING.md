@@ -2,24 +2,45 @@
 
 How a change moves from issue discovery and implementation planning through
 branches, commits, pull requests, review, merge, and issue closure. Behavioral
-guidance for *how to write the code* is in
-[`../../CLAUDE.md`](../../CLAUDE.md); documentation conventions are in
-[`../README.md`](../README.md).
+guidance for *how to write the code*, and the project rules this workflow
+implements, are in [`../../AGENTS.md`](../../AGENTS.md); documentation
+conventions are in [`../README.md`](../README.md).
 
 > The commands below are enforced by the git hooks (Section 4; the pre-push
 > `make check`) and by the CI workflows (`.github/workflows/`).
 
 > **LLM agents** — and anyone working on the shared deployment host — must
-> also read [`AGENTS.md`](AGENTS.md), the agent-facing operational manual
-> (host ground rules, worktree mechanics, tooling quirks). Everything in this
-> document applies there unchanged.
+> also read [`AGENTS.md`](AGENTS.md) in this directory, the agent-facing
+> operational manual (host ground rules, worktree mechanics, tooling quirks).
+> Everything in this document applies there unchanged.
 
 ## 1. Issues
 
-- When you spot a bug, missing feature, or improvement that is **out of scope**
-  for the change you are making, open an issue rather than expanding the PR.
-- Each issue includes: a concrete `file:line` reference, the problem in one or
-  two sentences, and a label — `bug` / `enhancement` / `feature-request`.
+The tracker is a record. An issue becomes work only when the repository owner
+labels it `approved`. Nobody else applies that label.
+
+- **A defect you find while doing other work** is not fixed in the current PR.
+  The lead of the session files it, one issue per defect:
+  1. Search the open issues for the same cause first
+     (`gh issue list --state open --search "<symbol or error text>"`). If one
+     exists, add your evidence there as a comment and file nothing.
+  2. Give the `file:line`, the problem in one or two sentences, the command or
+     input that shows it, and what a user or operator sees.
+  3. Label it `bug`, the module label, and `low-priority`. Leave `low-priority`
+     off only when a user or operator would hit the defect in normal use at
+     the scale of [`../REQUIREMENTS.md`](../REQUIREMENTS.md) Section 1.1.
+
+  A subagent does not file issues. It reports the defect to the lead.
+- **An idea for new work** — a feature, a refactor, tooling, a process change,
+  a decision the owner must make — is not filed by an agent. It goes in the
+  final report as a proposal, and the owner files what they want done.
+- A `low-priority` issue stays open until the owner approves or closes it.
+  Nothing closes it automatically.
+
+| Issue label | Meaning | Who applies it |
+|---|---|---|
+| `approved` | This is work to do | The owner only |
+| `low-priority` | A recorded defect that nobody works on until it is approved | Whoever files it |
 
 ## 2. Plan before implementing
 
@@ -88,7 +109,15 @@ runs `npm ci` (webui) and `uv sync` (api).
 
 - **Title**: short imperative ("Fix Y", not "Fixed Y" or "Y fix").
 - **Body**: include `Resolves #N` (or `Fixes` / `Refs`) on its own line when a
-  related issue exists; omit it when there is none.
+  related issue exists; omit it when there is none. Then, in at most 40 lines:
+  - `## Why` — the goal, in a sentence or two.
+  - `## What changed`.
+  - `## Done when` — the checks that define done, each one able to pass or
+    fail. Take them from the issue. If the issue has none, write them before
+    you write code.
+  - `## Verification` — for each check, the command you ran and its result.
+
+  Longer evidence goes in a PR comment.
 - Each PR carries **exactly one** category label — these drive the generated
   release notes (see [`RELEASING.md`](RELEASING.md)). Pick the single best fit:
 
@@ -130,9 +159,26 @@ Inspect a PR thoroughly:
   thread, `gh api repos/{owner}/{repo}/issues/<N>/comments`.
 - **Run it locally** — `gh pr checkout <N>`.
 
-Submit reviews with `gh pr review`. Group findings by severity: `bug` /
-`improvement` / `question` / `nit`. Each finding links a `file:line`. Approve
-only after every `bug`-severity item is resolved.
+Review against the PR's `Done when` list, and try to break the change. A
+finding needs evidence: the command or test you ran and its output, or the
+exact input and the wrong result. Each finding links a `file:line` and has one
+class:
+
+| Class | What it is | What happens |
+|---|---|---|
+| `blocking` | A `Done when` check fails. Or the PR introduces a defect that a user or operator would hit in normal use. Or the PR breaks a repository contract (Section 5) or the gate. | Fixed in this PR. |
+| `defect` | Any other defect you demonstrated: one that needs unlikely conditions, one with a minor effect, or one that was there before the PR. | Does not block. Filed as a `low-priority` issue (Section 1). |
+| `note` | Everything else: style, wording, naming, a test that could pin more, a risk you did not demonstrate, hardening for a failure nobody has observed. | Stays in the review. Never an issue. |
+
+"No findings" is a valid review.
+
+A later round checks that each `blocking` finding is fixed and reviews what the
+fix changed. It does not search the rest of the PR again. If the fix adds new
+behavior, review that part as new code. A `blocking` defect you notice anywhere
+still blocks.
+
+Submit reviews with `gh pr review`. Approve when no `blocking` finding remains.
+There is no limit on rounds.
 
 ## 7. Merge
 

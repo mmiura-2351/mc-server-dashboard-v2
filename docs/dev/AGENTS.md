@@ -9,8 +9,8 @@ checklist. It is written for machine consumption and may be reorganized freely
 for that purpose without affecting the human-facing docs.
 
 Read before touching anything, in order:
-[`../../CLAUDE.md`](../../CLAUDE.md) (behavioral rules — simplicity first,
-surgical changes), [`CONTRIBUTING.md`](CONTRIBUTING.md) (the change workflow),
+[`../../AGENTS.md`](../../AGENTS.md) (behavioral rules and the project
+rules), [`CONTRIBUTING.md`](CONTRIBUTING.md) (the change workflow),
 [`TESTING.md`](TESTING.md) (TDD discipline).
 
 ## 1. The primary checkout is the live-deploy build source
@@ -106,6 +106,10 @@ rebuild ships.
 4. **Clean up after merge** — `git worktree remove --force <path>`. A branch
    held by a lingering worktree blocks `git checkout` / `gh pr checkout` of
    that branch everywhere else, and blocks `gh pr merge --delete-branch`.
+5. **At most three agents write code at once.** Each fresh worktree pays a
+   `make bootstrap`, and the gates run one at a time on this host (Section 3),
+   so more writers only queue behind each other. Reviews and read-only work do
+   not count toward the three.
 
 ## 3. Commands that fail silently
 
@@ -304,6 +308,9 @@ Each one succeeds, or appears to; the damage surfaces later.
   formally approve it (`--approve` fails). Reviews land as comments
   (`gh pr review <N> --comment`); state the verdict in the body, first line
   exactly `VERDICT: APPROVE` or `VERDICT: REQUEST-CHANGES`.
+- Give `rm` literal absolute paths: no `$VAR`, and no relative path after a
+  `cd $VAR`. Claude Code cannot resolve such a target before it runs, and stops
+  for a "Dangerous rm operation" confirmation even when prompts are disabled.
 - Checking out a PR branch that another worktree holds fails. Fallback:
   `git fetch origin pull/<N>/head && git checkout --detach FETCH_HEAD`.
 - `main` branch protection: required statuses `check`, `supply-chain-cooldown`

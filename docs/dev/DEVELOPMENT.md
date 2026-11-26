@@ -8,7 +8,7 @@ This document covers the *mechanics* of working in the tree. The change process
 (issues, branches, commits, pull requests, review, merge) is in
 [`CONTRIBUTING.md`](CONTRIBUTING.md); the test-driven discipline is in
 [`TESTING.md`](TESTING.md); behavioral guidance for writing code is in
-[`../../CLAUDE.md`](../../CLAUDE.md).
+[`../../AGENTS.md`](../../AGENTS.md).
 
 The repo is three services, a web UI, and a shared contract: `api/` (Python),
 `worker/` and `relay/` (Go), `webui/` (React/TypeScript), and `proto/` (the
