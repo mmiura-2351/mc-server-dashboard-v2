@@ -32,6 +32,22 @@ import sys
 APPROVED = "approved"
 LABEL_FLAGS = ("--label", "-l", "--add-label")
 FIELD_FLAGS = ("-f", "-F", "--field", "--raw-field")
+# ``gh api`` flags that take a value, so the value is not read as the endpoint.
+API_VALUE_FLAGS = FIELD_FLAGS + (
+    "-X",
+    "--method",
+    "-H",
+    "--header",
+    "--input",
+    "-q",
+    "--jq",
+    "-t",
+    "--template",
+    "--cache",
+    "--hostname",
+    "-p",
+    "--preview",
+)
 OPERATORS = {";", "&&", "||", "|", "&", "(", ")"}
 
 LABEL_REASON = (
@@ -43,9 +59,7 @@ SUBAGENT_REASON = (
 )
 
 # A here-document body is text, not commands: ``cat > body.md <<EOF ... EOF``.
-HEREDOC = re.compile(
-    r"<<-?\s*(['\"]?)(\w+)\1.*?^\s*\2\s*$", re.DOTALL | re.MULTILINE
-)
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1.*?^\s*\2\s*$", re.DOTALL | re.MULTILINE)
 
 # Used only when the command cannot be tokenised (unbalanced quotes).
 FALLBACK_LABEL = re.compile(
@@ -55,14 +69,53 @@ FALLBACK_LABEL = re.compile(
 )
 
 
+def one_line(command: str) -> str:
+    """Rewrite ``command`` so that a line break outside quotes reads as ``;``.
+
+    Outside quotes it also drops a backslash-newline and a ``#`` comment, as
+    the shell does. Text inside quotes is copied unchanged.
+    """
+    out: list[str] = []
+    quote = ""
+    index = 0
+    while index < len(command):
+        char = command[index]
+        following = command[index + 1 : index + 2]
+        if quote:
+            out.append(char)
+            if char == "\\" and quote == '"' and following:
+                out.append(following)
+                index += 1
+            elif char == quote:
+                quote = ""
+        elif char in "'\"":
+            quote = char
+            out.append(char)
+        elif char == "\\" and following:
+            if following != "\n":
+                out.append(char + following)
+            index += 1
+        elif char == "#" and (not out or out[-1][-1] in " \t;|&("):
+            while index < len(command) and command[index] != "\n":
+                index += 1
+            continue
+        elif char == "\n":
+            out.append(" ; ")
+        else:
+            out.append(char)
+        index += 1
+    return "".join(out)
+
+
 def gh_invocations(command: str) -> list[list[str]]:
     """Return the argument list of every ``gh`` call in ``command``.
 
-    Each list ends at the next shell operator or the next ``gh``.
+    Each list ends at the next shell operator, line break, or ``gh``.
     """
-    command = HEREDOC.sub(" ", command)
+    command = one_line(HEREDOC.sub(" ", command))
     lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
+    lexer.commenters = ""
     tokens = list(lexer)
     calls: list[list[str]] = []
     current: list[str] | None = None
@@ -105,12 +158,26 @@ def adds_approved(args: list[str]) -> bool:
     return False
 
 
+def api_endpoint(args: list[str]) -> str:
+    """The endpoint of a ``gh api`` call: its first argument after ``api`` that
+    is neither a flag nor the value of one."""
+    is_value = False
+    for arg in args[args.index("api") + 1 :]:
+        if is_value:
+            is_value = False
+        elif arg.startswith("-"):
+            is_value = arg in API_VALUE_FLAGS
+        else:
+            return arg
+    return ""
+
+
 def creates_issue(args: list[str]) -> bool:
     words = [arg for arg in args if not arg.startswith("-")]
     if words[:2] in (["issue", "create"], ["issue", "new"]):
         return True
-    if words[:1] == ["api"] and words[1:2]:
-        endpoint = words[1].split("?")[0].rstrip("/")
+    if words[:1] == ["api"]:
+        endpoint = api_endpoint(args).split("?")[0].rstrip("/")
         writes = bool(flag_values(args, FIELD_FLAGS)) or any(
             method.upper() == "POST" for method in flag_values(args, ("-X", "--method"))
         )
@@ -170,8 +237,16 @@ CASES = [
     ("gh issue edit 12 --remove-label approved", False, False),
     ("gh label create approved --description d", False, False),
     ('gh pr create --title "Add the approved label rule" --label chore', False, False),
-    ('gh pr review 9 --comment --body "VERDICT: APPROVE --add-label approved"', True, False),
-    ("gh issue edit 12 --add-label low-priority; gh issue list --label approved", False, False),
+    (
+        'gh pr review 9 --comment --body "VERDICT: APPROVE --add-label approved"',
+        True,
+        False,
+    ),
+    (
+        "gh issue edit 12 --add-label low-priority; gh issue list --label approved",
+        False,
+        False,
+    ),
     ("gh api repos/o/r/issues?labels=approved", True, False),
     ("gh issue comment 12 --body 'not approved yet'", True, False),
     ("make api-test", True, False),
@@ -182,7 +257,8 @@ CASES = [
         False,
     ),
     (
-        "cat > body.md <<EOF\nIt's the owner's call: gh issue edit 3 --add-label approved\nEOF",
+        "cat > body.md <<EOF\n"
+        "It's the owner's call: gh issue edit 3 --add-label approved\nEOF",
         False,
         False,
     ),
@@ -190,6 +266,27 @@ CASES = [
         "cat > b.md <<EOF\ntext\nEOF\ngh issue edit 3 --add-label approved",
         False,
         True,
+    ),
+    # A line break ends a command.
+    ("gh pr edit 7 --add-label chore\ngrep -l approved docs/dev/*.md", False, False),
+    ("gh pr edit 7 --add-label chore\n\ngrep -l approved f", False, False),
+    ("gh pr edit 7 --add-label chore # note\ngrep -l approved f", False, False),
+    ("gh pr edit 7 --add-label chore &&\ngrep -l approved f", False, False),
+    ("make docs-check\ngh issue edit 3 --add-label approved", False, True),
+    ("gh issue edit 3 \\\n  --add-label approved", False, True),
+    ('gh issue edit 3 --body "one\ntwo" --add-label approved', False, True),
+    ('gh issue edit 3 --title "#3 again" --add-label approved', False, True),
+    ("gh issue view o/r#5; gh issue edit 3 --add-label approved", False, True),
+    # ``gh api``: flags may come before the endpoint.
+    ("gh api -X POST repos/o/r/issues -f title=t", True, True),
+    ("gh api --method POST repos/o/r/issues -f title=t", True, True),
+    ('gh api --method POST -H "Accept: x" /repos/o/r/issues -f title=t', True, True),
+    ("gh api -X POST repos/o/r/issues -f title=t", False, False),
+    ("gh api -X GET repos/o/r/issues", True, False),
+    (
+        'gh api repos/o/r/issues/5/comments -f body="see github.com/o/r/issues"',
+        True,
+        False,
     ),
 ]
 

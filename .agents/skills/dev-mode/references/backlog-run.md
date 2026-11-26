@@ -32,7 +32,7 @@ while the owner is away. Do not edit repository files yourself during the run.
 7. **What comes up during the run** goes where `AGENTS.md` Section 5.3 sends
    it. File defects. Collect proposals for the report. When something outside
    the queue blocks a queued issue, such as a flaky gate or a broken tool,
-   record it, set that issue aside, and go on with the rest.
+   file it as a defect, set that issue aside, and go on with the rest.
 8. **A failed or stalled agent.** Judge it by what it did (commits, pushes,
    files), not by its status text. Retry once with a brief that names the
    failure. After a second failure, set the issue aside with the reason.

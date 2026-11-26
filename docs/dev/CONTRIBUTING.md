@@ -167,7 +167,7 @@ class:
 | Class | What it is | What happens |
 |---|---|---|
 | `blocking` | A `Done when` check fails. Or the PR introduces a defect that a user or operator would hit in normal use. Or the PR breaks a repository contract (Section 5) or the gate. | Fixed in this PR. |
-| `defect` | Any other defect you demonstrated: one that needs unlikely conditions, one with a minor effect, or one that was there before the PR. | Does not block. Filed as a `low-priority` issue (Section 1). |
+| `defect` | Any other defect you demonstrated: one that needs unlikely conditions, one with a minor effect, or one that was there before the PR. | Does not block. Filed as an issue (Section 1). |
 | `note` | Everything else: style, wording, naming, a test that could pin more, a risk you did not demonstrate, hardening for a failure nobody has observed. | Stays in the review. Never an issue. |
 
 "No findings" is a valid review.

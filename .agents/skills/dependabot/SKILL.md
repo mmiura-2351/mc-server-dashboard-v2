@@ -86,12 +86,17 @@ seven days.
   too young turns green by itself, because the check re-runs every day.
 - **The lock refresh:** its status is green for every pull request that is not
   Dependabot's, so it proves nothing. The cooldown was applied when the bot
-  resolved the lock. Check that every commit is the bot's, or a companion
-  commit that was reviewed:
+  resolved the lock. Check that nothing else changed it:
 
   ```sh
   gh pr view <N> --json commits --jq '.commits[] | "\(.oid[0:9]) \(.authors[0].login) \(.messageHeadline)"'
   ```
+
+  A normal list has one commit by `github-actions[bot]`, named
+  `chore(deps): refresh Python lockfile`. After it there may be merges of
+  `main` from `update-branch`, and companion commits. Each of those carries
+  the operator's login. Any other commit needs an explanation before you
+  merge.
 
 - **A pin you change by hand** in a companion commit: check its date yourself,
   as `docs/dev/DEPENDENCIES.md` Section 6 says.

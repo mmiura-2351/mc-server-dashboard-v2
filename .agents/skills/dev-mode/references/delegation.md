@@ -25,7 +25,8 @@ Give every agent you start:
 
 - **Writers get their own worktree** and run `make bootstrap` in it once
   (`docs/dev/AGENTS.md` Section 2). Readers, meaning investigation, review,
-  and runtime checks, do not edit tracked files.
+  and runtime checks, commit nothing and push nothing. A reviewer works in its
+  own worktree too, and restores any file it changes to run a check.
 - **Start a fresh agent for each task.** Reuse an agent only for state that is
   costly to move: the author fixing review findings in its own worktree, or
   the reviewer looking at the fix.

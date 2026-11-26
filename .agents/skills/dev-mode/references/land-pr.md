@@ -17,8 +17,11 @@ to (`AGENTS.md` Section 5.1).
    available, and tell it which findings were addressed. Rounds have no limit.
 4. **Step in when the loop stops converging:** the same finding comes back
    after a fix that claimed to address it, or the findings drift away from the
-   "Done when" list. Read the evidence yourself and rule. Either name one
-   final fix, or merge and post your reason on the pull request.
+   "Done when" list. Read the evidence yourself and rule on the finding's
+   class (`docs/dev/CONTRIBUTING.md` Section 6). If it is `blocking`, name
+   one final fix. If it is not, post your reason on the pull request. Merge
+   only when no `blocking` finding remains. If you wrote the code, you cannot
+   rule: ask the owner.
 5. **File the `defect` findings** as issues (`docs/dev/CONTRIBUTING.md`
    Section 1). Leave the `note` findings in the review.
 6. **Runtime check, only when needed:** the behavior cannot be judged from the
