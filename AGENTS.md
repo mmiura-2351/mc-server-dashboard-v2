@@ -84,8 +84,8 @@ dispatch prompt says otherwise, these rules win.
   session, and open issues labelled `approved`. Every other issue is a record,
   not a task.
 - Only the owner applies the `approved` label. Never add it to anything.
-- A run over the backlog fixes its queue when it starts: the `approved` issues
-  open at that moment. An issue that appears during the run is not part of it.
+- A run over the backlog works on the open issues labelled `approved`, and on
+  nothing else. An issue the owner approves during the run joins it.
 - Merge a pull request only for an `approved` issue, or when the owner asks you
   to merge it. Either way, merge only after a review by an agent that did not
   write the code, and with the required checks green.

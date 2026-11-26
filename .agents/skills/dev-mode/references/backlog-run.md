@@ -5,19 +5,22 @@
 Use this for "process the backlog", "run the dev loop", and work that goes on
 while the owner is away. Do not edit repository files yourself during the run.
 
-1. **Fix the queue.** List the open issues labelled `approved`:
+1. **List the queue:** the open issues labelled `approved`.
 
    ```sh
    gh issue list --state open --label approved --json number,title
    ```
 
-   That list is the whole run. Nothing joins it later. If it is empty, report
-   "nothing is approved" and stop. Never pick an issue that lacks the label.
+   If the list is empty, report "nothing is approved" and stop. Never pick an
+   issue that lacks the label. Run the command again each time you finish an
+   issue: an issue the owner approved meanwhile joins the queue, and an issue
+   that lost the label leaves it.
 2. **Read each queued issue with its comments**
    (`gh issue view <N> --json title,body,comments`). A comment can defer the
    issue or change its target. Follow it, or say on the issue why you do not.
-3. **State the exit condition:** every queued issue is merged, or set aside
-   with a reason. Stop when it holds.
+3. **State the exit condition:** a fresh list shows no issue that you have
+   not merged or set aside with a reason. Stop when it holds. Do not wait for
+   the owner to approve more.
 4. **Start the log.** Keep one file in your scratch directory with one row per
    decision: the time, the issue, what you decided, why, a pointer to the
    evidence (a pull request, a commit, a command), and the result. Add rows;
