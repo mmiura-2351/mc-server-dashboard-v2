@@ -2,7 +2,8 @@
 
 **You own the merge. The agent that wrote the code never judges it.**
 
-Land a pull request only for approved work (`AGENTS.md` Section 5.1).
+Land a pull request only for an `approved` issue, or when the owner asks you
+to (`AGENTS.md` Section 5.1).
 
 1. **Review.** Start a fresh agent that has not seen how the code was written,
    and have it follow `.agents/skills/review-change/SKILL.md` on the pull

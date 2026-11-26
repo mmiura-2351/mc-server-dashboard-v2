@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/agent_guard.py\"",
+            "command": "f=\"$(git rev-parse --show-toplevel 2>/dev/null)/scripts/agent_guard.py\"; [ -f \"$f\" ] || exit 0; python3 \"$f\"",
             "timeout": 10
           }
         ]

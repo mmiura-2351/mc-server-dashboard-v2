@@ -42,6 +42,11 @@ SUBAGENT_REASON = (
     "(AGENTS.md Section 5.3)."
 )
 
+# A here-document body is text, not commands: ``cat > body.md <<EOF ... EOF``.
+HEREDOC = re.compile(
+    r"<<-?\s*(['\"]?)(\w+)\1.*?^\s*\2\s*$", re.DOTALL | re.MULTILINE
+)
+
 # Used only when the command cannot be tokenised (unbalanced quotes).
 FALLBACK_LABEL = re.compile(
     r"\bgh\s+(?:issue|pr)\s+(?:create|new|edit)\b[^\n;|&]*?"
@@ -55,6 +60,7 @@ def gh_invocations(command: str) -> list[list[str]]:
 
     Each list ends at the next shell operator or the next ``gh``.
     """
+    command = HEREDOC.sub(" ", command)
     lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     tokens = list(lexer)
@@ -117,7 +123,8 @@ def decide(command: str, is_subagent: bool) -> str | None:
     try:
         calls = gh_invocations(command)
     except ValueError:
-        return LABEL_REASON if FALLBACK_LABEL.search(command) else None
+        text = HEREDOC.sub(" ", command)
+        return LABEL_REASON if FALLBACK_LABEL.search(text) else None
     for args in calls:
         if adds_approved(args):
             return LABEL_REASON
@@ -169,6 +176,21 @@ CASES = [
     ("gh issue comment 12 --body 'not approved yet'", True, False),
     ("make api-test", True, False),
     ("echo it's fine", False, False),
+    (
+        "cat > body.md <<'EOF'\nRun gh issue edit 3 --add-label approved\nEOF",
+        False,
+        False,
+    ),
+    (
+        "cat > body.md <<EOF\nIt's the owner's call: gh issue edit 3 --add-label approved\nEOF",
+        False,
+        False,
+    ),
+    (
+        "cat > b.md <<EOF\ntext\nEOF\ngh issue edit 3 --add-label approved",
+        False,
+        True,
+    ),
 ]
 
 # (hook payload, refused?) -- input the script cannot read is always allowed.

@@ -86,8 +86,9 @@ dispatch prompt says otherwise, these rules win.
 - Only the owner applies the `approved` label. Never add it to anything.
 - A run over the backlog fixes its queue when it starts: the `approved` issues
   open at that moment. An issue that appears during the run is not part of it.
-- Merge a pull request only for approved work, after a review by an agent that
-  did not write the code and with the required checks green.
+- Merge a pull request only for an `approved` issue, or when the owner asks you
+  to merge it. Either way, merge only after a review by an agent that did not
+  write the code, and with the required checks green.
 
 ### 5.2 Scope
 
@@ -129,7 +130,7 @@ git, docker, or the gate here.
 
 | Rule | Enforced by |
 |---|---|
-| Only the owner applies `approved` | `scripts/agent_guard.py`, run before every shell command by Claude Code (`.claude/settings.json`) and Codex (`.codex/hooks.json`) |
+| Only the owner applies `approved` | `scripts/agent_guard.py`, run before every shell command by Claude Code (`.claude/settings.json`) and by Codex (`.codex/hooks.json`). Codex runs it only where the project is trusted and the hook has been reviewed with `/hooks`, so not in an untrusted worktree. |
 | A subagent does not file issues | The same hook, in Claude Code only: Codex does not tell a hook which agent is calling |
 | Branch work stays out of the root checkout | `.githooks/post-checkout` |
 | The gate passes before a push | `.githooks/pre-push` |
