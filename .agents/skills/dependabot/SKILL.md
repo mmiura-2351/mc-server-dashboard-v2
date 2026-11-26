@@ -55,8 +55,9 @@ Run this only when the owner asks. Their request is what allows the merges
 | The pull request causes the failure, or you cannot tell | Leave it open |
 
 **To leave a pull request open,** comment on it with the failing check and
-its failure signature, and list it under Attention in your report. Do not file
-an issue for it: the open pull request is the record.
+its failure signature, and list it under Attention in your report. If a
+comment there already gives the same signature, do not add another. Do not
+file an issue for it: the open pull request is the record.
 
 ### A red check that is not required
 
@@ -124,7 +125,9 @@ Some bumps need a second change that Dependabot cannot make.
 2. Push through the hooks. Never use `--no-verify`
    (`docs/dev/CONTRIBUTING.md` Section 4).
 3. Before the merge, an agent that did not write the commit reviews it with
-   `.agents/skills/review-change/SKILL.md` (`AGENTS.md` Section 5.1).
+   `.agents/skills/review-change/SKILL.md` (`AGENTS.md` Section 5.1). A
+   dependency pull request has no "Done when" list, so give the reviewer one:
+   the pattern's check command passes, and the commit changes nothing else.
 4. Remove the worktree and its local branch before you merge. Otherwise
    `--delete-branch` fails on the local branch after the merge has succeeded.
 

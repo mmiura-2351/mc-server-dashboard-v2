@@ -41,8 +41,10 @@ that changes files is a companion commit (`SKILL.md`, Companion commits).
   `trailer <old> disagrees with adopted versions ['<new>']`.
 - **Cause:** Dependabot moved the branch to a newer release, and its commit
   message still names the older one.
-- **Fix:** comment `@dependabot recreate` on the pull request. Do this before
-  any companion commit, because it discards them.
+- **Fix** (inferred, not yet observed for this failure): comment
+  `@dependabot recreate` on the pull request. Dependabot then rewrites its
+  commit. Do this before any companion commit, because it discards them. If
+  the status is still red afterwards, leave the pull request open.
 
 ## `docker` `/api`: a uv bump fails `check_uv_pins.py`
 
