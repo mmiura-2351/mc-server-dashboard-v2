@@ -12,7 +12,8 @@ while the owner is away. Do not edit repository files yourself during the run.
    ```
 
    If the list is empty, report "nothing is approved" and stop. Never pick an
-   issue that lacks the label. Run the command again each time you finish an
+   issue that lacks the label, and never add the label during a run unless
+   the owner names the issue. Run the command again each time you finish an
    issue: an issue the owner approved meanwhile joins the queue, and an issue
    that lost the label leaves it.
 2. **Read each queued issue with its comments**

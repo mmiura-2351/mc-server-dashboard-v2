@@ -17,7 +17,8 @@ conventions are in [`../README.md`](../README.md).
 ## 1. Issues
 
 The tracker is a record. An issue becomes work only when the repository owner
-labels it `approved`. Nobody else applies that label.
+approves it. The owner applies the `approved` label, or tells an agent which
+issues to label. An agent never labels an issue the owner did not name.
 
 - **A defect you find while doing other work** is not fixed in the current PR.
   The lead of the session files it, one issue per defect:
@@ -47,7 +48,7 @@ labels it `approved`. Nobody else applies that label.
 
 | Issue label | Meaning | Who applies it |
 |---|---|---|
-| `approved` | This is work to do | The owner only |
+| `approved` | This is work to do | The owner, or an agent for the issues the owner named |
 | `low-priority` | A recorded defect that nobody works on until it is approved | Whoever files it |
 
 ## 2. Plan before implementing

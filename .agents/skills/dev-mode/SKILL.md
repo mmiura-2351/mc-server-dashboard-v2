@@ -29,6 +29,7 @@ disagree, `AGENTS.md` wins.
 | A change is ready for review | `references/open-pr.md` |
 | An open pull request needs review, fixes, and a merge | `references/land-pr.md` |
 | "Process the backlog", "run the dev loop", work while the owner is away | `references/backlog-run.md` |
+| "What should I approve?", sorting the open issues | `references/triage.md` |
 
 If no playbook fits, say so, propose the steps, and wait for the owner's go.
 
