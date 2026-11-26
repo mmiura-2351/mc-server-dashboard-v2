@@ -825,7 +825,7 @@ and only at its next check, up to a minute late. PostgreSQL, the worker scratch,
 the API's temporary files and the container logs keep writing into the
 remaining 5%, and so does SeaweedFS itself: delete tombstones into its volumes,
 the filer's metadata store, and its own logs. While the store is low, the filer
-retries its metadata-log write about once a second after a metadata change,
+retries its metadata-log write about every 0.75 s after a metadata change,
 logging `metadata log write failed` each time, so its log grows several times
 faster. The minimum keeps the store from taking the last of the disk; it does
 not keep the disk from filling.
@@ -863,7 +863,8 @@ gets less. SeaweedFS does not create volumes one at a time: a collection that
 needs a volume gets 7 at once by default, and the bucket (`mcsd`) and the
 filer's metadata log (collection `""`) are separate collections. Whichever of
 the two needs a volume first takes 7 of the 8 slots, and the other gets what is
-left. The filer first writes its metadata log a minute after it starts:
+left. The filer normally first writes its metadata log a minute after it
+starts:
 
 - If the first S3 write comes before that, `mcsd` takes 7 and the metadata log
   the last one. The bucket's ceiling is then about 210 GiB. Production is in
@@ -990,13 +991,17 @@ MAILTO=ops@example.com
 ```
 
 The store's own log shows when it has stopped writing. While the store is low,
-the filer's metadata-log retries (`metadata log write failed`, about one a
-second) name `No writable volumes` too; the second `grep` drops them:
+the filer retries its metadata-log write about every 0.75 s, and each retry
+logs `No writable volumes` twice: on the filer's `metadata log write failed`
+line, and on the master's assign line. Both name the metadata log's empty
+collection, as `for collection: replication:…`, where a write to the bucket
+names it, as `for collection:mcsd replication:…`. The second `grep` drops both
+kinds:
 
 ```sh
 docker compose logs seaweedfs \
   | grep -i -E 'disk free .* < required|disk status:|no writable volumes' \
-  | grep -v 'metadata log write failed'
+  | grep -v -e 'for collection: replication:' -e 'metadata log write failed'
 ```
 
 - `dir /data disk free 3.21% < required 5.00%`: the volumes are read-only for
