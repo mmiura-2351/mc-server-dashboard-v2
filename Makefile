@@ -539,6 +539,7 @@ scripts-test-cheap:
 	python3 scripts/check_uv_pins.py
 	python3 scripts/supply_chain_cooldown.py --self-test
 	python3 scripts/check_compose_topology.py --self-test
+	python3 scripts/agent_guard.py --self-test
 	bash scripts/test_shell_pipefail.sh
 	bash scripts/test_check_parallel_identity.sh
 	bash scripts/test_check_parallel_lock.sh
