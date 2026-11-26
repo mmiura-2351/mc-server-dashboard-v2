@@ -802,9 +802,10 @@ still free, instead of at SeaweedFS's 1% default.
   work.
 - The automatic vacuum still compacts a volume that is read-only for this reason
   alone, so the space held by garbage still comes back.
-- SeaweedFS checks free space when it starts and then once a minute. At the
-  first check that finds 5% or more free, the volumes are writable again. Nothing
-  has to be restarted.
+- SeaweedFS checks free space when it starts and then once a minute, and the
+  master learns the result at the next heartbeat, which runs every 5 seconds. So
+  the volumes are writable again within about a minute of 5% or more becoming
+  free. Nothing has to be restarted.
 
 SeaweedFS measures free space as `df`'s `Avail` divided by its `Size`. That can
 be lower than `100% - Use%`, because `Use%` leaves the blocks the filesystem
@@ -845,12 +846,17 @@ is less than that: plan for the larger of 5% and 30 GiB free.
 **Volume slots.** `compose.yaml` sets no `-volume.max`, so `weed server` keeps
 its default of 8 volumes, each up to 30 GiB: the store holds about 240 GiB of
 volume data at most, garbage included until it is vacuumed, however large the
-disk. Past that, writes fail with `No writable volumes` while `df` still shows
-free space. The first line `volume.list` prints in the SeaweedFS shell shows the
-slots, as `volume:<used>/<max>` and `free:<n>`. Low disk fails writes with the
-same message and also shows `free:0`, because a read-only disk offers no slot;
-only low disk logs the `disk free … < required` line (next subsection). Raising
-`-volume.max` is a change to `compose.yaml`.
+disk. SeaweedFS does not create volumes one at a time. A collection that needs a
+volume gets 7 at once by default, and the bucket and the filer's metadata log are
+separate collections, so a healthy store can have all or nearly all of its 8
+slots in use early on, and one collection's share of the 240 GiB can be much
+smaller. A used-up slot count in `volume.list` is therefore not a warning by
+itself. The signal that the slots have run out is writes failing with
+`No writable volumes and no free volumes left for …` while no
+`disk free … < required` line is logged (next subsection): no volume of the
+collection takes writes, and no slot is left to grow one. Low disk fails writes
+with the same message, and the `disk free` line is what tells the two apart.
+Raising `-volume.max` is a change to `compose.yaml`.
 
 **The API's temporary files.** On the object backend the API spools whole
 archives in its container's temporary directory. That directory and the store's
@@ -873,29 +879,44 @@ server container keeps up to 250 MB at the worker's defaults
 #### Not provided: disk-usage alerting
 
 There is **no automated early warning** before the disk fills: the stack does
-not watch the host's disk. Set up a check on the host. This script prints each
-filesystem of the stack with less than `THRESHOLD` percent free, measured as
-SeaweedFS measures it, and exits 1 if there is one. Add `MCSD_SCRATCH_DIR` to
-the list when it is on a filesystem of its own. It runs as root, because the
-volume directories under `/var/lib/docker` are closed to other users.
+not watch the host's disk. Set up a check on the host. This script checks the
+directory of each volume in `VOLUMES` and each path in `EXTRA_DIRS`, measured
+as SeaweedFS measures it. It prints a line for each one with less than
+`THRESHOLD` percent free and for each one it could not measure, and exits 1 if
+it printed any. On a single host the volumes share one filesystem, so a full
+disk prints one line per volume. It runs as root, because the volume
+directories under `/var/lib/docker` are closed to other users.
+
+- `VOLUMES` holds Docker volume names, `<project>_<volume>`. They are
+  `mcsd_seaweedfs-data` and `mcsd_db-data` for the `mcsd` project that
+  `compose.yaml` pins. A stack started with `-p <name>` or
+  `COMPOSE_PROJECT_NAME=<name>` has `<name>_seaweedfs-data` and
+  `<name>_db-data` instead; `docker volume ls` lists them.
+- `EXTRA_DIRS` holds plain paths. Add `MCSD_SCRATCH_DIR` there when it is on a
+  filesystem of its own, for example `EXTRA_DIRS="/opt/mcsd/scratch"`.
 
 ```sh
 #!/bin/sh
 # /usr/local/sbin/mcsd-disk-check
 THRESHOLD=15
+VOLUMES="mcsd_seaweedfs-data mcsd_db-data"
+EXTRA_DIRS=""
+dirs=$(docker volume inspect --format '{{ .Mountpoint }}' $VOLUMES) && [ -n "$dirs" ] || {
+  echo "mcsd-disk-check: cannot find the directories of: $VOLUMES"
+  exit 1
+}
 status=0
-for dir in $(docker volume inspect --format '{{ .Mountpoint }}' \
-    mcsd_seaweedfs-data mcsd_db-data); do
+for dir in $dirs $EXTRA_DIRS; do
   df -P "$dir" | awk -v t="$THRESHOLD" -v d="$dir" '
-    NR == 2 && $4 * 100 / $2 < t {
-      printf "%s: %.1f%% free, below %d%%\n", d, $4 * 100 / $2, t
-      exit 1
-    }' || status=1
+    NR == 2 { free = $4 * 100 / $2
+              if (free < t) { printf "%s: %.2f%% free, below %d%%\n", d, int(free * 100) / 100, t; low = 1 } }
+    END { if (NR < 2) { printf "%s: df gave no figures\n", d; exit 1 }
+          exit low }' || status=1
 done
 exit "$status"
 ```
 
-A systemd timer runs it every ten minutes. A run that found one shows in
+A systemd timer runs it every ten minutes. A run that exits 1 shows in
 `systemctl --failed`, and its output in `journalctl -u mcsd-disk-check`:
 
 ```ini
@@ -928,7 +949,7 @@ sudo systemctl enable --now mcsd-disk-check.timer
 
 For mail instead, run it from cron, which mails a job's output to `MAILTO` (this
 needs a working local mail transfer agent). The script prints nothing while
-every filesystem is above the threshold:
+every directory is measured and above the threshold:
 
 ```sh
 # /etc/cron.d/mcsd-disk-check
@@ -947,9 +968,13 @@ docker compose logs seaweedfs | grep -i -E 'disk free .* < required|disk status:
 - `disk status:` followed by the filesystem's figures: more than 95% of it is
   used, the same point as the 5% minimum. Logged at every free-space check while
   it lasts.
-- `No writable volumes` (or `no writable volumes for …, volume growth in
-  progress`): a write found no writable volume. With the low-disk line it is low
-  disk; without it, the volume slots are used up (Disk headroom above).
+- `No writable volumes and no free volumes left for …`: a write found no
+  writable volume and no free slot to grow one. With the low-disk line it is low
+  disk; without it, the volume slots are used up (Disk headroom above). Other
+  writes failing at the same moment can log the shorter `No writable volumes`.
+- `no writable volumes for …, volume growth in progress`: a write came while
+  SeaweedFS was still creating volumes, with slots free. It is transient, and not
+  a sign that the store is full.
 
 `volume.list` from the SeaweedFS shell (as in Diagnosis above) shows the
 per-volume garbage backlog.
@@ -1784,16 +1809,23 @@ container was replaced, so the existing stamp still describes what is running.
 > brings `-volume.minFreeSpace=5` (issue #4149) recreates `seaweedfs` with it.
 > If less than 5% of the filesystem that holds the `seaweedfs-data` volume is
 > free, every volume comes up read-only, and snapshots, backups and uploads fail
-> until space is freed. Check before updating:
+> until space is freed. Check before updating (the volume is
+> `<name>_seaweedfs-data` for a stack under another project name):
 >
 > ```sh
 > sudo df -P "$(docker volume inspect --format '{{ .Mountpoint }}' mcsd_seaweedfs-data)" \
->   | awk 'NR == 2 { printf "%.1f%% free\n", $4 * 100 / $2 }'
+>   | awk 'NR == 2 { free = $4 * 100 / $2
+>                    printf "%.2f%% free: %s\n", int(free * 100) / 100, (free < 5 ? "BELOW 5%, free space first" : "ok") }
+>          END { if (NR < 2) print "no figures: check the volume name" }'
 > ```
 >
-> Below 5.0%, free space first (Section 5, "Recovery"). Once 5% is free, the
-> volumes are writable again within a minute, with no restart. See Section 5,
-> "Disk headroom".
+> SeaweedFS treats anything strictly below 5% as low. The verdict compares the
+> full figure the same way, and the figure is cut, not rounded, to two decimals:
+> 4.97% prints `4.97% free: BELOW 5%, free space first`, and 4.999% prints
+> `4.99% free: BELOW 5%, free space first`.
+> For a verdict of BELOW, free space first (Section 5, "Recovery"). Once 5% is
+> free, the volumes are writable again within about a minute, with no restart.
+> See Section 5, "Disk headroom".
 
 > **Caveat — Bedrock is opt-in on the relay.** The relay's
 > Bedrock QUIC/UDP tunnel listener is gated on `bedrock.enabled` (`relay.toml`) /
