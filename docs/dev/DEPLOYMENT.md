@@ -861,12 +861,21 @@ its default of 8 volumes, each up to 30 GiB: about 240 GiB of volume data at
 most, garbage included until it is vacuumed, however large the disk. The bucket
 gets less. SeaweedFS does not create volumes one at a time: a collection that
 needs a volume gets 7 at once by default, and the bucket (`mcsd`) and the
-filer's metadata log (collection `""`) are separate collections. On 4.54 the
-first S3 write created 7 volumes for `mcsd` in one step, and the metadata log
-took the eighth about 15 seconds later. A healthy store therefore shows
-`volume:8/8 active:8 free:0` in `volume.list` almost from its first write, and
-the bucket holds 7 × 30 GiB, about 210 GiB, at most. Its ceiling is the number
-of `mcsd` volumes `volume.list` lists, times 30 GiB.
+filer's metadata log (collection `""`) are separate collections. Whichever of
+the two needs a volume first takes 7 of the 8 slots, and the other gets what is
+left. The filer first writes its metadata log a minute after it starts:
+
+- If the first S3 write comes before that, `mcsd` takes 7 and the metadata log
+  the last one. The bucket's ceiling is then about 210 GiB. Production is in
+  this state (issue #2786).
+- If the metadata log comes first, it takes the 7, and the bucket is left with
+  about one volume, about 30 GiB. This case is inferred from the growth count:
+  a check on 4.54 saw the metadata log grow first and create volumes 1-3, but
+  did not observe the rest.
+
+Check the split with `volume.list`: the bucket's ceiling is the number of
+`mcsd` volumes it lists, times 30 GiB. `free:` does not show it, because a
+healthy store shows `volume:8/8 active:8 free:0` almost from its first write.
 
 So a full slot count is normal, not a warning. The signal that the slots
 have run out is writes failing with `No writable volumes and no free volumes
@@ -875,7 +884,7 @@ subsection): no volume of the collection takes writes, and no slot is left to
 grow one. Low disk fails writes with the same message, and the `disk free` line
 is what tells the two apart; in `volume.list` low disk shows as `active:0`, with
 every volume `ReadOnly:true`. Raising `-volume.max` is a change to
-`compose.yaml`.
+`compose.yaml`; issue #2786 tracks it.
 
 **The API's temporary files.** On the object backend the API spools whole
 archives in its container's temporary directory. That directory and the store's
