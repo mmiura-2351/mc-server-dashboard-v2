@@ -32,7 +32,10 @@ Run this only when the owner asks. Their request is what allows the merges
       Every merge puts the other pull requests behind `main`, and a check that
       ran on an old base proves nothing.
    2. Wait for the required checks: `gh pr checks <N> --required --watch`.
-      Then read every check: `gh pr checks <N>`.
+      Then read every check: `gh pr checks <N>`. To read a failed job's log,
+      take the job id from the end of the check's URL:
+      `gh api repos/{owner}/{repo}/actions/jobs/<job-id>/logs`.
+      `gh run view --log-failed` prints nothing with the `gh` on this host.
    3. Read the diff: `gh pr diff <N>`.
    4. Decide (see Decisions).
    5. To merge: `gh pr merge <N> --squash --delete-branch`. Then read the
