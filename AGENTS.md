@@ -107,6 +107,7 @@ dispatch prompt says otherwise, these rules win.
 | You found | Do this |
 |---|---|
 | A defect you can demonstrate, outside your task | Report it to the lead of the session. The lead files one issue per defect, labelled `low-priority` unless a user or operator would hit it in normal use (`docs/dev/CONTRIBUTING.md` Section 1). Nobody works on it until the owner approves it. |
+| A problem with this machine and not with the repository: an old or missing local tool, a full disk, agents that got in each other's way | Never an issue. List it under "Attention" in your final report. The one exception: if following the docs alone reproduces it, the docs are wrong, and that is a defect in the docs. |
 | An idea for new work: a feature, a refactor, a tool, a process change, a decision the owner must make | List it under "Proposals" in your final report. Do not open an issue. |
 | Anything else: a wording or style point, a test that could pin more, a risk you did not demonstrate | Mention it in the review at most. Never an issue. |
 

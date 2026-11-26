@@ -31,6 +31,14 @@ labels it `approved`. Nobody else applies that label.
      the scale of [`../REQUIREMENTS.md`](../REQUIREMENTS.md) Section 1.1.
 
   A subagent does not file issues. It reports the defect to the lead.
+- **A problem with the local machine or the host** is never an issue: an old
+  or missing local tool, a full disk, agents that got in each other's way. A
+  pull request cannot fix the machine, so an issue for it can never close. Ask
+  one question: does following the docs, and nothing else, reproduce it?
+  - Yes: the docs are wrong or incomplete. That is a defect in the docs, and
+    it is filed like any other defect. Search the docs for the command or the
+    requirement first, to be sure they say it.
+  - No: report it to the owner in your final report, and file nothing.
 - **An idea for new work** — a feature, a refactor, tooling, a process change,
   a decision the owner must make — is not filed by an agent. It goes in the
   final report as a proposal, and the owner files what they want done.
