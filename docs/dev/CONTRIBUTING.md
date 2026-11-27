@@ -204,3 +204,7 @@ paragraphs. Avoid rebase- or merge-commit modes unless explicitly asked.
 
 An issue is closed only after the PR that addresses it is merged. The closing
 comment includes a one-line summary and the PR/commit reference.
+
+The exception is an issue the owner decides not to work on: a duplicate, one
+that `main` already fixes, or one that is not planned. The owner closes it, or
+names it for an agent to close, and the closing comment gives the reason.

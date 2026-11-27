@@ -37,7 +37,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shlex
 import sys
 import tempfile
 import unicodedata
@@ -62,7 +61,6 @@ API_VALUE_FLAGS = FIELD_FLAGS + (
     "-p",
     "--preview",
 )
-OPERATORS = {";", "&&", "||", "|", "&", "(", ")"}
 
 # Where the numbers the owner typed are kept, one file per session.
 STATE_DIR = Path(tempfile.gettempdir()) / f"agent-guard-{os.getuid()}"
@@ -95,64 +93,90 @@ FALLBACK_LABEL = re.compile(
 )
 
 
-def one_line(command: str) -> str:
-    """Rewrite ``command`` so that a line break outside quotes reads as ``;``.
+def shell_tokens(command: str) -> list[tuple[str, bool]]:
+    """Split ``command`` into words and operators, as a shell reads it.
 
-    Outside quotes it also drops a backslash-newline and a ``#`` comment, as
-    the shell does. Text inside quotes is copied unchanged.
+    Returns ``(text, is_operator)`` pairs. The operators are ``;``, ``&``,
+    ``|``, ``(``, ``)`` and a line break, and only outside quotes: a quoted
+    ``"|"`` is a word. Quotes and escaping backslashes are removed from words.
+    A ``#`` comment and a backslash-newline are dropped. Raises ValueError when
+    a quote is left open.
     """
-    out: list[str] = []
+    tokens: list[tuple[str, bool]] = []
+    word: str | None = None
     quote = ""
     index = 0
     while index < len(command):
         char = command[index]
         following = command[index + 1 : index + 2]
         if quote:
-            out.append(char)
-            if char == "\\" and quote == '"' and following:
-                out.append(following)
-                index += 1
-            elif char == quote:
+            if char == quote:
                 quote = ""
+            elif char == "\\" and quote == '"' and following in ('"', "\\", "$", "`"):
+                word = (word or "") + following
+                index += 1
+            else:
+                word = (word or "") + char
         elif char in "'\"":
             quote = char
-            out.append(char)
+            word = word or ""
         elif char == "\\" and following:
             if following != "\n":
-                out.append(char + following)
+                word = (word or "") + following
             index += 1
-        elif char == "#" and (not out or out[-1][-1] in " \t;|&("):
+        elif char in " \t\r":
+            if word is not None:
+                tokens.append((word, False))
+                word = None
+        elif char == "#" and word is None:
             while index < len(command) and command[index] != "\n":
                 index += 1
             continue
-        elif char == "\n":
-            out.append(" ; ")
+        elif char in "&|" and (
+            (word or "")[-1:] in ("<", ">") or (char == "&" and following == ">")
+        ):
+            word = (word or "") + char  # part of a redirect: 2>&1, >|, &>
+        elif char in ";&|()\n":
+            if word is not None:
+                tokens.append((word, False))
+                word = None
+            tokens.append((char, True))
         else:
-            out.append(char)
+            word = (word or "") + char
         index += 1
-    return "".join(out)
+    if quote:
+        raise ValueError("unclosed quote")
+    if word is not None:
+        tokens.append((word, False))
+    return tokens
 
 
 def gh_invocations(command: str) -> list[list[str]]:
     """Return the argument list of every ``gh`` call in ``command``.
 
-    Each list ends at the next shell operator, line break, or ``gh``.
+    A call starts at a ``gh`` word that is not itself an argument of a ``gh``
+    call, and ends at the next ``;``, ``&``, ``|`` or line break. A ``$(...)``
+    inside a call does not end it: the call goes on after the ``)``, with the
+    ``$`` left among its arguments. The ``gh`` calls inside the parentheses
+    are returned as well.
     """
-    command = one_line(HEREDOC.sub(" ", command))
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
-    lexer.whitespace_split = True
-    lexer.commenters = ""
-    tokens = list(lexer)
     calls: list[list[str]] = []
     current: list[str] | None = None
-    for token in tokens:
-        if token == "gh" or token.endswith("/gh"):
-            current = []
-            calls.append(current)
-        elif token in OPERATORS:
+    outer: list[list[str] | None] = []
+    for text, is_operator in shell_tokens(HEREDOC.sub(" ", command)):
+        if not is_operator:
+            if current is not None:
+                current.append(text)
+            elif text == "gh" or text.endswith("/gh"):
+                current = []
+                calls.append(current)
+        elif text == "(":
+            outer.append(current)
             current = None
-        elif current is not None:
-            current.append(token)
+        elif text == ")":
+            current = outer.pop() if outer else None
+        else:
+            current = None
     return calls
 
 
@@ -210,7 +234,7 @@ def named_numbers(session_id: object) -> frozenset[str]:
     path = state_path(session_id)
     try:
         return frozenset(path.read_text().split()) if path else frozenset()
-    except OSError:
+    except (OSError, ValueError):  # ValueError: the file is not text
         return frozenset()
 
 
@@ -380,6 +404,23 @@ CASES = [
     ('gh issue edit 3 --body "one\ntwo" --add-label approved', False, True),
     ('gh issue edit 3 --title "#3 again" --add-label approved', False, True),
     ("gh issue view o/r#5; gh issue edit 3 --add-label approved", False, True),
+    # An operator inside quotes, a redirect, or a ``gh`` argument ends no call.
+    ('gh issue edit 3 --title "|" --add-label approved', False, True),
+    ("gh issue edit 3 --title ';' --add-label approved", False, True),
+    ("gh issue edit 3 --title gh --add-label approved", False, True),
+    ("gh issue edit 3 2>&1 --add-label approved", False, True),
+    ("gh issue edit 3 &>/dev/null --add-label approved", False, True),
+    ("gh issue list --label approved 2>&1 | head -3", False, False),
+    ("(cd /tmp && gh issue list --label approved) && gh pr list", False, False),
+    # A command substitution is an argument, not the end of the call.
+    ("gh issue edit $(cat nums.txt) --add-label approved", False, True),
+    (
+        'gh issue edit $(gh issue list --json number --jq ".[].number") '
+        "--add-label approved",
+        False,
+        True,
+    ),
+    ("gh issue edit `cat nums.txt` --add-label approved", False, True),
     # ``gh api``: flags may come before the endpoint.
     ("gh api -X POST repos/o/r/issues -f title=t", True, True),
     ("gh api --method POST repos/o/r/issues -f title=t", True, True),
@@ -410,6 +451,12 @@ NAMED_CASES = [
         True,
     ),
     ("gh issue create --title t --label approved", False, {"12"}, True),
+    ("gh issue edit 12 $(cat more.txt) --add-label approved", False, {"12"}, True),
+    ("gh issue edit $(echo 12) --add-label approved", False, {"12"}, True),
+    ("gh issue edit 12 --add-label approved 2>&1", False, {"12"}, True),
+    ("(cd /tmp && gh issue edit 12 --add-label approved)", False, {"12"}, False),
+    ("gh issue edit 12 --add-label approved && gh issue list", False, {"12"}, False),
+    ("gh issue edit 12 --add-label approved | cat", False, {"12"}, False),
     ("gh pr edit 12 --add-label approved", False, {"12"}, True),
     (
         'gh api -X POST repos/o/r/issues/12/labels -f "labels[]=approved"',
@@ -509,6 +556,9 @@ def self_test() -> int:
                 "s3"
             ]:
                 failures.append("flow: unexpected record files")
+            (STATE_DIR / "s5").write_bytes(b"\xff\xfe\n")
+            if reason_for(json.dumps({**LABEL_77, "session_id": "s5"})) is None:
+                failures.append("flow: a record that is not text must refuse")
         finally:
             STATE_DIR = real_state_dir
     failures += [
