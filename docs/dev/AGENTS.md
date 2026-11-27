@@ -9,8 +9,8 @@ checklist. It is written for machine consumption and may be reorganized freely
 for that purpose without affecting the human-facing docs.
 
 Read before touching anything, in order:
-[`../../CLAUDE.md`](../../CLAUDE.md) (behavioral rules — simplicity first,
-surgical changes), [`CONTRIBUTING.md`](CONTRIBUTING.md) (the change workflow),
+[`../../AGENTS.md`](../../AGENTS.md) (behavioral rules and the project
+rules), [`CONTRIBUTING.md`](CONTRIBUTING.md) (the change workflow),
 [`TESTING.md`](TESTING.md) (TDD discipline).
 
 ## 1. The primary checkout is the live-deploy build source
@@ -106,6 +106,11 @@ rebuild ships.
 4. **Clean up after merge** — `git worktree remove --force <path>`. A branch
    held by a lingering worktree blocks `git checkout` / `gh pr checkout` of
    that branch everywhere else, and blocks `gh pr merge --delete-branch`.
+5. **At most three agents write code at once.** Each fresh worktree pays a
+   `make bootstrap`, and the gates run one at a time on this host (Section 3),
+   so more writers only queue behind each other. Reviewers and other readers
+   do not count toward the three: they push nothing, so they never wait for
+   the gate.
 
 ## 3. Commands that fail silently
 
@@ -140,8 +145,9 @@ Each one succeeds, or appears to; the damage surfaces later.
   [`CONTRIBUTING.md`](CONTRIBUTING.md) Section 4; it is unconditional because a
   bypass is only known to have been harmless *afterwards* — the very fact the
   gate exists to establish beforehand. "Only the known flake" is a prediction,
-  not a result. Escalate a flaky gate as an issue and re-run instead. The
-  re-run keeps the failing run's logs in `check-logs.prev/`, including the api
+  not a result. Report a flaky gate as a defect (root `AGENTS.md` Section 5.3)
+  and re-run instead. The re-run keeps the failing run's logs in
+  `check-logs.prev/`, including the api
   suite's per-worker run order ([`DEVELOPMENT.md`](DEVELOPMENT.md) Section 3),
   but only until the next gate run in that worktree replaces them — a second
   re-run, or the next push. Cite or copy them into the issue before running the
@@ -304,6 +310,9 @@ Each one succeeds, or appears to; the damage surfaces later.
   formally approve it (`--approve` fails). Reviews land as comments
   (`gh pr review <N> --comment`); state the verdict in the body, first line
   exactly `VERDICT: APPROVE` or `VERDICT: REQUEST-CHANGES`.
+- Give `rm` literal absolute paths: no `$VAR`, and no relative path after a
+  `cd $VAR`. Claude Code cannot resolve such a target before it runs, and stops
+  for a "Dangerous rm operation" confirmation even when prompts are disabled.
 - Checking out a PR branch that another worktree holds fails. Fallback:
   `git fetch origin pull/<N>/head && git checkout --detach FETCH_HEAD`.
 - `main` branch protection: required statuses `check`, `supply-chain-cooldown`

@@ -26,3 +26,9 @@ scripts/*.py[cod]
 # clean-tree check (scripts/deploy_preflight.sh) does not refuse a checkout
 # that has one.
 compose.override.yaml
+
+# Agent harness state that belongs to one developer or one session. The shared
+# configuration is tracked: .claude/settings.json, .claude/skills/,
+# .agents/skills/, .codex/hooks.json.
+.claude/settings.local.json
+.claude/worktrees/

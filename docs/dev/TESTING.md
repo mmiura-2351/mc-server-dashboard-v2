@@ -91,7 +91,23 @@ commands are per-component (see each module's `Makefile` targets and CI
 workflow). All components (`api/`, `worker/`, `relay/`, `webui/`) follow the
 same discipline described above.
 
-## 6. References
+## 6. What a change must test
+
+The cycle above is how you write a test. This section is how many you owe.
+
+- **Required.** For each check in the PR's `Done when` list
+  ([`CONTRIBUTING.md`](CONTRIBUTING.md) Section 5), one test that fails without
+  the change and passes with it. Changing an existing test counts, and is
+  better than adding a new one beside it.
+- **Not required, and not a review finding.** A test for every internal branch,
+  a test that kills every mutation of the code, a test for a combination of
+  failures nobody has observed.
+- **No bad tests.** If the only test you can write mostly exercises mocks,
+  depends on timing, or needs a harness far larger than the change, do not
+  write it. Run the closest real check instead — the command, the request, the
+  flow — and put its output in the PR.
+
+## 7. References
 
 - Kent Beck, *Test-Driven Development by Example* — the red/green/refactor
   discipline and the get-to-green strategies (fake it, triangulate, obvious

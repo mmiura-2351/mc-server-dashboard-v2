@@ -1,0 +1,27 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$(git rev-parse --show-toplevel 2>/dev/null)/scripts/agent_guard.py\"; [ -f \"$f\" ] || exit 0; python3 \"$f\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$(git rev-parse --show-toplevel 2>/dev/null)/scripts/agent_guard.py\"; [ -f \"$f\" ] || exit 0; python3 \"$f\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
