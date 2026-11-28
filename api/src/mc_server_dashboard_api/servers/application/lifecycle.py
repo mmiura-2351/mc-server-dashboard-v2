@@ -569,6 +569,8 @@ class StartServer:
             # EULA gate: starting without acceptance would crash the Minecraft
             # process immediately ("You need to agree to the EULA").
             if accept_eula:
+                # eula.txt: a fixed root name the member-name rule admits, so this write
+                # does not ask it (issue #4008).
                 await self.file_store.write_file(
                     community_id=community_id,
                     server_id=server_id,

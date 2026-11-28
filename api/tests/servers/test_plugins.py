@@ -1036,6 +1036,35 @@ async def test_toggle_falls_back_to_cache_when_file_missing() -> None:
     assert fs.files["mods/test.jar.disabled"] == content
 
 
+async def test_a_disabled_name_the_rule_refuses_is_refused_and_changes_nothing() -> (
+    None
+):
+    # A row whose name an import or a restore's ghost jar recorded is not bounded
+    # to leave room for ``.disabled``; on a store that takes any name, the
+    # rename would create a name the Worker cannot hold (issue #4008).
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    path = "mods/" + "n" * 246 + ".jar"
+    fs = FakeFileStore()
+    fs.files[path] = b"jar"
+    p = _plugin(server_id=server.id, enabled=True, rel_path=path)
+    uow.plugins.seed(p)
+    uc = TogglePlugin(
+        uow=uow, file_store=fs, cache=FakePluginCacheStore(), clock=FakeClock(_NOW)
+    )
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await uc(
+            community_id=_COMMUNITY, server_id=server.id, plugin_id=p.id, enable=False
+        )
+    assert caught.value.reason == "name_too_long"
+    stored = await uow.plugins.get_by_id(server.id, p.id)
+    assert stored is not None
+    assert (stored.enabled, stored.rel_path) == (True, path)
+    assert fs.files == {path: b"jar"}
+
+
 # -- Duplicate install (Bug 1) --
 
 

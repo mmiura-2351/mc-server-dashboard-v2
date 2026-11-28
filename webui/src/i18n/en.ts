@@ -1320,8 +1320,10 @@ export const en = {
   "serverCreate.import.noFile": "Choose a ZIP file to import.",
   "serverCreate.import.error.invalid_export_metadata":
     "That archive is not a valid server export.",
+  // Also an entry whose name carries a control character, which no server file
+  // may carry (issue #4008).
   "serverCreate.import.error.invalid_archive":
-    "That file could not be read as a ZIP archive. It may be damaged, incomplete or password-protected. Nothing was created.",
+    "That file could not be read as a ZIP archive. It may be damaged, incomplete or password-protected, or an entry's name may carry a control character. Nothing was created.",
   // The import guard refuses any member stored UNDER the root server.properties
   // path (issue #2869); publishing it would stand a directory where the platform
   // keeps a file. A zip's own directory entries are skipped before the guard, so

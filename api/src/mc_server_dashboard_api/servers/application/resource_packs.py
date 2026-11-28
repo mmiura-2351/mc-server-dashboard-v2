@@ -390,6 +390,8 @@ class AssignResourcePack:
                 # (issue #3927).
                 await lock.ensure_held()
                 try:
+                    # server.properties: a fixed root name the member-name rule admits,
+                    # so this write does not ask it (issue #4008).
                     await self.file_store.write_file(
                         community_id=community_id,
                         server_id=server_id,
@@ -443,6 +445,8 @@ class UnassignResourcePack:
             # (issue #3927).
             await lock.ensure_held()
             if props is not None:
+                # server.properties: a fixed root name the member-name rule admits, so
+                # this write does not ask it (issue #4008).
                 await self.file_store.write_file(
                     community_id=community_id,
                     server_id=server_id,

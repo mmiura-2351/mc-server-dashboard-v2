@@ -1911,14 +1911,22 @@ which the API's constants and the Worker's walk bounds are each tested against:
   `name_too_long`, and on object it is joined to a key prefix; issue #3979
   decides the final number.
 
-The rule is the application's, above this Port: every door that creates a name,
-except those tracked in issue #4008, asks it before anything is written, and
-answers a refusal with that `422` reason. The files-API write (at rest, and
-running, before the Worker is asked), make-dir, upload and each archive member
-joined to the upload's directory, and a rename's destination. A rename judges
-the limits on where a name sits only where the move grows what they bound: the
-depth when the destination has more components than the source, a directory's
-destination counting as a level, and the length when it has more bytes. A limit
+The rule is the application's, above this Port: every door that creates a name
+asks it before anything is written, and answers a refusal with that `422`
+reason. The files-API write (at rest, and running, before the Worker is asked),
+make-dir, upload and each archive member joined to the upload's directory, a
+rename's destination, and a rollback of a file that no longer exists, whose name
+it creates again (issue #4008). A plugin's enable, disable and side change judge
+the name they move or write the jar to, its recorded path with or without
+`.disabled`, since an import's plugin and a restore's ghost jar keep the name
+they came with. The other writers do not ask, as they cannot create a name the
+rule refuses: the fixed root names the platform writes (`server.properties`,
+`eula.txt`, `ops.json` and `whitelist.json`), and a plugin install's or catalog
+update's jar at `<content dir>/<file name>`, one level deep under a file name of
+at most 246 bytes, `.disabled` or not. A rename judges the limits on where a
+name sits only where the move grows what they bound: the depth when the
+destination has more components than the source, a directory's destination
+counting as a level, and the length when it has more bytes. A limit
 the move does not grow makes no name deeper, or longer, than one already there,
 so a name already past a limit can still be renamed at its own level, to a
 longer name too. The destination's components and characters are new, so they
@@ -1942,8 +1950,11 @@ same directory is listed, read or made into. The rename route answers either as
 the 500 it answers for a failed move (issue #3233). The moved names keep their
 characters and are not asked about them, so a directory whose name no path can
 spell moves with the rest. A server import refuses such a member before its row
-exists, and the backup upload gate refuses one as `422 invalid_archive`, its
-`detail` naming the member and the reason, before the archive is stored.
+exists. It judges each member by the path rule (Section 6) there too, and
+answers a member whose name carries a C0 control character or DEL as
+`422 invalid_archive`, which no write could create (issue #4008). The backup
+upload gate refuses one as `422 invalid_archive`, its `detail` naming the member
+and the reason, before the archive is stored.
 
 The files-API doors also refuse the characters an uploaded file's name may not
 carry (issues #3922, #3969, #3988): a `\`, a control character (C0, DEL or C1),

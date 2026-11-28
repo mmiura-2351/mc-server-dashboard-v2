@@ -523,6 +523,10 @@ class InstallFromCatalog:
                             now=now,
                         ),
                     ):
+                        # ``<content dir>/<filename>``: one level deep, under a
+                        # name ``_catalog_filename`` bounds to 246 bytes, so the
+                        # member-name rule admits it and its ``.disabled`` name,
+                        # and this write does not ask it (issue #4008).
                         await self.file_store.write_file(
                             community_id=community_id,
                             server_id=server_id,
@@ -799,6 +803,10 @@ class UpdatePlugin:
                     async with undo_on_failure(
                         self.uow, lambda: self.uow.plugins.update(plugin)
                     ):
+                        # ``<content dir>/<filename>``, ``.disabled`` or not: one
+                        # level deep, under a name ``_catalog_filename`` bounds
+                        # to 246 bytes, so the member-name rule admits it, and
+                        # this write does not ask it (issue #4008).
                         await self.file_store.write_file(
                             community_id=community_id,
                             server_id=server_id,

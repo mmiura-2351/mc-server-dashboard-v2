@@ -482,6 +482,20 @@ class UnreadableArchiveError(ServerError):
         self.refusal = refusal
 
 
+class UnnamableImportMemberError(ServerError):
+    """A server-import member whose name no write to a working set can name (#4008).
+
+    The archive reads, but the path rule every working-set name is built under
+    refuses a member's name: a component carries a C0 control character or DEL.
+    The import refuses it in its dry run, before the server row is created,
+    rather than in the publish after it. That is a verdict about the
+    archive's contents, so the edge maps this to 422 ``invalid_archive``, the
+    reason the backup upload gives a member it refuses. An absolute or ``..``
+    member stays the extraction's own :class:`InvalidFilePathError`
+    (``invalid_path``).
+    """
+
+
 class UploadBusyError(ServerError):
     """Every archive-upload admission slot is taken (issue #3843).
 

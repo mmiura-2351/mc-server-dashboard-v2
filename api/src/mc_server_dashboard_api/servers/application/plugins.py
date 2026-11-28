@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from mc_server_dashboard_api.servers.application.archive_validation import (
     run_archive_validation,
 )
+from mc_server_dashboard_api.servers.application.files import _refuse_unstorable
 from mc_server_dashboard_api.servers.application.plugin_cache import (
     ingest_into_cache,
 )
@@ -114,6 +115,12 @@ async def _reconcile_working_set(
     ``current_path`` / ``desired_path`` are derived from ``(enabled, side)`` via
     :func:`working_set_path`, so the on-disk file always matches the plugin's
     recorded state and the rename branch never targets its own path.
+
+    A materialize or a rename creates ``desired_path``, so it is judged by the
+    member-name rule first, as a files-API door judges a name it creates (issue
+    #4008). It is the stored ``rel_path`` with or without ``.disabled``, and not
+    every door that records a row bounds that name: an import's row and a
+    restore's ghost jar keep the name they came with.
     """
 
     if current_path == desired_path:
@@ -130,6 +137,8 @@ async def _reconcile_working_set(
         except ServerFileNotFoundError:
             pass
         return
+
+    _refuse_unstorable(desired_path, is_dir=False)
 
     if current_path is None:
         # Materialize from the content-addressed cache.
@@ -453,6 +462,10 @@ class InstallPlugin:
                             now=now,
                         ),
                     ):
+                        # ``<content dir>/<filename>``: one level deep, under a
+                        # name the route bounds to the plugin rule's 246 bytes,
+                        # so the member-name rule admits it and its ``.disabled``
+                        # name, and this write does not ask it (issue #4008).
                         await self.file_store.write_file(
                             community_id=community_id,
                             server_id=server_id,
