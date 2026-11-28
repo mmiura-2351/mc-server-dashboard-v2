@@ -369,7 +369,8 @@ def _refuse_unstorable(rel_path: str, *, is_dir: bool) -> None:
     component past 255 bytes ``name_too_long`` and a path past 4,095 bytes
     ``path_too_long``, on either backend alike. A server import and the backup
     upload ask only this, so the platform's own export or backup of names a
-    running server created still uploads again.
+    running server created still uploads again. So does a rollback that creates
+    a deleted name again: the working set held that name before.
     """
 
     reason = member_name_refusal(rel_path, is_dir=is_dir)
@@ -920,6 +921,10 @@ class RollbackFile:
     Rollback republishes the authoritative copy, so it requires the server at rest
     (Section 6.9: a hot replacement of a live working set is unsafe — not in the
     6.9 table, documented here). Running -> :class:`ServerNotStoppedError` (409).
+
+    A rollback of a file that no longer exists creates its name again, so it asks
+    the member-name rule first (:func:`_refuse_unstorable`, issue #4008). A name
+    still there is republished in place, so it does not ask.
     """
 
     uow: UnitOfWork
@@ -944,6 +949,11 @@ class RollbackFile:
                 server = await _load(self.uow, community_id, server_id)
             if not server.is_quiescent():
                 raise server.not_quiescent_error(ServerNotStoppedError)
+            if not await _path_exists(
+                self.file_store, community_id, server_id, rel_path
+            ):
+                # The rollback creates the name again (issue #4008).
+                _refuse_unstorable(rel_path, is_dir=False)
             if _is_root_server_properties(rel_path):
                 # Republishing a retained version is a write of those bytes, so a
                 # version predating a re-port or an RCON rotation would reinstate

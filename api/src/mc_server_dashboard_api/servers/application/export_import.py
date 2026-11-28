@@ -22,8 +22,9 @@ Both reuse the C1 machinery rather than re-implementing it:
   eula.txt).
 
 Failure posture (import): the archive is fully validated (metadata shape AND the
-hardened entry checks — zip-slip, size, entry-count, and the root
-``server.properties`` path of issue #2869) BEFORE the row commits, so a hostile
+hardened entry checks — zip-slip, size, entry-count, the root
+``server.properties`` path of issue #2869, and each member's name under the path
+rule and the member-name rule, issue #4008) BEFORE the row commits, so a hostile
 archive is rejected (413/422) with NO server row created (issue #277).
 Only a genuine storage failure during the post-commit write pass, or a Bedrock
 port-allocation failure (window exhaustion or the concurrent-racer backstop)
@@ -81,6 +82,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PortRangeExhaustedError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
+    UnnamableImportMemberError,
     UnreadableArchiveError,
     WorkingSetSeedFailedError,
 )
@@ -135,7 +137,7 @@ _METADATA_CHUNK_BYTES = 16 * 1024
 
 
 def _validate_import_archive(
-    content: bytes, *, max_bytes: int, max_entries: int
+    file_store: FileStore, content: bytes, *, max_bytes: int, max_entries: int
 ) -> None:
     """Dry-run the import archive, refusing every member before the row commits.
 
@@ -158,6 +160,11 @@ def _validate_import_archive(
     joined target PR #2868 established the guard belongs on; only the ROOT name is
     refused, and a member under a nested ``backups/server.properties/`` directory
     stays ordinary user data.
+
+    Each member's name is judged as the write will judge it, too (issue #4008):
+    the path rule (``file_store.validate_rel_path``), whose refusal is
+    :class:`UnnamableImportMemberError`, then the member-name rule. ``file_store``
+    is only asked that pure check, so this still runs on the archive pool.
     """
 
     for entry_path, _data in _archive_entries(
@@ -173,6 +180,13 @@ def _validate_import_archive(
         # The Worker's generation-marker name (issue #3433): refused, not
         # dropped, so the operator learns why the archive did not import.
         _refuse_reserved_root_name(entry_path)
+        # The path rule the publish writes the member under: a C0 or DEL
+        # character passes every check above, and would otherwise fail the write
+        # after the row had committed (issue #4008).
+        try:
+            file_store.validate_rel_path(entry_path)
+        except InvalidFilePathError as exc:
+            raise UnnamableImportMemberError(entry_path) from exc
         # The member-name rule (issue #3973), not the characters a files-API door
         # refuses: the platform's own export of names a running server created
         # must import again.
@@ -307,8 +321,11 @@ class ImportServer:
     The whole archive is then validated in a dry-run pass
     (:func:`_validate_import_archive`: the hardened ``_archive_entries`` checks —
     zip-slip, size, and entry-count caps — plus the root ``server.properties`` path
-    of issue #2869) BEFORE the row is created, so a hostile archive 413/422s with
-    no server row left behind (issue #277). A member named
+    of issue #2869, and each member's name under the path rule and the member-name
+    rule, issue #4008) BEFORE the row is created, so a hostile archive 413/422s
+    with no server row left behind (issue #277). A member whose name carries a C0
+    control character or DEL, which no write can name, is
+    :class:`UnnamableImportMemberError`. A member named
     ``server.properties/…`` is 422 ``platform_managed_path``, the same answer the
     five files-API doors give: the publish creates the member's parents, so it
     would stand a DIRECTORY where the platform publishes a file (#2812). Only the
@@ -403,6 +420,7 @@ class ImportServer:
         # much again in the read of the entries to publish, below.
         await run_archive_validation(
             _validate_import_archive,
+            self.file_store,
             content,
             max_bytes=self.max_bytes,
             max_entries=self.max_entries,
@@ -499,9 +517,10 @@ class ImportServer:
 
         Runs only after :meth:`__call__`'s pre-commit validate pass has cleared the
         whole archive, so ``entries`` (the SAME hardened extraction,
-        ``_archive_entries``, materialized before the row) are already known-safe;
-        the metadata member is skipped so it never lands in the working set. The
-        archive-property cap/path rejections (413/422) cannot fire here (the
+        ``_archive_entries``, materialized before the row) are already known-safe,
+        each name judged there by the path rule and the member-name rule (issue
+        #4008); the metadata member is skipped so it never lands in the working
+        set. The archive-property cap/path rejections (413/422) cannot fire here (the
         validate pass already raised them, before the row existed) but the re-raise
         is kept defensively. The ONLY genuine post-commit failure is a storage
         write error mid-publish, or the lifecycle ``lock`` lost before it (issue

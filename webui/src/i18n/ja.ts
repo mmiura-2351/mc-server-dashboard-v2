@@ -1202,7 +1202,7 @@ export const ja: Record<TranslationKey, string> = {
   "serverCreate.import.error.invalid_export_metadata":
     "そのアーカイブは有効なサーバーエクスポートではありません。",
   "serverCreate.import.error.invalid_archive":
-    "そのファイルをZIPアーカイブとして読み取れませんでした。破損している、途中で切れている、またはパスワードで保護されている可能性があります。サーバーは作成されていません。",
+    "そのファイルをZIPアーカイブとして読み取れませんでした。破損している、途中で切れている、パスワードで保護されている、またはエントリ名に制御文字が含まれている可能性があります。サーバーは作成されていません。",
   "serverCreate.import.error.platform_managed_path":
     "そのアーカイブには server.properties/ 配下のファイルが含まれています。server.properties はファイルとして管理されるため、該当のエントリを削除するか移動してからインポートしてください。",
   "serverCreate.import.error.reserved_name":

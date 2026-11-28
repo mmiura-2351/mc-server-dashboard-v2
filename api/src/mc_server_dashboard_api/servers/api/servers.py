@@ -165,6 +165,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     SlugExhaustedError,
     SnapshotUploadInFlightError,
     UnknownServerTypeError,
+    UnnamableImportMemberError,
     UnreadableArchiveError,
     UnsupportedEditionError,
     UploadBusyError,
@@ -628,7 +629,10 @@ async def import_server(
     ``path_too_deep``, one with a component past 255 bytes in UTF-8
     ``name_too_long`` and one with a path past 4,095 bytes ``path_too_long``,
     refused before the row is created. The characters the files-API writes refuse
-    are not refused here: an export carries the names its working set held.
+    are not refused here: an export carries the names its working set held. A
+    member whose name carries a C0 control character or DEL, which no path in a
+    working set may carry, is 422 ``invalid_archive``, refused before the row is
+    created too (issue #4008).
 
     A racer taking the auto-assigned game port or slug between the assignment and
     the commit that inserts the row is 409 ``port_taken`` / ``slug_taken``, and an
@@ -668,6 +672,10 @@ async def import_server(
     except UnreadableArchiveError as exc:
         # The zip reader failed on the body's own bytes (issue #3769): the reason
         # the files upload gives the same verdict.
+        raise _unprocessable("invalid_archive") from exc
+    except UnnamableImportMemberError as exc:
+        # A member no write can name (issue #4008): a verdict about the archive's
+        # contents, the reason the backup upload gives a member it refuses.
         raise _unprocessable("invalid_archive") from exc
     except UnsupportedEditionError as exc:
         raise _unprocessable("unsupported_edition") from exc

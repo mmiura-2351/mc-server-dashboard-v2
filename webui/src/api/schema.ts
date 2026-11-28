@@ -599,7 +599,10 @@ export interface paths {
          *     ``path_too_deep``, one with a component past 255 bytes in UTF-8
          *     ``name_too_long`` and one with a path past 4,095 bytes ``path_too_long``,
          *     refused before the row is created. The characters the files-API writes refuse
-         *     are not refused here: an export carries the names its working set held.
+         *     are not refused here: an export carries the names its working set held. A
+         *     member whose name carries a C0 control character or DEL, which no path in a
+         *     working set may carry, is 422 ``invalid_archive``, refused before the row is
+         *     created too (issue #4008).
          *
          *     A racer taking the auto-assigned game port or slug between the assignment and
          *     the commit that inserts the row is 409 ``port_taken`` / ``slug_taken``, and an
@@ -1626,6 +1629,11 @@ export interface paths {
          *     A path at a root name starting ``.mcsd_generation`` — the Worker's generation
          *     marker — or under one is 422 ``reserved_name`` (issue #3433), even for a
          *     version retained before the name was reserved.
+         *
+         *     A rollback of a file that no longer exists creates its name again, so the
+         *     member-name rule judges it first (issue #4008): 422 ``path_too_deep``,
+         *     ``name_too_long`` or ``path_too_long``, as a write of that path answers. A
+         *     file still there rolls back in place whatever its name.
          */
         post: operations["rollback_file_api_communities__community_id__servers__server_id__files_rollback_post"];
         delete?: never;
@@ -1989,7 +1997,8 @@ export interface paths {
          *
          *     The new state is committed before the working set is reconciled, and taken
          *     back when that step fails (issue #4001), so the plugin list stays as it was;
-         *     a path the store refuses is a 422 that names it, such as ``name_too_long``.
+         *     a path the store or the member-name rule refuses (issue #4008) is a 422 that
+         *     names it, such as ``name_too_long``.
          *     When that step needs the plugin's jar -- the working-set file is gone -- and
          *     the jar is missing from the content-addressed cache too, the route answers
          *     ``409`` ``plugin_jar_missing`` (issue #3323) over the committed state: the
@@ -2019,7 +2028,8 @@ export interface paths {
          *
          *     The new state is committed before the working set is reconciled, and taken
          *     back when that step fails (issue #4001), so the plugin list stays as it was;
-         *     a path the store refuses is a 422 that names it, such as ``name_too_long``.
+         *     a path the store or the member-name rule refuses (issue #4008) is a 422 that
+         *     names it, such as ``name_too_long``.
          *     When that step needs the plugin's jar -- the working-set file is gone -- and
          *     the jar is missing from the content-addressed cache too, the route answers
          *     ``409`` ``plugin_jar_missing`` (issue #3323) over the committed state: the
@@ -2053,7 +2063,8 @@ export interface paths {
          *
          *     The new side is committed before the working set is reconciled, and taken
          *     back when that step fails (issue #4001), so the plugin list stays as it was;
-         *     a path the store refuses is a 422 that names it, such as ``name_too_long``.
+         *     a path the store or the member-name rule refuses (issue #4008) is a 422 that
+         *     names it, such as ``name_too_long``.
          *     When the jar to materialize is missing from the cache, the route answers
          *     ``409`` ``plugin_jar_missing`` (issue #3323) over the committed side: the
          *     plugin list shows it, the working set holds no file for the plugin, and

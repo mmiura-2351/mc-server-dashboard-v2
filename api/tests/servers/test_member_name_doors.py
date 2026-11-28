@@ -39,6 +39,7 @@ from mc_server_dashboard_api.servers.application.files import (
     MakeDir,
     ReadFile,
     RenameFile,
+    RollbackFile,
     UploadFile,
     WriteFile,
 )
@@ -175,6 +176,14 @@ class _Doors:
     async def delete(self, rel_path: str) -> None:
         await DeleteFile(uow=self.uow, file_store=self.store)(
             community_id=self.community, server_id=self.server, rel_path=rel_path
+        )
+
+    async def rollback(self, rel_path: str, version_id: str) -> None:
+        await RollbackFile(uow=self.uow, file_store=self.store)(
+            community_id=self.community,
+            server_id=self.server,
+            rel_path=rel_path,
+            version_id=version_id,
         )
 
 
@@ -564,6 +573,22 @@ async def test_an_existing_odd_name_is_deleted(odd: _Doors) -> None:
         await odd.read("a\x85b")
     with pytest.raises(ServerFileNotFoundError):
         await odd.read(_nested(129, "f"))
+
+
+async def test_a_rollback_creating_a_deleted_name_the_rule_refuses_is_refused(
+    odd: _Doors,
+) -> None:
+    # The delete kept a version, and a rollback to it creates the name again, so
+    # it is judged as any other door's new name is (issue #4008).
+    path = _nested(129, "f")
+    await odd.delete(path)
+    [version] = await odd.store.list_versions(
+        community_id=odd.community, server_id=odd.server, rel_path=path
+    )
+
+    assert await _refusal(odd.rollback(path, version)) == "path_too_deep"
+    with pytest.raises(ServerFileNotFoundError):
+        await odd.read(path)
 
 
 async def test_a_tree_already_too_deep_is_renamed_at_its_own_level(

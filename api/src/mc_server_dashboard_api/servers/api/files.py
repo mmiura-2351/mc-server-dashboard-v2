@@ -669,6 +669,11 @@ async def rollback_file(
     A path at a root name starting ``.mcsd_generation`` — the Worker's generation
     marker — or under one is 422 ``reserved_name`` (issue #3433), even for a
     version retained before the name was reserved.
+
+    A rollback of a file that no longer exists creates its name again, so the
+    member-name rule judges it first (issue #4008): 422 ``path_too_deep``,
+    ``name_too_long`` or ``path_too_long``, as a write of that path answers. A
+    file still there rolls back in place whatever its name.
     """
 
     try:

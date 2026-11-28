@@ -493,6 +493,8 @@ async def _sync_server_file(
         players = merge_players(groups)
         # The at-rest write relies on the lifecycle lock (issue #3927).
         await lock.ensure_held()
+        # ops.json or whitelist.json: a fixed root name the member-name rule admits, so
+        # this write does not ask it (issue #4008).
         await file_store.write_file(
             community_id=community_id,
             server_id=server_id,
@@ -544,6 +546,8 @@ async def regenerate_pending_group_files(
             except ServerFileNotFoundError:
                 current = None
             if current != content:
+                # ops.json or whitelist.json: a fixed root name the member-name rule
+                # admits, so this write does not ask it (issue #4008).
                 await file_store.write_file(
                     community_id=community_id,
                     server_id=server_id,

@@ -757,6 +757,8 @@ class RestoreBackup:
         except Exception as exc:
             raise WorkingSetSeedFailedError(str(server_id.value)) from exc
         try:
+            # server.properties: a fixed root name the member-name rule admits, so this
+            # write does not ask it (issue #4008).
             await self.file_store.write_file(
                 community_id=community_id,
                 server_id=server_id,

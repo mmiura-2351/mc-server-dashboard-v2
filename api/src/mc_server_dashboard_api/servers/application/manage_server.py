@@ -550,6 +550,8 @@ class CreateServer:
                 # Each seed write relies on the lifecycle lock (issues #3927,
                 # #4045); a loss stops the rest.
                 await lock.ensure_held()
+                # server.properties and eula.txt: fixed root names the member-name rule
+                # admits, so these writes do not ask it (issue #4008).
                 await self.file_store.write_file(
                     community_id=community_id,
                     server_id=server_id,
@@ -928,6 +930,8 @@ class UpdateServer:
             community_id=community_id, server_id=server_id, committed=True
         )
         try:
+            # server.properties: a fixed root name the member-name rule admits, so this
+            # write does not ask it (issue #4008).
             await self.file_store.write_file(
                 community_id=community_id,
                 server_id=server_id,
@@ -988,6 +992,8 @@ class UpdateServer:
             updated = apply_overrides(current, overrides)
             if removed_keys:
                 updated = remove_keys(updated, removed_keys)
+            # server.properties: a fixed root name the member-name rule admits, so this
+            # write does not ask it (issue #4008).
             await self.file_store.write_file(
                 community_id=community_id,
                 server_id=server_id,

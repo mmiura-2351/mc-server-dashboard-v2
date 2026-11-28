@@ -1115,7 +1115,8 @@ async def enable_plugin(
 
     The new state is committed before the working set is reconciled, and taken
     back when that step fails (issue #4001), so the plugin list stays as it was;
-    a path the store refuses is a 422 that names it, such as ``name_too_long``.
+    a path the store or the member-name rule refuses (issue #4008) is a 422 that
+    names it, such as ``name_too_long``.
     When that step needs the plugin's jar -- the working-set file is gone -- and
     the jar is missing from the content-addressed cache too, the route answers
     ``409`` ``plugin_jar_missing`` (issue #3323) over the committed state: the
@@ -1204,7 +1205,8 @@ async def disable_plugin(
 
     The new state is committed before the working set is reconciled, and taken
     back when that step fails (issue #4001), so the plugin list stays as it was;
-    a path the store refuses is a 422 that names it, such as ``name_too_long``.
+    a path the store or the member-name rule refuses (issue #4008) is a 422 that
+    names it, such as ``name_too_long``.
     When that step needs the plugin's jar -- the working-set file is gone -- and
     the jar is missing from the content-addressed cache too, the route answers
     ``409`` ``plugin_jar_missing`` (issue #3323) over the committed state: the
@@ -1298,7 +1300,8 @@ async def set_plugin_side(
 
     The new side is committed before the working set is reconciled, and taken
     back when that step fails (issue #4001), so the plugin list stays as it was;
-    a path the store refuses is a 422 that names it, such as ``name_too_long``.
+    a path the store or the member-name rule refuses (issue #4008) is a 422 that
+    names it, such as ``name_too_long``.
     When the jar to materialize is missing from the cache, the route answers
     ``409`` ``plugin_jar_missing`` (issue #3323) over the committed side: the
     plugin list shows it, the working set holds no file for the plugin, and

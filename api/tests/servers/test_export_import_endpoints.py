@@ -1031,6 +1031,32 @@ def _real_import(uow: ServersFakeUnitOfWork, file_store: FakeFileStore) -> Impor
     )
 
 
+@pytest.mark.parametrize("member", ["world/a\x01b", "a\x7fb"])
+def test_import_of_a_member_no_path_may_name_is_422_and_creates_nothing(
+    member: str,
+) -> None:
+    # A C0 or DEL character passes the zip-slip check and the member-name rule,
+    # but no write can name it, so it used to fail the publish after the row had
+    # committed, leaving the row and the files written before it (issue #4008).
+    uow, file_store = ServersFakeUnitOfWork(), FakeFileStore()
+    archive = io.BytesIO(_export_zip())
+    with zipfile.ZipFile(archive, mode="a") as zf:
+        zf.writestr("a.txt", b"A")
+        zf.writestr(member, b"X")
+    app = _app(member=True, allow=True, import_=_real_import(uow, file_store))
+
+    resp = _client(app).post(
+        f"/api/communities/{uuid.uuid4()}/servers/import",
+        files={"file": ("server.zip", archive.getvalue(), "application/zip")},
+        data={"name": "imported"},
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_archive"
+    assert uow.servers.by_id == {}
+    assert file_store.files == {}
+
+
 def test_import_answers_a_finished_creation() -> None:
     # Issue #4065: the import's row is created unfinished and ends its creation
     # once the archive is published; the 201 is the server as it then stands.
