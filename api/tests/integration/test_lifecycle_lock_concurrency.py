@@ -164,7 +164,9 @@ async def _create_at_rest_server(
 ) -> Server:
     community_id = await _seed_community(engine)
     return await CreateServer(
-        uow=ServersUnitOfWork(create_session_factory(engine)),
+        uow=ServersUnitOfWork(
+            create_session_factory(engine), InProcessRealTimeEvents()
+        ),
         clock=_FixedClock(),
         version_validator=FakeVersionValidator(),
         file_store=FakeFileStore(),

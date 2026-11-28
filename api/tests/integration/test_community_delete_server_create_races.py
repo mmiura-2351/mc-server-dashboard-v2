@@ -50,6 +50,9 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     CommunityName,
 )
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.fleet.adapters.real_time_events import (
+    InProcessRealTimeEvents,
+)
 from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
 )
@@ -110,7 +113,7 @@ class _ServersUnitOfWork(ServersUnitOfWork):
         pid: asyncio.Future[int] | None = None,
         pause: _Pause | None = None,
     ) -> None:
-        super().__init__(session_factory)
+        super().__init__(session_factory, InProcessRealTimeEvents())
         self._pid = pid
         self._pause = pause
 

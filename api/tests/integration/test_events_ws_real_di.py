@@ -322,7 +322,9 @@ async def _seed_started_server(
     try:
         servers_community = ServersCommunityId(community.value)
         server = await CreateServer(
-            uow=ServersUnitOfWork(create_session_factory(engine)),
+            uow=ServersUnitOfWork(
+                create_session_factory(engine), InProcessRealTimeEvents()
+            ),
             clock=FakeClock(_NOW),
             version_validator=FakeVersionValidator(),
             file_store=FakeFileStore(),

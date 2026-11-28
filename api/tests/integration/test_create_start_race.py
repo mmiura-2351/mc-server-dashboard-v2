@@ -198,7 +198,7 @@ class _EndCommitFails(ServersUnitOfWork):
     def __init__(
         self, session_factory: async_sessionmaker[AsyncSession], *, times: int
     ) -> None:
-        super().__init__(session_factory)
+        super().__init__(session_factory, InProcessRealTimeEvents())
         self.commits = 0
         self._times = times
 
@@ -328,7 +328,9 @@ def _begin_creation(
     park_at = "server.properties" if race == "seed" else "world/region/r.0.0.mca"
     file_store = _ParkingFileStore(storage=storage, park_at=park_at)
     create = CreateServer(
-        uow=ServersUnitOfWork(create_session_factory(engine)),
+        uow=ServersUnitOfWork(
+            create_session_factory(engine), InProcessRealTimeEvents()
+        ),
         clock=_FixedClock(),
         version_validator=FakeVersionValidator(),
         file_store=file_store,
@@ -493,7 +495,7 @@ async def test_a_start_after_a_failed_creation_is_refused(
             # On every attempt.
             _EndCommitFails(session_factory, times=3)
             if failure == "end"
-            else ServersUnitOfWork(session_factory)
+            else ServersUnitOfWork(session_factory, InProcessRealTimeEvents())
         ),
         clock=_FixedClock(),
         version_validator=FakeVersionValidator(),

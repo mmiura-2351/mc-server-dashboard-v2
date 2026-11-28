@@ -114,7 +114,9 @@ async def contract_server_id(
     engine: AsyncEngine, contract_community_id: CommunityId
 ) -> ServerId:
     item = server(contract_community_id)
-    async with SqlAlchemyUnitOfWork(create_session_factory(engine)) as uow:
+    async with SqlAlchemyUnitOfWork(
+        create_session_factory(engine), InProcessRealTimeEvents()
+    ) as uow:
         await uow.servers.add(item)
         await uow.commit()
     return item.id

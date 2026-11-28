@@ -52,6 +52,9 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.community.domain.value_objects import CommunityName
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.fleet.adapters.real_time_events import (
+    InProcessRealTimeEvents,
+)
 from mc_server_dashboard_api.servers.adapters import (
     lifecycle_lock as lifecycle_lock_mod,
 )
@@ -280,7 +283,7 @@ async def _arrange(engine: AsyncEngine, storage: Storage) -> _Case:
         await community_uow.communities.add(community)
         await community_uow.commit()
     server = await CreateServer(
-        uow=ServersUnitOfWork(factory),
+        uow=ServersUnitOfWork(factory, InProcessRealTimeEvents()),
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=FakeFileStore(),
@@ -332,7 +335,7 @@ def _restore(case: _Case, lock: PgLifecycleLock) -> RestoreBackup:
 
 def _delete(case: _Case, lock: PgLifecycleLock) -> DeleteServer:
     return DeleteServer(
-        uow=ServersUnitOfWork(case.factory),
+        uow=ServersUnitOfWork(case.factory, InProcessRealTimeEvents()),
         backup_store=case.backup_store,
         lifecycle_lock=lock,
     )
