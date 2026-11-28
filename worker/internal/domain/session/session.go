@@ -565,6 +565,9 @@ type dispatcher struct {
 // lane is one server's serial command queue.
 type lane struct {
 	queue []queuedCommand
+	// wake tells a lane waiting on its running snapshot that a command was
+	// queued, so it can run one that may pass the snapshot.
+	wake chan struct{}
 }
 
 // queuedCommand is a command waiting in its lane, with the time the receive loop
@@ -591,7 +594,7 @@ func (d *dispatcher) dispatch(q queuedCommand) {
 	d.mu.Lock()
 	l, ok := d.lanes[serverID]
 	if !ok {
-		l = &lane{}
+		l = &lane{wake: make(chan struct{}, 1)}
 		d.lanes[serverID] = l
 	}
 	l.queue = append(l.queue, q)
@@ -599,17 +602,34 @@ func (d *dispatcher) dispatch(q queuedCommand) {
 
 	if !ok {
 		go d.runLane(serverID, l)
+		return
+	}
+	select {
+	case l.wake <- struct{}{}:
+	default:
 	}
 }
 
-// runLane drains a server's queue serially until it is empty, then removes the
-// lane and exits. The lane preserves per-server FIFO: one goroutine runs the
-// server's commands in arrival order, so a command never races ahead of an
-// earlier same-server op. The global concurrency cap (sem) is acquired
-// per-command and only for long-running ops; quick commands bypass it (issue
-// #169), so an instant ServerCommand for an otherwise-idle server is not delayed
-// by other servers' slow hydrate/stop work holding every cap slot. The bypass
-// touches only the global cap — the same-server ordering above is unaffected.
+// runLane takes a server's commands in arrival order until its queue is empty
+// and its snapshot, if one runs, has finished, then removes the lane and exits.
+// The lane preserves per-server FIFO: one goroutine takes the server's commands
+// in arrival order, so a command never races ahead of an earlier same-server op.
+// The one exception is a SnapshotTrigger (issue #3659): it runs on its own
+// goroutine, and while it runs the lane goes on with the ServerCommands and
+// TunnelDials queued directly behind it (passesSnapshot), since a running
+// server's backup can take minutes and a player join or a console line must not
+// wait for it. Any other command at the head of the queue waits for the snapshot
+// to finish, and everything queued behind it waits too. So a lifecycle command
+// never runs beside a snapshot or ahead of a quick command sent before it, and a
+// quick command never passes a lifecycle command. The lane stays registered
+// while its snapshot runs, even with an empty queue, so a command that arrives
+// then still waits for it.
+//
+// The global concurrency cap (sem) is acquired per-command and only for
+// long-running ops; quick commands bypass it (issue #169), so an instant
+// ServerCommand for an otherwise-idle server is not delayed by other servers'
+// slow hydrate/stop work holding every cap slot. The bypass touches only the
+// global cap — the same-server ordering above is unaffected.
 //
 // A command is checked for expiry immediately before it would start, on both
 // paths: a quick command after the lane reaches it, a capped one after it has
@@ -621,12 +641,27 @@ func (d *dispatcher) dispatch(q queuedCommand) {
 // a Bedrock tunnel Open or Close that has not yet reached the tunneler does
 // nothing, and a ctx-bound step such as a TunnelDial's dial is cut short.
 func (d *dispatcher) runLane(serverID string, l *lane) {
+	// snapshot is closed once the SnapshotTrigger this lane started has finished;
+	// nil while none runs.
+	var snapshot chan struct{}
 	for {
 		d.mu.Lock()
-		if len(l.queue) == 0 {
+		if len(l.queue) == 0 && snapshot == nil {
 			delete(d.lanes, serverID)
 			d.mu.Unlock()
 			return
+		}
+		if len(l.queue) == 0 || (snapshot != nil && !passesSnapshot(l.queue[0].cmd.Kind)) {
+			d.mu.Unlock()
+			select {
+			case <-snapshot:
+				snapshot = nil
+			case <-l.wake:
+			case <-d.ctx.Done():
+				d.removeLane(serverID)
+				return
+			}
+			continue
 		}
 		q := l.queue[0]
 		l.queue = l.queue[1:]
@@ -643,29 +678,58 @@ func (d *dispatcher) runLane(serverID string, l *lane) {
 			return
 		}
 
-		if isQuickCommand(cmd.Kind) {
+		switch {
+		case isQuickCommand(cmd.Kind):
 			if o, ok := d.r.expired(q); ok {
 				d.r.emitResult(d.ctx, d.results, o)
 				continue
 			}
 			d.r.emitResult(d.ctx, d.results, d.r.handle(d.ctx, cmd))
-			continue
+		case cmd.Kind == "SnapshotTrigger":
+			snapshot = make(chan struct{})
+			go func(done chan struct{}) {
+				defer close(done)
+				d.runCapped(q)
+			}(snapshot)
+		default:
+			if !d.runCapped(q) {
+				d.removeLane(serverID)
+				return
+			}
 		}
-
-		select {
-		case d.r.sem <- struct{}{}:
-		case <-d.ctx.Done():
-			d.removeLane(serverID)
-			return
-		}
-		if o, ok := d.r.expired(q); ok {
-			<-d.r.sem
-			d.r.emitResult(d.ctx, d.results, o)
-			continue
-		}
-		d.r.emitResult(d.ctx, d.results, d.r.handle(d.ctx, cmd))
-		<-d.r.sem
 	}
+}
+
+// runCapped runs a command that takes a slot of the Worker-wide cap: it waits
+// for a slot, answers EXPIRED when the command's budget ran out meanwhile, and
+// otherwise runs it. It reports false when the session ended before a slot came
+// free.
+func (d *dispatcher) runCapped(q queuedCommand) bool {
+	select {
+	case d.r.sem <- struct{}{}:
+	case <-d.ctx.Done():
+		return false
+	}
+	if o, ok := d.r.expired(q); ok {
+		<-d.r.sem
+		d.r.emitResult(d.ctx, d.results, o)
+		return true
+	}
+	d.r.emitResult(d.ctx, d.results, d.r.handle(d.ctx, q.cmd))
+	<-d.r.sem
+	return true
+}
+
+// passesSnapshot reports whether a command kind may run while a SnapshotTrigger
+// queued ahead of it for the same server is still running (issue #3659). A
+// snapshot neither starts nor stops the server, so a join or a console line gets
+// the same answer beside it as after it. The other quick kinds keep their place.
+// A Bedrock player's join rides the tunnel already open, not a command, so
+// OpenBedrockTunnel and CloseBedrockTunnel are sent on state changes that nobody
+// waits on, and a ReclaimDeletedServer run beside a stopped server's snapshot
+// would find the id reserved and skip it.
+func passesSnapshot(kind string) bool {
+	return kind == "ServerCommand" || kind == "TunnelDial"
 }
 
 // isQuickCommand reports whether a command kind is an instant op that bypasses
