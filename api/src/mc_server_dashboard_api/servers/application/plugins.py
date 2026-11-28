@@ -209,14 +209,12 @@ async def undo_on_failure(
     change. The row commits first, so a failed commit leaves no file that no row
     describes (issues #1706, #1826). The working-set step then runs inside this
     block: the write for an install or an update, the reconcile (a rename, a
-    write from the cache or a delete) for the others. When it fails, ``undo``
-    writes the row back as it was before the request, which commits too, still
-    under the lifecycle lock, and the failure goes on to the caller. A failed
-    write leaves the old file in place, and a failed rename on fs leaves the file
-    at its old name. On the object backend a rename is a copy and then a delete,
-    and one that fails between the two is not undone. An update removes its old
-    file after this block, so a failure there leaves the new version recorded and
-    the old file in place.
+    write from the cache or a delete) for the others. Whenever that step raises,
+    ``undo`` writes the row back as it was before the request, which commits too,
+    still under the lifecycle lock, and the failure goes on to the caller. When
+    the store applied the step before raising, the row and the file can then
+    disagree (issue #4231). An update removes its old file after this block, so
+    a failure there leaves the new version recorded and the old file in place.
 
     A jar missing from the content-addressed cache as well is not undone (issue
     #3437): no retry can bring its bytes back, so the change stands, and the edge

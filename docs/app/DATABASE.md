@@ -867,15 +867,15 @@ the repository maps a NULL JSON column to an empty list.
 catalog install, update, enable, disable and side change each commit the row
 first and then write, rename or delete the jar's file in the working set. A
 failed commit therefore leaves no file that no row describes (#1706, #1826).
-When the write, or the rename or delete of the reconcile, fails, the same use
-case writes the row back as it was and commits that too, still under the
-server's lifecycle lock, before the error reaches the route. The plugin list is
-then as it was before the request. So is the working set, since a failed write
-leaves the old file and a failed rename on fs leaves the file at its old name;
-on the object backend a rename is a copy and then a delete, and one that fails
-between the two is not undone. An update removes its old file after that
-step, outside the undo: a failure there leaves the new version recorded and the
-old file in place. A path the store refuses answers `422` with the
+Whenever the write, or the rename or delete of the reconcile, raises, the same
+use case writes the row back as it was and commits that too, still under the
+server's lifecycle lock, before the error reaches the route. When the store
+applied the step before raising (on the object backend: a lost answer to the
+write, a failed generation bump after it, or a rename that fails after its copy
+and before its delete), the row and the file can then disagree (#4231). An
+update removes its old file after that step, outside the undo: a failure there
+leaves the new version recorded and the old file in place. A path the store
+refuses answers `422` with the
 store's reason (`invalid_path`, `name_too_long`). The one failure that is not
 undone is a jar missing from the content-addressed cache as well: no retry can
 bring its bytes back, so the change stands and enable, disable and side change
