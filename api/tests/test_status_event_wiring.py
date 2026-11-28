@@ -29,7 +29,8 @@ _SRC = Path(__file__).resolve().parent.parent / "src" / "mc_server_dashboard_api
 
 # The use cases that write ``observed_state`` or ``desired_state`` through their
 # unit of work (the latter since issue #3428; the reconciler's own since #4130),
-# or add or delete a server (issue #3308).
+# add or delete a server (issue #3308), or write its backup retention policy
+# (issue #4169).
 _WRITERS = {
     "StartServer",
     "StopServer",
@@ -38,6 +39,8 @@ _WRITERS = {
     "RunReconcilerTick",
     "CreateServer",
     "DeleteServer",
+    "SetBackupRetention",
+    "ClearBackupRetention",
 }
 
 # The names the servers unit of work is constructed under.

@@ -66,9 +66,11 @@ class RealTimeEvent:
     the adapter maps the proto to this shape at the transport edge. A STATUS
     event the API publishes for a change of a server's intent carries
     ``desired_state`` (issue #3428), one for a change of its assignment
-    ``assigned_worker_id`` (issue #3818), and one for a change of the refusal of
+    ``assigned_worker_id`` (issue #3818), one for a change of the refusal of
     its stop's final snapshot ``final_snapshot_refusal`` (issue #4054), which a
-    release also clears; each event carries only the fields its write changed. A
+    release also clears, and one for a write of its backup retention policy
+    ``backup_retention`` (issue #4169); each event carries only the fields its
+    write changed. A
     ``GAP`` event carries an empty payload.
 
     ``emitted_at`` is the Worker's authoritative clock reading for the event

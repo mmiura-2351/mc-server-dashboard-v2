@@ -1367,6 +1367,48 @@ describe("ServerBackupsTab keep-all retention warning (#4084)", () => {
     expect(setBelow()).toBeInTheDocument();
   });
 
+  it("follows a policy another session writes, from its status frame (#4169)", async () => {
+    // Every REST read answers no policy, so the frames alone move the warning
+    // and the editor.
+    routeGet({ srv: KEEP_ALL, schedules: [schedule()] });
+    await openBackups();
+    expect(
+      await screen.findByText(t("backups.retention.unboundedWarning")),
+    ).toBeInTheDocument();
+    const retentionFrame = (policy: unknown) =>
+      JSON.stringify({
+        stream: "status",
+        ts: "t",
+        payload: { backup_retention: policy },
+      });
+    const mode = () =>
+      screen.getByLabelText(
+        t("backups.retention.modeLabel"),
+      ) as HTMLSelectElement;
+
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(retentionFrame({ keep_last: 7 }));
+    });
+
+    await waitFor(() => expect(warning()).not.toBeInTheDocument());
+    expect(mode().value).toBe("keepLast");
+    expect(
+      (
+        screen.getByLabelText(
+          t("backups.retention.keepLastLabel"),
+        ) as HTMLInputElement
+      ).value,
+    ).toBe("7");
+
+    act(() => {
+      MockWebSocket.last().message(retentionFrame(null));
+    });
+
+    await waitFor(() => expect(warning()).toBeInTheDocument());
+    expect(mode().value).toBe("none");
+  });
+
   it("still warns a member who cannot set retention, without the pointer", async () => {
     mockCan = (code) => code !== "backup:schedule";
     routeGet({ srv: KEEP_ALL, schedules: [schedule()] });

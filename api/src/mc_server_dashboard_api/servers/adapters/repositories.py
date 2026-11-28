@@ -95,8 +95,8 @@ class StatusEventsNotWiredError(RuntimeError):
     """A state write is about to commit with no bus to publish it on.
 
     An observed-state write, a ``desired_state`` change (issue #3428), a
-    change of the assignment (issue #3818), or a server's creation or deletion
-    (issue #3308).
+    change of the assignment (issue #3818), a server's creation or deletion
+    (issue #3308), or a write of its backup retention policy (issue #4169).
 
     A programming error at the composition root, not a runtime condition: the
     owner of the commit was built without the real-time event bus, so the
@@ -149,10 +149,11 @@ class SqlAlchemyServerRepository(ServerRepository):
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
-        # The status events of the observed-state writes and the desired-state
-        # and assignment changes this repository has executed and its session
-        # has not committed yet, and the server-set events of its creations and
-        # deletions (issue #3308), as (server id, event).
+        # The status events of the observed-state writes, the desired-state
+        # and assignment changes and the retention writes (issue #4169) this
+        # repository has executed and its session has not committed yet, and
+        # the server-set events of its creations and deletions (issue #3308),
+        # as (server id, event).
         # Whoever commits the session hands them to :func:`publish_status_events`
         # afterwards; a rollback hands them to nobody (issue #3212).
         self._staged_status_events: list[tuple[str, RealTimeEvent]] = []
@@ -286,7 +287,21 @@ class SqlAlchemyServerRepository(ServerRepository):
             .where(ServerModel.id == server_id.value)
             .values(backup_retention=retention)
         )
-        await self._session.execute(stmt)
+        result = await self._session.execute(stmt)
+        # The frame that tells live subscribers the policy (issue #4169),
+        # published by whoever commits the session. Every write announces it,
+        # one that rewrites the policy the row holds too: the frame is an
+        # idempotent set.
+        if cast("CursorResult[Any]", result).rowcount == 1:
+            self._staged_status_events.append(
+                (
+                    str(server_id.value),
+                    RealTimeEvent(
+                        stream=EventStream.STATUS,
+                        payload={"backup_retention": retention},
+                    ),
+                )
+            )
 
     async def clear_creation_incomplete(self, server_id: ServerId) -> None:
         # A narrow single-column write, as update_backup_retention is, so no

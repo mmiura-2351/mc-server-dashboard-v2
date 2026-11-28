@@ -817,12 +817,13 @@ async def _server_snapshot(
 
     ``{stream: "snapshot", ts, payload: {state, desired_state,
     assigned_worker_id, crash_reason, crash_detail, crash_not_restarted,
-    final_snapshot_refusal}}`` — the persisted observed and desired states, the
-    assigned Worker (or ``null``), the last crash (``null`` unless crashed, and
-    whether the reconciler leaves it alone) and the final-snapshot refusal (or
+    final_snapshot_refusal, backup_retention}}`` — the persisted observed and
+    desired states, the assigned Worker (or ``null``), the last crash (``null``
+    unless crashed, and whether the reconciler leaves it alone), the
+    final-snapshot refusal (or ``null``) and the backup retention policy (or
     ``null``) the REST server read reports, read from the one row (#3428,
-    #3818, #3281, #4054). The live ``detail`` of a state other than ``crashed``
-    is not persisted, so it has no counterpart here.
+    #3818, #3281, #4054, #4169). The live ``detail`` of a state other than
+    ``crashed`` is not persisted, so it has no counterpart here.
     """
 
     try:
@@ -842,10 +843,11 @@ async def _community_snapshot(
 
     ``{stream: "snapshot", ts, payload: {servers: [{server_id, state,
     desired_state, assigned_worker_id, crash_reason, crash_detail,
-    crash_not_restarted, final_snapshot_refusal}]}, server_id: null}`` — each
-    server's observed and desired states, assigned Worker, last crash and
-    final-snapshot refusal, read by the one list query (#3428, #3818, #3281,
-    #4054) — the community frame shape,
+    crash_not_restarted, final_snapshot_refusal, backup_retention}]},
+    server_id: null}`` — each server's observed and desired states, assigned
+    Worker, last crash, final-snapshot refusal and backup retention policy,
+    read by the one list query (#3428, #3818, #3281, #4054, #4169) — the
+    community frame shape,
     server-agnostic like the GAP marker. The
     list is the community's whole server set, exactly what the stream's
     community-level ``server:read`` gate already lets the subscriber see (the
@@ -864,7 +866,7 @@ async def _community_snapshot(
 
 
 def _snapshot_states(server: Server) -> dict[str, object]:
-    """One server's snapshot fields: its states, Worker, last crash and refusal."""
+    """One server's snapshot fields: states, Worker, crash, refusal, retention."""
 
     return {
         "state": server.observed_state.value,
@@ -884,6 +886,7 @@ def _snapshot_states(server: Server) -> dict[str, object]:
             if server.final_snapshot_refusal is None
             else server.final_snapshot_refusal.value
         ),
+        "backup_retention": server.backup_retention,
     }
 
 
