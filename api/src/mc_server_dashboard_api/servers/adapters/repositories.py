@@ -30,6 +30,8 @@ from mc_server_dashboard_api.fleet.domain.real_time_events import (
     EventStream,
     RealTimeEvent,
     RealTimeEvents,
+    ServerSetChange,
+    server_set_event,
 )
 from mc_server_dashboard_api.servers.adapters.integrity import (
     translate_integrity_error,
@@ -92,8 +94,9 @@ def _to_server(row: ServerModel) -> Server:
 class StatusEventsNotWiredError(RuntimeError):
     """A state write is about to commit with no bus to publish it on.
 
-    An observed-state write, a ``desired_state`` change (issue #3428), or a
-    change of the assignment (issue #3818).
+    An observed-state write, a ``desired_state`` change (issue #3428), a
+    change of the assignment (issue #3818), or a server's creation or deletion
+    (issue #3308).
 
     A programming error at the composition root, not a runtime condition: the
     owner of the commit was built without the real-time event bus, so the
@@ -148,7 +151,8 @@ class SqlAlchemyServerRepository(ServerRepository):
         self._session = session
         # The status events of the observed-state writes and the desired-state
         # and assignment changes this repository has executed and its session
-        # has not committed yet, as (server id, event).
+        # has not committed yet, and the server-set events of its creations and
+        # deletions (issue #3308), as (server id, event).
         # Whoever commits the session hands them to :func:`publish_status_events`
         # afterwards; a rollback hands them to nobody (issue #3212).
         self._staged_status_events: list[tuple[str, RealTimeEvent]] = []
@@ -188,6 +192,17 @@ class SqlAlchemyServerRepository(ServerRepository):
                     else server.final_snapshot_refusal.value
                 ),
                 creation_incomplete=server.creation_incomplete,
+            )
+        )
+        # The community stream's frame for the new server, published by whoever
+        # commits the session (issue #3308).
+        self._staged_status_events.append(
+            (
+                str(server.id.value),
+                server_set_event(
+                    change=ServerSetChange.CREATED,
+                    community_id=str(server.community_id.value),
+                ),
             )
         )
 
@@ -979,5 +994,22 @@ class SqlAlchemyServerRepository(ServerRepository):
         return {ServerId(row) for row in rows}
 
     async def delete(self, server_id: ServerId) -> None:
-        stmt = delete(ServerModel).where(ServerModel.id == server_id.value)
-        await self._session.execute(stmt)
+        stmt = (
+            delete(ServerModel)
+            .where(ServerModel.id == server_id.value)
+            .returning(ServerModel.community_id)
+        )
+        community_id = (await self._session.execute(stmt)).scalar_one_or_none()
+        if community_id is not None:
+            # The community stream's frame for the deleted server, published by
+            # whoever commits the session (issue #3308). It carries the
+            # community the row named: once the row is gone, no lookup can.
+            self._staged_status_events.append(
+                (
+                    str(server_id.value),
+                    server_set_event(
+                        change=ServerSetChange.DELETED,
+                        community_id=str(community_id),
+                    ),
+                )
+            )

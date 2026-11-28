@@ -1787,13 +1787,14 @@ def get_create_server(
     + eula.txt, issues #243/#198), and the configured port range for game-port
     auto-assignment (issue #243). The shared lifecycle lock is held from before
     the row commits until the last create-time write, so a start racing the
-    creation cannot hydrate it half-written (issue #4045).
+    creation cannot hydrate it half-written (issue #4045). The unit of work
+    publishes the new server on the community stream (issue #3308).
     """
 
     session_factory = create_session_factory(get_engine(request))
     mem_cfg = get_settings(request).memory_limit
     return CreateServer(
-        uow=ServersUnitOfWork(session_factory),
+        uow=ServersUnitOfWork(session_factory, request.app.state.real_time_events),
         clock=ServersSystemClock(),
         version_validator=CatalogVersionValidator(catalog=catalog),
         file_store=file_store,
@@ -2530,12 +2531,13 @@ def get_delete_server(
     fleet tunnel-credential table so the delete forgets the server's Bedrock
     tunnel credential (issue #1544), and the fleet control plane so the delete is
     reported to the connected Workers, which reclaim what they hold for the server
-    (issue #3679).
+    (issue #3679). The unit of work publishes the deletion on the community
+    stream (issue #3308).
     """
 
     session_factory = create_session_factory(get_engine(request))
     return DeleteServer(
-        uow=ServersUnitOfWork(session_factory),
+        uow=ServersUnitOfWork(session_factory, request.app.state.real_time_events),
         backup_store=backup_store,
         lifecycle_lock=get_lifecycle_lock(request),
         bedrock_tunnel=get_bedrock_tunnel_credentials(request),
