@@ -111,13 +111,17 @@ def shell_tokens(command: str) -> list[tuple[str, bool]]:
 
     Returns ``(text, is_operator)`` pairs. The operators are ``;``, ``&``,
     ``|``, ``(``, ``)`` and a line break, and only outside quotes: a quoted
-    ``"|"`` is a word. Quotes and escaping backslashes are removed from words.
-    A ``#`` comment and a backslash-newline are dropped. Raises ValueError when
-    a quote is left open.
+    ``"|"`` is a word. A ``$(...)`` inside double quotes is read as one outside
+    them: its commands start a new quoting context, so a ``"`` in them opens a
+    string rather than closing the outer one, and the outer string goes on after
+    the ``)``. Quotes and escaping backslashes are removed from words. A ``#``
+    comment and a backslash-newline are dropped. Raises ValueError when a quote
+    is left open.
     """
     tokens: list[tuple[str, bool]] = []
     word: str | None = None
     quote = ""
+    reopen: list[str] = []  # per open ``(``, the quote to restore at its ``)``
     redirect: int | None = None  # index of the last unquoted ``<`` or ``>``
     index = 0
     while index < len(command):
@@ -128,6 +132,12 @@ def shell_tokens(command: str) -> list[tuple[str, bool]]:
                 quote = ""
             elif char == "\\" and quote == '"' and following in ('"', "\\", "$", "`"):
                 word = (word or "") + following
+                index += 1
+            elif quote == '"' and char == "$" and following == "(":
+                tokens += [((word or "") + "$", False), ("(", True)]
+                word = None
+                quote = ""
+                reopen.append('"')
                 index += 1
             else:
                 word = (word or "") + char
@@ -155,12 +165,16 @@ def shell_tokens(command: str) -> list[tuple[str, bool]]:
                 tokens.append((word, False))
                 word = None
             tokens.append((char, True))
+            if char == "(":
+                reopen.append("")
+            elif char == ")" and reopen:
+                quote = reopen.pop()
         else:
             if char in "<>":
                 redirect = index
             word = (word or "") + char
         index += 1
-    if quote:
+    if quote or '"' in reopen:
         raise ValueError("unclosed quote")
     if word is not None:
         tokens.append((word, False))
@@ -454,6 +468,13 @@ CASES = [
         True,
     ),
     ("gh issue edit `cat nums.txt` --add-label approved", False, True),
+    # A quote in a quoted ``$(...)`` opens a new string rather than closing one.
+    (
+        'gh issue edit "$(gh issue list --limit 1 --json number --jq ".[] | .number")"'
+        " --add-label approved",
+        False,
+        True,
+    ),
     # ``gh api``: flags may come before the endpoint.
     ("gh api -X POST repos/o/r/issues -f title=t", True, True),
     ("gh api --method POST repos/o/r/issues -f title=t", True, True),
