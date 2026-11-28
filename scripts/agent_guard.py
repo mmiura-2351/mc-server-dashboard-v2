@@ -108,7 +108,7 @@ def shell_tokens(command: str) -> list[tuple[str, bool]]:
     tokens: list[tuple[str, bool]] = []
     word: str | None = None
     quote = ""
-    redirect = -1  # index of the last unquoted ``<`` or ``>``
+    redirect: int | None = None  # index of the last unquoted ``<`` or ``>``
     index = 0
     while index < len(command):
         char = command[index]
