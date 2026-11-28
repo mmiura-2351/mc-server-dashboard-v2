@@ -4000,6 +4000,83 @@ async def test_stop_final_snapshot_genuine_server_not_found_still_logs_error(
     assert str(server_id) in record.getMessage()
 
 
+async def test_late_failed_snapshot_logs_one_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #2981: a final snapshot that failed is logged at ERROR whether its
+    # result arrived in time or late. On the late path nothing else saw the
+    # failure, so this line is the only record of it, and an operator alerting on
+    # ERROR must see it. One line for the event: the release it made is in it.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.STOPPED,
+            worker_id=worker,
+        )
+    )
+
+    with caplog.at_level(logging.INFO):
+        await StopServer(
+            uow=uow, control_plane=FakeControlPlane(), clock=FakeClock(_NOW)
+        ).clear_assignment_after_late_snapshot(
+            server_id=ServerId(server_id),
+            worker_id=WorkerId(worker),
+            outcome=CommandOutcome(
+                status=CommandStatus.TRANSFER_FAILED,
+                message="storage backend returned 503",
+            ),
+        )
+
+    [record] = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert record.levelno == logging.ERROR
+    assert "final snapshot FAILED" in record.getMessage()
+    assert str(server_id) in record.getMessage()
+
+
+async def test_late_working_set_absent_refusal_logs_info_not_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #2981: the in-time path's one benign exception holds for a late
+    # result too. The Worker's working_set_absent refusal says it holds no working
+    # set for the id, so there was nothing to lose (issue #1790), and an ERROR
+    # for it would be a false alarm.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.STOPPED,
+            worker_id=worker,
+        )
+    )
+
+    with caplog.at_level(logging.INFO):
+        await StopServer(
+            uow=uow, control_plane=FakeControlPlane(), clock=FakeClock(_NOW)
+        ).clear_assignment_after_late_snapshot(
+            server_id=ServerId(server_id),
+            worker_id=WorkerId(worker),
+            outcome=CommandOutcome(
+                status=CommandStatus.SERVER_NOT_FOUND,
+                message=_WORKING_SET_ABSENT_MESSAGE,
+            ),
+        )
+
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    record = next(
+        r
+        for r in caplog.records
+        if r.levelno == logging.INFO and "holds no working set" in r.getMessage()
+    )
+    assert str(server_id) in record.getMessage()
+
+
 async def test_stop_when_already_stopped_is_conflict() -> None:
     community, server_id, _ = _ids()
     uow = FakeUnitOfWork()
