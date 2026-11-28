@@ -630,10 +630,15 @@ reach it before anything is recorded — `POST …/plugins`,
 headers (an outage on a later jar still aborts the transfer). Nothing was
 installed or changed, so the request is safe to send again. An outage that
 strikes the working-set step **after** the plugin was recorded is not a 503 on
-any of these routes, nor on remove / enable / disable / side: the record is
-already committed, a repeat would answer 409 or 404 instead of finishing, and
-the routes answer the generic 500. The plugin list then shows the recorded
-state; the jar in the working set may not match it.
+any of these routes, nor on remove / enable / disable / side: the routes answer
+the generic 500. Install, catalog install, update, enable, disable and side take
+the record back when the jar's write, rename or delete fails (#4001), so the
+plugin list shows the state from before the request. An update removes its old
+jar after that, and an outage there leaves the new version recorded with the old
+jar still in the working set. Remove has already deleted the record, so its jar
+may stay in the working set. A path the store refuses on that step is a
+`422` naming the store's reason (`invalid_path`, `name_too_long`) on these six
+routes, with nothing changed (#4001).
 
 **Missing jars.** A plugin row can outlive its jar in the content-addressed
 cache (a garbage-collection race or an external deletion). Wherever a route

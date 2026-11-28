@@ -335,10 +335,9 @@ async def install_from_catalog(
         raise _bad_gateway("checksum_mismatch") from exc
     except InvalidFilePathError as exc:
         # A catalog file name the upload rule refuses even sanitized keeps its
-        # own reason (issue #3957); any other path refusal is invalid_path.
-        raise _unprocessable(
-            "invalid_filename" if exc.reason == "invalid_filename" else "invalid_path"
-        ) from exc
+        # own reason (issue #3957), and a path the store refuses keeps the
+        # store's, the install taken back by then (issue #4001).
+        raise _unprocessable(exc.reason) from exc
     except FileTooLargeError as exc:
         raise _too_large() from exc
     except PluginAlreadyExistsError as exc:
@@ -391,7 +390,8 @@ async def install_from_catalog(
         # Resolving the jar reaches the cache before the plugin row is committed,
         # and the cache is content-addressed, so a retry starts clean (issue
         # #3233). An outage on the working-set write after the commit is not
-        # mapped: the row is in by then, and a retry could only answer 409.
+        # mapped: the use case takes the row back out (issue #4001), and the
+        # outage answers the 500 it always did.
         raise _service_unavailable("storage_unavailable") from exc
     await recorder.record(
         AuditEvent(

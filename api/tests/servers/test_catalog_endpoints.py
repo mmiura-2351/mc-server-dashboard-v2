@@ -495,14 +495,14 @@ def test_install_from_catalog_upstream_failure_is_502() -> None:
 
 
 # A catalog file name the upload rule still refuses once sanitised keeps its own
-# reason; any other path refusal is ``invalid_path`` (issue #3957).
+# reason (issue #3957), and a path the store refuses keeps the store's (#4001).
 @pytest.mark.parametrize(
     ("error", "reason"),
     [
         pytest.param(InvalidFilePathError("x"), "invalid_path", id="path"),
         pytest.param(
             InvalidFilePathError("x", reason="name_too_long"),
-            "invalid_path",
+            "name_too_long",
             id="store-refusal",
         ),
         pytest.param(
