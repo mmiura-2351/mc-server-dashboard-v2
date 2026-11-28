@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import hashlib
 import threading
 import uuid
 from collections.abc import AsyncIterator
@@ -11,6 +12,9 @@ from dataclasses import replace
 
 import pytest
 
+from mc_server_dashboard_api.servers.application import (
+    plugin_cache as plugin_cache_module,
+)
 from mc_server_dashboard_api.servers.application import plugins as plugins_module
 from mc_server_dashboard_api.servers.application.archive_validation import (
     run_archive_validation,
@@ -418,6 +422,54 @@ async def test_installs_parsing_together_leave_the_default_executor_free(
     ]
 
 
+class _ThreadRecordingHashlib:
+    """``hashlib``'s two jar hashes, recording the thread each one runs on."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int]] = []
+
+    def sha256(self, data: bytes) -> hashlib._Hash:
+        self.calls.append(("sha256", threading.get_ident()))
+        return hashlib.sha256(data)
+
+    def sha512(self, data: bytes) -> hashlib._Hash:
+        self.calls.append(("sha512", threading.get_ident()))
+        return hashlib.sha512(data)
+
+
+async def test_an_install_hashes_the_jar_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Each hash of a jar near the 512 MiB cap takes seconds (issue #3936), and on
+    # the event loop that would stall every other request meanwhile.
+    recorder = _ThreadRecordingHashlib()
+    monkeypatch.setattr(plugins_module, "hashlib", recorder)
+    monkeypatch.setattr(plugin_cache_module, "hashlib", recorder)
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    use_case = InstallPlugin(
+        uow=uow,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
+
+    plugin = await use_case(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        filename="mod.jar",
+        display_name="Mod",
+        content=b"jar",
+    )
+
+    loop_thread = threading.get_ident()
+    assert sorted(name for name, _ in recorder.calls) == ["sha256", "sha512"]
+    assert all(thread != loop_thread for _, thread in recorder.calls)
+    assert plugin.sha256 == hashlib.sha256(b"jar").hexdigest()
+    assert plugin.checksum_sha512 == hashlib.sha512(b"jar").hexdigest()
+
+
 # -- what an install holds while its manifest waits for the pool (issue #3912) --
 #
 # A parse can wait for a pool thread as long as the slowest validation ahead of
@@ -544,6 +596,106 @@ async def test_a_server_that_leaves_rest_during_the_parse_is_unsettled(
     assert fs.files == {}
     assert cache.blobs == {}
     assert uow.plugins.by_id == {}
+
+
+async def test_a_server_deleted_during_the_parse_is_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A delete can land while the parse runs too. The server is loaded again
+    # under the lock, so the install finds it gone and writes nothing.
+    parse = _HeldParse()
+    monkeypatch.setattr(plugins_module, "parse_manifest_at_ingest", parse)
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    cache = FakePluginCacheStore()
+    use_case = InstallPlugin(
+        uow=uow,
+        file_store=fs,
+        cache=cache,
+        clock=FakeClock(_NOW),
+        lifecycle_lock=FakeLifecycleLock(),
+    )
+    install = asyncio.ensure_future(
+        use_case(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            filename="mod.jar",
+            display_name="Mod",
+            content=b"jar",
+        )
+    )
+    try:
+        await asyncio.wait_for(parse.running.wait(), 10)
+        del uow.servers.by_id[server.id]
+    finally:
+        parse.release.set()
+
+    with pytest.raises(ServerNotFoundError):
+        await install
+    assert fs.files == {}
+    assert cache.blobs == {}
+    assert uow.plugins.by_id == {}
+    assert uow.commits == 0
+
+
+class _RefusingPathStore(FakeFileStore):
+    """A store that refuses every path, as it would a name it cannot hold."""
+
+    def validate_rel_path(self, rel_path: str) -> None:
+        raise InvalidFilePathError(rel_path)
+
+
+@pytest.mark.parametrize("refusal", ["unsettled", "invalid_path", "already_exists"])
+async def test_an_install_the_server_refuses_never_waits_for_the_parse(
+    refusal: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The parse can wait for the pool as long as the slowest validation ahead of
+    # it, holding a body of up to 512 MiB, so an install that would be refused
+    # anyway is refused before it queues (issue #3936). The same checks are made
+    # again under the lock.
+    parses: list[str] = []
+
+    def parse(content: bytes, *, loader: str) -> ParsedManifest:
+        parses.append(loader)
+        return ParsedManifest.empty()
+
+    monkeypatch.setattr(plugins_module, "parse_manifest_at_ingest", parse)
+    uow = FakeUnitOfWork()
+    fs = FakeFileStore()
+    expected: type[Exception]
+    if refusal == "unsettled":
+        server = _server(
+            desired_state=DesiredState.RUNNING, observed_state=ObservedState.RUNNING
+        )
+        expected = ServerFilesUnsettledError
+    elif refusal == "invalid_path":
+        server = _server()
+        fs = _RefusingPathStore()
+        expected = InvalidFilePathError
+    else:
+        server = _server()
+        uow.plugins.seed(_plugin(server_id=server.id, rel_path="mods/mod.jar"))
+        expected = PluginAlreadyExistsError
+    uow.servers.seed(server)
+    use_case = InstallPlugin(
+        uow=uow,
+        file_store=fs,
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+        lifecycle_lock=FakeLifecycleLock(),
+    )
+
+    with pytest.raises(expected):
+        await use_case(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            filename="mod.jar",
+            display_name="Mod",
+            content=b"jar",
+        )
+    assert parses == []
 
 
 async def test_a_vanilla_server_is_refused_without_waiting_for_the_pool(

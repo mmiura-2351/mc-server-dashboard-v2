@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import threading
 import uuid
 
 import pytest
 
+from mc_server_dashboard_api.servers.application import catalog as catalog_module
 from mc_server_dashboard_api.servers.application.catalog import (
     CheckPluginUpdate,
     CheckUpdates,
@@ -18,6 +20,7 @@ from mc_server_dashboard_api.servers.application.catalog import (
     UpdatePlugin,
     side_from_modrinth,
 )
+from mc_server_dashboard_api.servers.application.plugin_manifest import ParsedManifest
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
     CatalogDependency,
     CatalogFile,
@@ -1655,6 +1658,57 @@ async def test_update_plugin_reparses_manifest() -> None:
     assert result.mod_identifier == "fabric-api"
     deps = {d["mod_identifier"]: d for d in result.dependencies}
     assert "newdep" in deps
+
+
+@pytest.mark.parametrize("door", ["install", "update"])
+async def test_a_catalog_jar_is_parsed_on_the_archive_validation_pool(
+    door: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Opening the jar parses its whole zip directory, seconds for a crafted jar
+    # (issue #3936): on the event loop it would stall every other request, and
+    # on the default executor it would hold a worker the fs Storage calls need.
+    threads: list[str] = []
+
+    def parse(content: bytes, *, loader: str) -> ParsedManifest:
+        threads.append(threading.current_thread().name)
+        return ParsedManifest.empty()
+
+    monkeypatch.setattr(catalog_module, "parse_manifest_at_ingest", parse)
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    catalog = FakeCatalogProvider()
+    fs = FakeFileStore()
+    cache = FakePluginCacheStore()
+    if door == "install":
+        version, content = _version()
+        catalog.seed_project(_project(), [version])
+        catalog.seed_file(version.files[0].url, content)
+        await InstallFromCatalog(
+            uow=uow, catalog=catalog, file_store=fs, cache=cache, clock=FakeClock(_NOW)
+        )(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            project_id="proj-1",
+            version_id="ver-1",
+        )
+    else:
+        plugin = _plugin(server_id=server.id, source_version_id="ver-1")
+        uow.plugins.seed(plugin)
+        version, content = _version(version_id="ver-2", file_content=b"new-jar")
+        catalog.seed_project(_project(), [version])
+        catalog.seed_file(version.files[0].url, content)
+        await UpdatePlugin(
+            uow=uow, catalog=catalog, file_store=fs, cache=cache, clock=FakeClock(_NOW)
+        )(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            plugin_id=plugin.id,
+            version_id="ver-2",
+        )
+
+    assert len(threads) == 1
+    assert threads[0].startswith("archive-validation")
 
 
 async def test_update_plugin_different_filename() -> None:
