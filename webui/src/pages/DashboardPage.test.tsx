@@ -1090,6 +1090,44 @@ describe("DashboardPage live status", () => {
     expect(mockApi.get).toHaveBeenCalledTimes(1);
   });
 
+  // Another member creates a server and deletes one: the dashboard follows
+  // the community's server set from the stream, without a reload (#3308).
+  it("shows a server created and drops one deleted elsewhere", async () => {
+    let listed = [server()];
+    mockApi.get.mockImplementation(async () => listed);
+    renderPage();
+    await screen.findByText("survival");
+    const socket = MockWebSocket.last();
+    act(() => {
+      socket.open();
+    });
+
+    listed = [server(), server({ id: "s2", name: "creative" })];
+    act(() => {
+      socket.message({
+        stream: "servers",
+        ts: "t",
+        payload: { change: "created" },
+        server_id: "s2",
+      });
+    });
+    expect(await screen.findByText("creative")).toBeInTheDocument();
+
+    listed = [server({ id: "s2", name: "creative" })];
+    act(() => {
+      socket.message({
+        stream: "servers",
+        ts: "t",
+        payload: { change: "deleted" },
+        server_id: "s1",
+      });
+    });
+    await waitFor(() =>
+      expect(screen.queryByText("survival")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText("creative")).toBeInTheDocument();
+  });
+
   it("shows the live-degraded indicator on WS failure", async () => {
     mockApi.get.mockResolvedValue([server({ observed_state: "running" })]);
     renderPage();
