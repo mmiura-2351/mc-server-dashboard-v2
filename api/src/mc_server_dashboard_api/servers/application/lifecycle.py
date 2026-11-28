@@ -340,6 +340,52 @@ def is_working_set_absent_refusal(outcome: CommandOutcome) -> bool:
     )
 
 
+def _log_failed_final_snapshot(
+    server_id: ServerId, outcome: CommandOutcome, *, late_release: str = ""
+) -> None:
+    """Log a final snapshot that failed, the one line of the event.
+
+    Shared by the result read in time (``_final_snapshot``) and the late one
+    (``_clear_assignment_after_late_snapshot``), so the severity follows the
+    failure and not when its result arrived (issue #2981). The failure is ERROR
+    (issue #841): it is the only record of it, and no retry follows for a stopped
+    server. The one exception is the Worker's working_set_absent refusal (issue
+    #1713), which is INFO (issue #1790). ``late_release`` ends a late result's
+    line with the release it made, and is empty in time.
+    """
+
+    if is_working_set_absent_refusal(outcome):
+        # The Worker holds no working dir for this id, so there is nothing this
+        # dispatch could have captured and the ERROR would be a false alarm that
+        # trains operators to ignore the line that matters (issue #1790). The
+        # Worker keeps no tombstone, so it cannot say WHICH of the benign causes
+        # applies, and neither can this line — claiming "a prior final snapshot
+        # captured it" overstates two of them. Any OTHER failure, including a
+        # SERVER_NOT_FOUND without the pinned refusal message, takes the ERROR.
+        _LOG.info(
+            "final snapshot for server %s was refused by the Worker: it holds no "
+            "working set for this id. Either the set was captured and its scratch "
+            "GC'd already (a final snapshot whose result was lost in flight, or a "
+            "periodic capture of the at-rest set, #2480), or the id was never "
+            "hydrated on this Worker — all benign, so this is not reported as loss "
+            "(#1713/#1790)%s",
+            server_id.value,
+            late_release,
+        )
+        return
+    _LOG.error(
+        "final snapshot FAILED for server %s: %s; publication of the final snapshot "
+        "is unconfirmed, so a cross-worker re-placement may lose progression since "
+        "the last periodic snapshot (#845/#847). Check authoritative Storage's "
+        "current snapshot before recovery: this result carries no publication "
+        "receipt and cannot distinguish a failed publish from a lost publish "
+        "response (no retry exists for a stopped server)%s",
+        server_id.value,
+        outcome.message or outcome.status.value,
+        late_release,
+    )
+
+
 @dataclass
 class _Dispatch:
     """Mutable marker recording whether a start command was sent (issue #101).
@@ -2761,38 +2807,7 @@ class StopServer:
                 )
                 raise FinalSnapshotRefusedError(detail, status=snapshot.status)
             if not snapshot.success:
-                if is_working_set_absent_refusal(snapshot):
-                    # The Worker's working_set_absent refusal (issue #1713): it holds
-                    # no working dir for this id, so there is nothing this dispatch
-                    # could have captured and the final-snapshot ERROR would be a false
-                    # alarm that trains operators to ignore the line that matters
-                    # (issue #1790). The Worker keeps no tombstone, so it cannot say
-                    # WHICH of the benign causes applies, and neither can this line —
-                    # claiming "a prior final snapshot captured it" overstates two of
-                    # them. Any OTHER failure, including a SERVER_NOT_FOUND without
-                    # the pinned refusal message, still takes the ERROR branch below.
-                    _LOG.info(
-                        "final snapshot for server %s was refused by the Worker: it "
-                        "holds no working set for this id. Either the set was "
-                        "captured and its scratch GC'd already (a final snapshot "
-                        "whose result was lost in flight, or a periodic capture of "
-                        "the at-rest set, #2480), or the id was never hydrated on "
-                        "this Worker — all benign, so this is not reported as loss "
-                        "(#1713/#1790)",
-                        server_id.value,
-                    )
-                else:
-                    _LOG.error(
-                        "final snapshot FAILED for server %s: %s; publication of "
-                        "the final snapshot is unconfirmed, so a cross-worker "
-                        "re-placement may lose progression since the last periodic "
-                        "snapshot (#845/#847). Check authoritative Storage's current "
-                        "snapshot before recovery: this result carries no publication "
-                        "receipt and cannot distinguish a failed publish from a lost "
-                        "publish response (no retry exists for a stopped server)",
-                        server_id.value,
-                        snapshot.message or snapshot.status.value,
-                    )
+                _log_failed_final_snapshot(server_id, snapshot)
         except WorkerUnavailableError as exc:
             if exc.upload_may_be_live:
                 # TIMEOUT, not disconnect: the worker is still uploading. Do NOT
@@ -3422,10 +3437,13 @@ class StopServer:
         On SUCCESS publication is confirmed, so this is the same release the on-time
         success path runs; on a FAILURE publication of the final snapshot is
         unconfirmed, so a later cross-worker re-placement may lose progression since
-        the last periodic snapshot — the documented #845/#847 exposure, logged loud
-        (a same-worker start reuses the retained scratch, #767). The result contains
-        no publication receipt; an operator can inspect authoritative Storage's
-        current snapshot to establish what progression it contains before recovery.
+        the last periodic snapshot — the documented #845/#847 exposure (a same-worker
+        start reuses the retained scratch, #767). It is logged at ERROR as on time,
+        in the one line ``_log_failed_final_snapshot`` writes for both, and at INFO
+        for the Worker's working_set_absent refusal (issue #2981). The result
+        contains no publication receipt; an operator can inspect authoritative
+        Storage's current snapshot to establish what progression it contains before
+        recovery.
 
         The outcome's ``message`` is the Worker's own account of that failure,
         logged verbatim beside the release. The cause is whatever it says — a
@@ -3545,20 +3563,14 @@ class StopServer:
                 found_released,
             )
         else:
-            _LOG.warning(
-                "released worker %s for server %s on a LATE failed final snapshot: "
-                "%s; publication of the final snapshot is unconfirmed, so a "
-                "cross-worker re-placement may lose progression since the last "
-                "periodic snapshot "
-                "(#845/#847). Check authoritative Storage's current snapshot before "
-                "recovery: this result cannot distinguish a failed publish from a "
-                "lost publish response. A same-worker start reuses the retained "
-                "scratch (#767). Cleared now instead of waiting out the stale-stop "
-                "arm (#891)%s",
-                worker_id.value,
-                server_id.value,
-                outcome.message or outcome.status.value,
-                found_released,
+            _log_failed_final_snapshot(
+                server_id,
+                outcome,
+                late_release=(
+                    f". Its result arrived LATE: released worker {worker_id.value} "
+                    "now instead of waiting out the stale-stop arm "
+                    f"(#891){found_released}"
+                ),
             )
 
 

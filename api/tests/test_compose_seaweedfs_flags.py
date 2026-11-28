@@ -13,8 +13,16 @@ The store does not bind the Lance Namespace listener (issue #4207). Unset,
 container's address to every peer on the ``mcsd`` network. Nothing in this
 deployment uses it. SECURITY.md Section 6 lists it as disabled by flag.
 
+The store logs to stderr only, and runs as the image's ``seaweed`` user
+(issue #4206). The compose entrypoint replaces the image's own, which passes
+``-logtostderr=true`` and drops root with ``su-exec seaweed``. Without the
+flag, weed's glog also writes its whole log as files in the container's
+``/tmp``, outside the json-file bound. Without the ``su-exec``, weed runs as
+root. The ``chown`` before it re-owns a volume the root-run weed wrote, so an
+existing deployment keeps working.
+
 Static text parsing, like the other ``compose.yaml`` guards in this suite: the
-api has no YAML dependency. Only the ``exec weed server`` line is read, as the
+api has no YAML dependency. Only the entrypoint's ``exec`` line is read, as the
 argv the shell passes, with a ``#`` comment dropped as the shell drops it. A
 comment that names the flag, on its own line or after the command, therefore
 cannot satisfy the test.
@@ -28,12 +36,12 @@ from tests.test_compose_log_forwarding import _compose_service
 
 
 def _weed_server_argv() -> list[str]:
-    """The argv the seaweedfs entrypoint execs ``weed server`` with."""
+    """The argv of the ``exec`` that ends the seaweedfs entrypoint and starts weed."""
 
     (command,) = (
         line.strip()
         for line in _compose_service("seaweedfs").splitlines()
-        if line.strip().startswith("exec weed server ")
+        if line.strip().startswith("exec ")
     )
     return shlex.split(command, comments=True)
 
@@ -50,3 +58,21 @@ def test_seaweedfs_does_not_bind_the_lance_namespace_listener() -> None:
         arg for arg in _weed_server_argv() if arg.startswith("-s3.port.lance=")
     ]
     assert lance_ports == ["-s3.port.lance=0"]
+
+
+def test_seaweedfs_logs_to_stderr_only() -> None:
+    argv = _weed_server_argv()
+    # A glog option of ``weed`` itself: ``weed server`` does not accept it.
+    weed_options = argv[argv.index("weed") + 1 : argv.index("server")]
+    assert "-logtostderr=true" in weed_options
+
+
+def test_seaweedfs_runs_weed_as_the_seaweed_user() -> None:
+    argv = _weed_server_argv()
+    assert argv[: argv.index("weed")] == ["exec", "su-exec", "seaweed"]
+    commands = {
+        line.strip()
+        for line in _compose_service("seaweedfs").splitlines()
+        if not line.strip().startswith("#")
+    }
+    assert "chown -R seaweed:seaweed /data" in commands
