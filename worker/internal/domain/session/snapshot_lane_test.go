@@ -77,15 +77,18 @@ var passingKinds = []string{"ServerCommand", "TunnelDial"}
 // While a server's snapshot runs, a player join and a console line for that
 // server are answered without waiting for it, in the order they arrived.
 func TestQuickCommandsDoNotWaitForASameServerSnapshot(t *testing.T) {
-	handler := newOrderHandler("snap")
+	handler := newOrderHandler("snap", "join")
 	transport, _, stop := startExpiryRunner(t, handler, discardLogger())
 	defer stop()
 
 	transport.commands <- Command{CommandID: "snap", ServerID: "s1", Kind: "SnapshotTrigger"}
 	waitFor(t, func() bool { return handler.started("snap") })
 	transport.commands <- Command{CommandID: "join", ServerID: "s1", Kind: "TunnelDial"}
+	waitFor(t, func() bool { return handler.started("join") })
 	transport.commands <- Command{CommandID: "console", ServerID: "s1", Kind: "ServerCommand", Line: "say hi"}
+	awaitReceived(t, transport)
 
+	handler.open("join")
 	waitForResult(t, transport, "join")
 	waitForResult(t, transport, "console")
 	if res, ok := resultFor(transport, "snap"); ok {
