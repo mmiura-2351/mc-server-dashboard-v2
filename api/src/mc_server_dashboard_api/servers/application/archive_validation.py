@@ -18,10 +18,12 @@ once, and as many again waiting for it. Each admitted upload holds its body in
 memory, so that also bounds the memory the doors hold at once. Both sizes are
 constants, as the KDF pool's and the data-plane transfer limit's are.
 
-Two more uploads read zips on this pool, without an admission (issue #3912): the
-plugin upload reads the jar's manifest, which parses the jar's whole zip
-directory, and the resource-pack upload validates the pack. Nothing bounds how
-many of those queue for a thread, so an admitted upload can wait behind them.
+More zip reads run on this pool, without an admission. Every read of a plugin
+jar's manifest, which parses the jar's whole zip directory: the plugin upload's
+(issue #3912), the catalog install's and update's, and the restore's plugin
+reconcile's (issue #3936). And the resource-pack upload validates the pack there
+(issue #3912). Nothing bounds how many of those queue for a thread, so an
+admitted upload can wait behind them.
 """
 
 from __future__ import annotations

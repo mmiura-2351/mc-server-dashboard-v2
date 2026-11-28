@@ -17,6 +17,7 @@ import io
 import json
 import struct
 import zipfile
+from typing import NoReturn
 
 import pytest
 
@@ -627,6 +628,32 @@ class TestZipSafety:
         }
         with pytest.raises(InvalidModJarError):
             parse_manifest(_make_jar(entries), server_type="fabric")
+
+    @pytest.mark.parametrize("declared", ["every-entry", "one-entry"])
+    def test_too_many_entries_are_refused_before_the_directory_is_parsed(
+        self, declared: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Opening a zip builds an entry for every record in its central directory,
+        # about 2.7 us each, so seconds for a crafted jar near the cap (issue
+        # #3936). ``ZipFile`` reads the directory's bytes and ignores the count the
+        # end record declares, so a jar whose end record declares one entry is
+        # refused as well.
+        from mc_server_dashboard_api.servers.application import plugin_manifest
+
+        monkeypatch.setattr(plugin_manifest, "_MAX_ENTRY_COUNT", 2)
+        jar = _make_jar({"fabric.mod.json": _MANIFEST, "a.class": "a", "b.class": "b"})
+        if declared == "one-entry":
+            out = bytearray(jar)
+            struct.pack_into("<HH", out, out.rfind(b"PK\x05\x06") + 8, 1, 1)
+            jar = bytes(out)
+
+        def opened(*args: object, **kwargs: object) -> NoReturn:
+            raise AssertionError("ZipFile parsed the directory before the cap")
+
+        monkeypatch.setattr(zipfile, "ZipFile", opened)
+
+        with pytest.raises(InvalidModJarError, match="too many entries"):
+            parse_manifest(jar, server_type="fabric")
 
     def test_decompression_bomb_raises(self) -> None:
         from mc_server_dashboard_api.servers.application import plugin_manifest

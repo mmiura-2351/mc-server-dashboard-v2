@@ -12,6 +12,9 @@ import hashlib
 import uuid
 from dataclasses import dataclass
 
+from mc_server_dashboard_api.servers.application.archive_validation import (
+    run_archive_validation,
+)
 from mc_server_dashboard_api.servers.application.plugin_cache import (
     ingest_into_cache,
 )
@@ -413,7 +416,11 @@ class InstallFromCatalog:
 
         # Parse the jar manifest for dependency metadata (issue #1307): the
         # uniform source, same as a local upload. Tolerant of an unreadable jar.
-        manifest = parse_manifest_at_ingest(content, loader=loader)
+        # Opening the jar parses its whole zip directory, so the parse runs on
+        # the archive-validation pool, as the upload's does (issue #3936).
+        manifest = await run_archive_validation(
+            parse_manifest_at_ingest, content, loader=loader
+        )
 
         # Side (issue #1308): Modrinth's per-environment support is the most
         # accurate source, so it wins over the jar manifest hint here.
@@ -711,8 +718,11 @@ class UpdatePlugin:
         )
 
         # Re-parse the new jar's manifest so the dependency metadata tracks the
-        # updated version (issue #1307). Tolerant of an unreadable jar.
-        manifest = parse_manifest_at_ingest(content, loader=loader)
+        # updated version (issue #1307). Tolerant of an unreadable jar. On the
+        # archive-validation pool, as in InstallFromCatalog (issue #3936).
+        manifest = await run_archive_validation(
+            parse_manifest_at_ingest, content, loader=loader
+        )
 
         # Re-capture the new version's required catalog deps (issue #1321) so they
         # track the update, same as the manifest metadata above.

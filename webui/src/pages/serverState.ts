@@ -65,7 +65,8 @@ export type AtRestWriteRefusal = "not_at_rest" | "server_assigned";
  * Why the API would refuse a write to the server's at-rest data, or `null`
  * where it accepts one: the one rule the at-rest write controls gate on (the
  * Files, Plugins and Backups restore tabs, the resource pack and the Settings
- * save). It is the API's `Server.is_quiescent()` gate, in the order
+ * save), and the export and a manual backup, which the API holds the same way
+ * (issue #4146). It is the API's `Server.is_quiescent()` gate, in the order
  * `not_quiescent_error` names it (issue #3998).
  *
  * - `not_at_rest`: running, transitional or under a running intent
