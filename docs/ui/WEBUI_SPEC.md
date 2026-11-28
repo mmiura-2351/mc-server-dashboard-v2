@@ -317,9 +317,11 @@ file it replaces, and when the file's version history is full that evicts the
 oldest version — possibly the one being rolled back to — so the file may
 already hold the restored content while the same rollback again is a 404.
 Reload the listing to see what the failed request left. The same holds for `PATCH …/{sid}` when the store
-fails while it reads `server.properties`. These statuses describe the object
-storage backend, which reports an outage as such; the filesystem backend
-reports a device fault on these routes as a 500.
+fails while it reads `server.properties`. These statuses hold on both storage
+backends: the object backend reports a store that fails to answer as an outage,
+and the filesystem backend a transient device or mount fault, such as `EIO` or
+a stale network mount. A standing filesystem fault, such as a permission error
+or a full disk, is a 500 on every route, since a retry would not clear it.
 
 **A lost lifecycle lock.** A route that runs under the server's lifecycle lock
 (DATABASE.md Section 7) answers **503 `lifecycle_lock_lost`** when the lock's
