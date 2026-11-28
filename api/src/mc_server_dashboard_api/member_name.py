@@ -1,9 +1,11 @@
 """The member-name rule: how deep and how long a working set's names may be (#3973).
 
 Every door that creates a name in a working set judges it by
-:func:`member_name_refusal`: the files-API mutations, an archive extract, a
-server import and the backup upload gate. A working set the rule admits is one
-the Worker can settle, check and snapshot, and one both backends can hold:
+:func:`member_name_refusal`: the files-API mutations, a rollback that creates a
+deleted name again, an archive extract, a server import, a plugin's enable,
+disable and side change, and the backup upload gate (issue #4008). A working set
+the rule admits is one the Worker can settle, check and snapshot, and one both
+backends can hold:
 
 - at most :data:`MAX_DIRECTORY_DEPTH` directory levels, counted as the Worker
   counts them: the working-set root is level 0 and only directories count, so a
