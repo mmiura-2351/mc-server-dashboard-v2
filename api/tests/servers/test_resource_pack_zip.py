@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import io
 import json
+import struct
 import zipfile
+from typing import NoReturn
 
 import pytest
 
@@ -269,6 +271,32 @@ class TestZipBomb:
                 zf.writestr(f"assets/file_{i}.txt", "x")
         with pytest.raises(InvalidResourcePackError, match="too many entries"):
             validate_and_normalize(buf.getvalue())
+
+    @pytest.mark.parametrize("declared", ["every-entry", "one-entry"])
+    def test_too_many_entries_are_refused_before_the_directory_is_parsed(
+        self, declared: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Opening a zip builds an entry for every record in its central directory,
+        # about 2.7 us each, so seconds for a crafted pack near the cap (issue
+        # #3936). ``ZipFile`` reads the directory's bytes and ignores the count the
+        # end record declares, so a pack whose end record declares one entry is
+        # refused as well.
+        from mc_server_dashboard_api.servers.application import resource_pack_zip
+
+        monkeypatch.setattr(resource_pack_zip, "_MAX_ENTRY_COUNT", 2)
+        pack = _make_zip({"pack.mcmeta": _VALID_MCMETA, "a.txt": "a", "b.txt": "b"})
+        if declared == "one-entry":
+            out = bytearray(pack)
+            struct.pack_into("<HH", out, out.rfind(b"PK\x05\x06") + 8, 1, 1)
+            pack = bytes(out)
+
+        def opened(*args: object, **kwargs: object) -> NoReturn:
+            raise AssertionError("ZipFile parsed the directory before the cap")
+
+        monkeypatch.setattr(zipfile, "ZipFile", opened)
+
+        with pytest.raises(InvalidResourcePackError, match="too many entries"):
+            validate_and_normalize(pack)
 
 
 class TestPathTraversal:

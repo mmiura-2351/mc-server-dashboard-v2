@@ -20,6 +20,7 @@ import errno
 import hashlib
 import io
 import json
+import threading
 import uuid
 import zipfile
 from collections.abc import Callable
@@ -30,7 +31,9 @@ import pytest
 from mc_server_dashboard_api.servers.adapters.file_store import (
     StorageFileStoreAdapter,
 )
+from mc_server_dashboard_api.servers.application import backups as backups_module
 from mc_server_dashboard_api.servers.application.backups import RestoreBackup
+from mc_server_dashboard_api.servers.application.plugin_manifest import ParsedManifest
 from mc_server_dashboard_api.servers.domain.backup import (
     Backup,
     BackupHealth,
@@ -531,6 +534,42 @@ async def test_restore_updates_shifted_plugin_checksum() -> None:
     assert len(rows) == 1
     assert rows[0].id == existing.id
     assert rows[0].checksum_sha512 == hashlib.sha512(new_jar).hexdigest()
+
+
+# --- where the restored jars are parsed (issue #3936) ------------------------
+
+
+@pytest.mark.parametrize("jar", ["ghost", "shifted"])
+async def test_a_restored_jar_is_parsed_on_the_archive_validation_pool(
+    jar: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Opening a jar parses its whole zip directory, seconds for a crafted jar: on
+    # the event loop it would stall every other request, and on the default
+    # executor it would hold a worker the fs Storage calls need.
+    threads: list[str] = []
+
+    def parse(content: bytes, *, loader: str) -> ParsedManifest:
+        threads.append(threading.current_thread().name)
+        return ParsedManifest.empty()
+
+    monkeypatch.setattr(backups_module, "parse_manifest_at_ingest", parse)
+    server = _server()
+    repo, backups, backup, archive = _seed_restore_fixture(server)
+    plugins = FakePluginRepository()
+    file_store = FakeFileStore()
+    file_store.files["mods/mod.jar"] = _minimal_jar(b"restored")
+    if jar == "shifted":
+        plugins.seed(
+            _plugin(server_id=server.id, rel_path="mods/mod.jar", filename="mod.jar")
+        )
+    uow = FakeUnitOfWork(servers=repo, backups=backups, plugins=plugins)
+
+    await _make_restore(uow, archive, file_store=file_store)(
+        community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
+    )
+
+    assert len(threads) == 1
+    assert threads[0].startswith("archive-validation")
 
 
 # --- a listing that could not be read (issue #3221) --------------------------
