@@ -407,10 +407,8 @@ container, such as one that rebuilds and restarts only `api`, leaves the store
 on its old version, and the API's first start after the upgrade runs the store
 owner claim on that version. On 2026-11-21 the canonical host's store still ran
 `chrislusf/seaweedfs:4.41` while `compose.yaml` pinned 4.53 (issue #3949), and
-4.41 has not been checked for the faults above. Recreate the store on the
-pinned image with or before the API: the `docker compose up -d` of Section 9
-(or `make update`) recreates each service whose configuration changed, so it
-recreates `seaweedfs` when its pin moved.
+4.41 has not been checked for the faults above. Recreate the `seaweedfs`
+container on the pinned image with or before the API upgrade.
 
 ### Operational trade-off: cost/perf scales with operation count
 

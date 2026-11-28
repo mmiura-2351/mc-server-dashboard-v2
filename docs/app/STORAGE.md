@@ -2021,7 +2021,8 @@ the startup sweep age-gates uploads via `ListParts` when SeaweedFS omits
 `Initiated` (Section 4.3), and behind it a bucket-level
 `AbortIncompleteMultipartUpload` lifecycle rule reclaims the residual gap the
 sweep cannot age-gate — an upload that crashes after `CreateMultipartUpload` but
-before its first part, which carries no timestamp. The rule is applied by a
+before its first part, which carries no timestamp on a store that omits
+`Initiated`. The rule is applied by a
 one-shot compose service (`seaweedfs-lifecycle`) on startup and self-verifies
 that SeaweedFS honored it (DEPLOYMENT.md Section 5); `weed shell
 s3.clean.uploads` is an optional operator-side cleanup as well.
