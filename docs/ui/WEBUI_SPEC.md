@@ -880,10 +880,14 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   holds"). So while a server at rest still has a Worker assigned, each shows
   disabled with "The server is still assigned to a Worker. Wait for it to be
   released, then try again." beside it, until the release frame frees it
-  (#4003). A server not at rest keeps each surface's own stop-the-server
-  rule; a running server is always assigned, and waiting for a release is not
-  its remedy. One rule in `serverState.ts`, `atRestWriteRefusal`, decides it
-  for every surface.
+  (#4003). Both Exports (the header's and the danger zone's) and a manual
+  Create backup are held the same way, since the API refuses them until the
+  release too; the header Export gives the reason as its tooltip (#4146). A
+  server not at rest keeps each surface's own stop-the-server rule; a running
+  server is always assigned, and waiting for a release is not its remedy. A
+  running server's Create backup stays offered: it takes the snapshot path.
+  One rule in `serverState.ts`, `atRestWriteRefusal`, decides it for every
+  surface.
 - A server whose Worker refused the stop's final snapshot
   (`final_snapshot_refusal` `busy` or `unavailable`, Section 2.3 "A stopped
   server a Worker still holds") is held with no bound, until a retry of the
@@ -1002,8 +1006,9 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   A restore answering 503 `publish_unknown` (the store could not confirm whether
   it published, #3564) says the backup may have been restored and asks the user
   to retry.
-- Create backup button (works on running servers — on-demand snapshot path);
-  upload backup (file picker). A create answering 409 `working_set_too_large`
+- Create backup button (works on running servers — on-demand snapshot path;
+  held with the release reason while a server at rest still has a Worker
+  assigned, 6.4); upload backup (file picker). A create answering 409 `working_set_too_large`
   (the server's files would make an archive past the 8 GiB backup cap, #3859)
   wrote nothing; its message names the limit and asks the user to make the
   server's files smaller, since retrying as they are fails the same way. An
@@ -1059,7 +1064,8 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   before the release, and a copy of the API's safe-key list in the client
   would drift from it (#4057).
 - Danger zone: delete server (typed confirm; held while a Worker is assigned,
-  6.4), export ZIP.
+  6.4), export ZIP (needs the server at rest, and held with the release
+  reason while a Worker is still assigned, 6.4).
 
 ### 6.10 Community settings
 - **Members**: table (username, roles as chips); add-member dialog by exact
@@ -1516,11 +1522,11 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   `worker_busy` / `server_busy` say another operation on the server is still
   running and the request was refused without being applied, so the operator
   retries in a moment; `server_assigned` on the Files, Backups, Plugins and
-  Settings tabs (the resource pack and a delete included, 6.4) says the
-  server is still assigned to a Worker and to wait for it to be released
-  before trying again, since the hold can outlast a retry (on the Settings
-  tab, whose export is not held, it names the refusal a refusal-held server
-  is held for, 6.4); the sanitized
+  Settings tabs (the resource pack and a delete included, 6.4) and on the
+  header Export says the server is still assigned to a Worker and to wait for
+  it to be released before trying again, since the hold can outlast a retry
+  (on the Settings tab and for a manual backup it names the refusal a
+  refusal-held server is held for, 6.4); the sanitized
   start/restart-failure categories
   `port_conflict` / `image_missing` name the cause the Worker classified, and
   `server_properties_unreadable` says the server's `server.properties` is not a

@@ -35,6 +35,17 @@ describe("backupErrorPresentation", () => {
     expect(backupErrorPresentation(status, reason)).toBe(key);
   });
 
+  // A create of a server held by a refused final snapshot names the refusal,
+  // since that hold has no bound (#4057, #4146).
+  it.each(["busy", "unavailable"] as const)(
+    "names a %s refusal for a 409 server_assigned",
+    (refusal) => {
+      expect(
+        backupErrorPresentation(409, "server_assigned", undefined, refusal),
+      ).toBe(`common.serverHeld.${refusal}`);
+    },
+  );
+
   // The reason wins over the bare-503 status arm, which would blame the server
   // host for an object-store outage (issue #2378).
   it("names the object store for a 503 storage_unavailable", () => {

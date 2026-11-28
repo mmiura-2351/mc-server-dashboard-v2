@@ -13,8 +13,9 @@
  * probably still running (issue #2466) — `server_properties_unreadable`,
  * a `server.properties` the Worker refuses to read (issue #3347) —
  * `command_expired`, a command the busy Worker did not get to in time (issue
- * #3305) — and `final_snapshot_refused`, a held server's final snapshot that
- * its Worker refused again (issue #4056).
+ * #3305) — `final_snapshot_refused`, a held server's final snapshot that
+ * its Worker refused again (issue #4056) — and `server_assigned`, the export
+ * mint of a server a stop still holds (issue #4146).
  *
  * Three reasons keep the state-changed treatment: `invalid_transition`,
  * `transition_conflict` and `server_not_running` each mean the server really
@@ -144,6 +145,13 @@ export type LifecycleAction = "start" | "stop" | "restart";
 // without the snapshot is the operator's way out, which the message names
 // (issue #4057).
 //
+// `server_assigned` is the export mint of a server at rest whose stop still
+// holds its Worker (servers/api/servers.py, issue #3998). The header Export is
+// held while the cache shows that, so this is a cache that still showed the
+// server released. Like `server_unsettled` it is a standing requirement, not a
+// race, so it takes the release reason the held controls show (issue #4146).
+// No lifecycle verb answers it.
+//
 // The refetch is deliberately kept (issue #2420): it is not a side effect of
 // this mapping — every lifecycle mutation invalidates in `onSettled` regardless
 // of outcome (useLifecycleMutation.ts) — and for the stop and
@@ -161,6 +169,7 @@ const SPECIFIC_409_MESSAGE: Record<string, TranslationKey> = {
     "dashboard.lifecycle.serverPropertiesUnreadable",
   command_expired: "dashboard.lifecycle.commandExpired",
   final_snapshot_refused: "dashboard.lifecycle.finalSnapshotRefused",
+  server_assigned: "common.serverAssigned",
 };
 
 // Reasons whose honest message depends on the verb, consulted before

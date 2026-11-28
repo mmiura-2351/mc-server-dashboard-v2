@@ -1679,6 +1679,12 @@ describe("ServerDetailPage a server held by a refused final snapshot (#4057)", (
 describe("ServerDetailPage export (minted grant, #2353)", () => {
   const GRANT_PATH = `/api/communities/${CID}/servers/${SID}/export/download-grant`;
   const GRANT_URL = `/api/communities/${CID}/servers/${SID}/export?grant=jwt-1`;
+  // A stopped server its stop has released: the API mints the export grant.
+  const released = {
+    observed_state: "stopped",
+    desired_state: "stopped",
+    assigned_worker_id: null,
+  };
   const clicks: HTMLAnchorElement[] = [];
   let fetchSpy: MockInstance<typeof fetch>;
 
@@ -1707,7 +1713,7 @@ describe("ServerDetailPage export (minted grant, #2353)", () => {
   }
 
   it("mints a grant and saves it under the server filename", async () => {
-    routeGet({ srv: { observed_state: "stopped", desired_state: "stopped" } });
+    routeGet({ srv: released });
     mockApi.post.mockResolvedValue({
       download_url: GRANT_URL,
       expires_at: "2026-07-27T04:00:30Z",
@@ -1736,7 +1742,7 @@ describe("ServerDetailPage export (minted grant, #2353)", () => {
   });
 
   it("disables the export button while the mint is in flight", async () => {
-    routeGet({ srv: { observed_state: "stopped", desired_state: "stopped" } });
+    routeGet({ srv: released });
     let settleMint: (grant: { download_url: string }) => void = () => {};
     mockApi.post.mockReturnValue(
       new Promise<{ download_url: string }>((resolve) => {
@@ -1762,7 +1768,7 @@ describe("ServerDetailPage export (minted grant, #2353)", () => {
   });
 
   it("shows the unsettled toast when the actions-bar mint 409s, and saves nothing", async () => {
-    routeGet({ srv: { observed_state: "stopped", desired_state: "stopped" } });
+    routeGet({ srv: released });
     mockApi.post.mockRejectedValue(
       new ApiError(409, { reason: "server_unsettled" }),
     );
@@ -1780,7 +1786,7 @@ describe("ServerDetailPage export (minted grant, #2353)", () => {
   });
 
   it("routes a mint 403 through the permission glue, and saves nothing", async () => {
-    routeGet({ srv: { observed_state: "stopped", desired_state: "stopped" } });
+    routeGet({ srv: released });
     mockApi.post.mockRejectedValue(
       new ApiError(403, { reason: "forbidden", permission: "file:read" }),
     );
@@ -1800,7 +1806,7 @@ describe("ServerDetailPage export (minted grant, #2353)", () => {
   });
 
   it("mints a grant from the danger-zone export button too", async () => {
-    routeGet({ srv: { observed_state: "stopped", desired_state: "stopped" } });
+    routeGet({ srv: released });
     mockApi.post.mockResolvedValue({
       download_url: GRANT_URL,
       expires_at: "2026-07-27T04:00:30Z",
@@ -1823,7 +1829,7 @@ describe("ServerDetailPage export (minted grant, #2353)", () => {
   });
 
   it("shows the unsettled toast when the danger-zone mint 409s", async () => {
-    routeGet({ srv: { observed_state: "stopped", desired_state: "stopped" } });
+    routeGet({ srv: released });
     mockApi.post.mockRejectedValue(
       new ApiError(409, { reason: "server_unsettled" }),
     );
@@ -1844,7 +1850,7 @@ describe("ServerDetailPage export (minted grant, #2353)", () => {
   });
 
   it("mints no grant on render — only on click", async () => {
-    routeGet({ srv: { observed_state: "stopped", desired_state: "stopped" } });
+    routeGet({ srv: released });
     renderPage();
 
     await screen.findByText("survival");
@@ -1861,6 +1867,58 @@ describe("ServerDetailPage export (minted grant, #2353)", () => {
     expect(
       screen.getByRole("button", { name: t("serverDetail.export") }),
     ).toBeDisabled();
+  });
+
+  // A stop holds its Worker until the final snapshot settles, and the API
+  // refuses the export grant until the release (409 server_assigned, #3998):
+  // both Exports are held, with the reason (#4146).
+  describe("a stopped server its Worker still holds", () => {
+    const held = { ...released, assigned_worker_id: "worker-a" };
+
+    it("holds the actions-bar Export with the reason", async () => {
+      routeGet({ srv: held });
+      renderPage();
+
+      await screen.findByText("survival");
+      const button = screen.getByRole("button", {
+        name: t("serverDetail.export"),
+      });
+      expect(button).toBeDisabled();
+      expect(button).toHaveAccessibleDescription(t("common.serverAssigned"));
+    });
+
+    it("holds the danger-zone Export with the reason", async () => {
+      routeGet({ srv: held });
+      renderPage();
+
+      await screen.findByText("survival");
+      openSettings();
+      const button = screen.getByRole("button", {
+        name: t("serverDetail.danger.exportButton"),
+      });
+      expect(button).toBeDisabled();
+      expect(button).toHaveAccessibleDescription(t("common.serverAssigned"));
+    });
+  });
+
+  // The cache can still show the server released when the API finds it
+  // assigned: the actions-bar mint names the hold, not a state change (#4146).
+  it("toasts the release reason when the actions-bar mint answers 409 server_assigned", async () => {
+    routeGet({ srv: released });
+    mockApi.post.mockRejectedValue(
+      new ApiError(409, { reason: "server_assigned" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.export") }),
+    );
+
+    expect(
+      (await screen.findByText(t("common.serverAssigned"))).closest(".toast"),
+    ).not.toBeNull();
+    expect(clicks).toHaveLength(0);
   });
 
   it("hides export when the caller lacks file:read", async () => {
