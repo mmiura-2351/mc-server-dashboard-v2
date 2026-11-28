@@ -283,12 +283,11 @@ every log it creates:
   `logging:` setting, the `x-logging` anchor at the top of the file: the
   `json-file` driver, rotated at `max-size` 50m, keeping at most `max-file` 5
   files, the live one included. Each service holds at most 250 MB of log there.
-  The exception is `seaweedfs`: under the entrypoint `compose.yaml` gives it,
-  `weed` also writes a second copy of its log as files in the container's
-  `/tmp`, in the container's writable layer and outside this bound
-  (issue #4206). The bound is part of `compose.yaml` itself, with no `.env`
-  setting: the deploy preflight refuses a checkout with local edits, so changing
-  it is a change to the repository.
+  That holds for `seaweedfs` too: `compose.yaml` starts `weed` with
+  `-logtostderr=true`, so it writes its log to stderr only and keeps no second
+  copy as files in the container (issue #4206). The bound is part of
+  `compose.yaml` itself, with no `.env` setting: the deploy preflight refuses a
+  checkout with local edits, so changing it is a change to the repository.
 - **The Minecraft server containers.** They are not compose services: the
   worker creates them, and sets the same kind of bound on each, the launch
   container and the Forge install container alike. `driver.container.log_max_size`
@@ -900,12 +899,10 @@ single host they draw on the same free space. Concurrent spools add up.
 - A restore or a backup health check holds one archive while it runs.
 
 **Container logs.** Each compose service keeps at most 250 MB of `json-file`
-log (`max-size` 50m, `max-file` 5), 2 GB for the eight services. `seaweedfs`
-keeps a second copy on top: `weed` writes its own log files (INFO, WARNING and
-ERROR) in the container's `/tmp`, which that bound does not cover. `weed -h`
-gives their limits as `-log_max_size_mb` 1800 and `-log_max_files` 5 per
-severity; issue #4206 tracks bounding them. Each Minecraft server container
-keeps up to 250 MB at the worker's defaults
+log (`max-size` 50m, `max-file` 5), 2 GB for the eight services. That bound
+holds for `seaweedfs` too: `weed` runs with `-logtostderr=true`, so it writes no
+log files of its own in the container (issue #4206). Each Minecraft server
+container keeps up to 250 MB at the worker's defaults
 (`driver.container.log_max_size` 50m, `driver.container.log_max_file` 5). See
 [Container log rotation](#container-log-rotation).
 
@@ -1867,6 +1864,28 @@ container was replaced, so the existing stamp still describes what is running.
 > For a verdict of BELOW, free space first (Section 5, "Recovery"). Once 5% is
 > free, writes resume up to about 65 seconds later (a minute until the next
 > check, plus a heartbeat), with no restart. See Section 5, "Disk headroom".
+
+> **Caveat — `weed` now runs as the `seaweed` user, not as root.** The update
+> that brings issue #4206 recreates `seaweedfs`. Its entrypoint now starts
+> `weed` as the image's unprivileged `seaweed` user (uid and gid 1000), as the
+> image's own entrypoint does. Before the update `weed` ran as root, so the
+> files in an existing `seaweedfs-data` volume belong to root. The entrypoint
+> re-owns the whole volume to `seaweed` with `chown -R` at every start, before
+> it gives up root, so nothing has to be done by hand: the first start after
+> the update re-owns the old files, and later starts find nothing to change.
+> The same update starts `weed` with `-logtostderr=true`, so its log is in
+> `docker logs` only. The log files the old container kept in its `/tmp` go
+> away with that container. After the update, check all three:
+>
+> ```sh
+> docker compose exec seaweedfs grep '^Uid:' /proc/1/status   # Uid: 1000 1000 1000 1000
+> docker compose exec seaweedfs ls -A /tmp                     # prints nothing
+> docker compose ps seaweedfs                                  # STATUS ends in (healthy)
+> ```
+>
+> Going back to a revision from before the update needs nothing either. Its
+> `weed` runs as root, which reads and writes the re-owned files, and the next
+> start of a later revision re-owns whatever it created.
 
 > **Caveat — Bedrock is opt-in on the relay.** The relay's
 > Bedrock QUIC/UDP tunnel listener is gated on `bedrock.enabled` (`relay.toml`) /
