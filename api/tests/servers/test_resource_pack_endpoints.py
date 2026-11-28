@@ -54,7 +54,6 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ResourcePackStorageUnavailableError,
     ServerAssignedError,
     ServerBusyError,
-    ServerFileStorageUnavailableError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
     WorkingSetSeedFailedError,
@@ -1373,21 +1372,6 @@ class TestAssignEndpoint:
             )
         assert resp.status_code == 503
         assert resp.json()["reason"] == "seed_failed"
-        assert recorder.events == []
-
-    def test_assign_properties_read_outage_is_503(self) -> None:
-        # The server.properties READ hit a store outage (issue #3233). It runs
-        # before the assignment is upserted, so nothing changed.
-        uc = _FakeUseCase(error=ServerFileStorageUnavailableError("nope"))
-        recorder = RecordingAuditRecorder()
-        app = _assignment_app(assign=uc, recorder=recorder)
-        with TestClient(app) as client:  # type: ignore[arg-type]
-            resp = client.post(
-                _ASSIGN_PATH,
-                json={"resource_pack_id": str(uuid.uuid4())},
-            )
-        assert resp.status_code == 503
-        assert resp.json()["reason"] == "storage_unavailable"
         assert recorder.events == []
 
 

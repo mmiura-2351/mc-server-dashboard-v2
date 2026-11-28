@@ -2015,6 +2015,8 @@ export const ja: Record<TranslationKey, string> = {
     "リソースパックを割り当てできませんでした。",
   "serverDetail.resourcePack.unassignError":
     "リソースパックの割り当てを解除できませんでした。",
+  "serverDetail.resourcePack.storageUnavailable":
+    "現在、サーバーのファイルストレージを利用できません。しばらくしてから再度お試しください。",
   "serverDetail.resourcePack.assignDialog.title": "リソースパックを割り当て",
   "serverDetail.resourcePack.assignDialog.select": "リソースパック",
   "serverDetail.resourcePack.assignDialog.selectPlaceholder": "パックを選択…",

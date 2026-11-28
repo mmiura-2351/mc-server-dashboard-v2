@@ -292,7 +292,9 @@ class AssignResourcePack:
     503) rather than as whatever the storage layer raised (issue #2458): the
     assignment row was not committed, so assigning again is all the caller has to
     do. Nothing is promised about the file -- the storage write is not rolled back
-    with the row, and may have replaced it before failing.
+    with the row, and may have replaced it before failing. A failed read of the
+    file surfaces the same way (issue #3278); it runs before the row is upserted,
+    so nothing changed.
 
     An assignment with no prompt removes any ``resource-pack-prompt`` line the
     previous assignment left behind (issue #2792): the row now says "no prompt", and
@@ -333,9 +335,12 @@ class AssignResourcePack:
                 if pack is None:
                     raise ResourcePackNotFoundError(str(resource_pack_id.value))
 
-            props = await read_properties(
-                self.file_store, community_id=community_id, server_id=server_id
-            )
+            try:
+                props = await read_properties(
+                    self.file_store, community_id=community_id, server_id=server_id
+                )
+            except Exception as exc:
+                raise WorkingSetSeedFailedError(str(server_id.value)) from exc
 
             url = pack_download_url(public_base_url, pack.id, pack.filename)
             if props is None:
@@ -414,6 +419,12 @@ class UnassignResourcePack:
     write is skipped entirely and only the row goes (issue #2810). Clearing from
     empty would publish a lone-newline file whose platform half is missing
     altogether — strictly worse than the absent file it replaces.
+
+    A failed read or rewrite of the file surfaces as
+    :class:`WorkingSetSeedFailedError` (mapped to 503), as the assign's write does
+    (issue #3278). Both run before the row is deleted, so the assignment still
+    stands and unassigning again clears the same keys; the interrupted write may
+    already have replaced the file.
     """
 
     uow: UnitOfWork
@@ -436,19 +447,25 @@ class UnassignResourcePack:
                 if assignment is None:
                     raise ResourcePackNotFoundError(str(server_id.value))
 
-            props = await read_properties(
-                self.file_store, community_id=community_id, server_id=server_id
-            )
+            try:
+                props = await read_properties(
+                    self.file_store, community_id=community_id, server_id=server_id
+                )
+            except Exception as exc:
+                raise WorkingSetSeedFailedError(str(server_id.value)) from exc
             # The rewrite and the row delete behind it rely on the lifecycle lock
             # (issue #3927).
             await lock.ensure_held()
             if props is not None:
-                await self.file_store.write_file(
-                    community_id=community_id,
-                    server_id=server_id,
-                    rel_path="server.properties",
-                    content=clear_resource_pack_properties(props),
-                )
+                try:
+                    await self.file_store.write_file(
+                        community_id=community_id,
+                        server_id=server_id,
+                        rel_path="server.properties",
+                        content=clear_resource_pack_properties(props),
+                    )
+                except Exception as exc:
+                    raise WorkingSetSeedFailedError(str(server_id.value)) from exc
 
             async with self.uow:
                 await self.uow.resource_packs.delete_assignment(server_id)
