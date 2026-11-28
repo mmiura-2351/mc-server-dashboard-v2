@@ -151,18 +151,23 @@ class _RacingServerRepository(FakeServerRepository):
     The use case loads the server (seeing the stale state that passes the
     in-memory transition check), then runs its compare-and-set. This double
     mutates the *stored* row right after the use case reads it, so the CAS sees
-    the row already moved and matches no row (the lost-race signal).
+    the row already moved and matches no row (the lost-race signal). ``reads``
+    is the read it waits for: a stop reads the row twice, for its community
+    check and then for the load the CAS follows (issue #4077).
     """
 
-    def __init__(self, *, winner: Server) -> None:
+    def __init__(self, *, winner: Server, reads: int = 1) -> None:
         super().__init__()
         self._winner = winner
+        self._reads_left = reads
 
     async def get_by_id(self, server_id: ServerId) -> Server | None:
         loaded = await super().get_by_id(server_id)
         if loaded is not None:
-            # A concurrent transition wins the race after our read.
-            self.by_id[server_id] = self._winner
+            self._reads_left -= 1
+            if self._reads_left <= 0:
+                # A concurrent transition wins the race after our read.
+                self.by_id[server_id] = self._winner
         return loaded
 
 
@@ -4232,7 +4237,7 @@ async def test_stop_lost_race_is_conflict_without_dispatch_or_count() -> None:
         observed=ObservedState.STOPPED,
         worker_id=worker,
     )
-    uow = FakeUnitOfWork(servers=_RacingServerRepository(winner=winner))
+    uow = FakeUnitOfWork(servers=_RacingServerRepository(winner=winner, reads=2))
     uow.servers.seed(
         _server(
             community_id=community,
@@ -7860,7 +7865,9 @@ async def test_an_operator_stop_whose_worker_drops_before_step_a_keeps_the_row(
     observed: ObservedState,
 ) -> None:
     # The stop found the Worker connected as it read the row. The session ends as
-    # that unit of work exits, before Step A reads the row again.
+    # that unit of work exits, before Step A reads the row again. It is the
+    # stop's second unit of work: the first is its community check (issue
+    # #4077), whose exit arms the hook for the next one.
     community, server_id, worker = _ids()
     cp = FakeControlPlane()
     uow = ExitHookUnitOfWork()
@@ -7872,7 +7879,7 @@ async def test_an_operator_stop_whose_worker_drops_before_step_a_keeps_the_row(
             worker_id=worker,
         )
     )
-    uow.arm(lambda: cp.end_session(WorkerId(worker), at=_NOW))
+    uow.arm(lambda: uow.arm(lambda: cp.end_session(WorkerId(worker), at=_NOW)))
 
     with pytest.raises(WorkerUnavailableError) as excinfo:
         await _stale_clear(uow, cp, StopIntentCounter())(
