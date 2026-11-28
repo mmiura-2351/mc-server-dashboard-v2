@@ -1906,7 +1906,12 @@ async def test_a_stop_or_restart_keeps_a_config_edit_made_after_its_read(
     async def edit() -> None:
         await _edit_config(world)
 
-    world.repo.after_next_read = edit
+    async def edit_after_the_next_read() -> None:
+        world.repo.after_next_read = edit
+
+    # A stop reads the row twice, for its community check (issue #4077) and
+    # then for the flip it writes; the edit lands after the second.
+    world.repo.after_next_read = edit_after_the_next_read if writer == "stop" else edit
 
     await (world.stop() if writer == "stop" else world.restart())
 

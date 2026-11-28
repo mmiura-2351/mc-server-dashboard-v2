@@ -117,7 +117,9 @@ This drives two pinned generators:
   - `protoc-gen-go-grpc` **v1.6.2**
 - **Python** via `grpc_tools.protoc` + `mypy-protobuf` from the `api/` dev
   group (resolved from `api/uv.lock`):
-  - `grpcio-tools` **1.81.1** (bundles protoc + the python/grpc generators)
+  - `grpcio-tools` **1.85.3** (bundles protoc + the python/grpc generators;
+    emits protobuf **7** code, so the `protobuf` runtime pin in
+    `api/pyproject.toml` stays on the same major, **7.36.2** today)
   - `mypy-protobuf` **5.1.0** (`.pyi` type stubs)
 
 The split exists because the gRPC Python generator ships only inside
