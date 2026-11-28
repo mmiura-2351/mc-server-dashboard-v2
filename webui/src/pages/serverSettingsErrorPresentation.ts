@@ -61,9 +61,8 @@ export function serverSettingsErrorPresentation(
     case "server_assigned":
       // A save, delete or export the stop's Worker still holds the server for
       // (#3852, #3998): the cache showed the server released, so the control
-      // was not held, or it was the export, which is not. The neutral message
-      // of the other tabs (#4003), worded by the refusal the caller knows
-      // (#4057).
+      // was not held (#4146). The neutral message of the other tabs (#4003),
+      // worded by the refusal the caller knows (#4057).
       return { target: "toast", key: serverAssignedKey(refusal) };
   }
   const key = reason === undefined ? undefined : SETTINGS_ERROR_KEY[reason];

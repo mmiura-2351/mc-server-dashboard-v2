@@ -533,6 +533,12 @@ function Controls({
   const startRefused = startRefusal(desired, assigned);
   const startHeld = startRefused === "transition_conflict";
   const startHeldId = useId();
+  // The export mint needs the server at rest and released, as the at-rest
+  // writes do (409 server_unsettled / server_assigned, #3998). While a stop
+  // still holds its Worker, Export gives the release reason as its tooltip,
+  // as a dashboard card's Start does: a second note beside Start's held one
+  // would repeat it (#4146).
+  const exportRefused = atRestWriteRefusal(state, desired, assigned);
   const [eulaOpen, setEulaOpen] = useState(false);
 
   const onError = (error: unknown) => {
@@ -674,7 +680,12 @@ function Controls({
           <button
             type="button"
             className="btn"
-            disabled={pending || !atRest(state, desired)}
+            disabled={pending || exportRefused !== null}
+            title={
+              exportRefused === "server_assigned"
+                ? t(serverAssignedKey(refusal))
+                : undefined
+            }
             onClick={() => exportMutation.mutate()}
           >
             {t("serverDetail.export")}
@@ -1674,16 +1685,19 @@ function Settings({
   // A hold the Worker's refusal of the final snapshot keeps, with no bound,
   // names that refusal (#4057).
   const refusal = finalSnapshotRefusal(server.final_snapshot_refusal);
-  // A save that rewrites server.properties is refused the same way while a
-  // stopped server's Worker is still assigned (#3998): hold Save, with the
-  // reason. Not while it runs: a safe-keys-only edit passes then (#115).
-  const saveHeld =
-    atRestWriteRefusal(
-      normalizeState(server.observed_state),
-      server.desired_state,
-      server.assigned_worker_id !== null,
-    ) === "server_assigned";
+  // A save that rewrites server.properties, and the export, are refused the
+  // same way while a stopped server's Worker is still assigned (#3998): hold
+  // Save and Export, with the reason (#4146). Save not while it runs: a
+  // safe-keys-only edit passes then (#115). The export needs the server at
+  // rest as well.
+  const writeRefusal = atRestWriteRefusal(
+    normalizeState(server.observed_state),
+    normalizeState(server.desired_state),
+    server.assigned_worker_id !== null,
+  );
+  const held = writeRefusal === "server_assigned";
   const saveHeldId = useId();
+  const exportHeldId = useId();
   const canExport = can("file:read", { serverId: server.id });
 
   const onError = (error: unknown) => {
@@ -1923,7 +1937,7 @@ function Settings({
         </label>
         <ConfigEditor rows={rows} disabled={!canUpdate} onChange={setRows} />
         <p className="field-hint">{t("serverDetail.settings.atRestHint")}</p>
-        {saveHeld && (
+        {held && (
           <p className="field-hint" id={saveHeldId}>
             {t(serverAssignedKey(refusal))}
           </p>
@@ -1937,9 +1951,9 @@ function Settings({
             !cpuAllocationOk ||
             !slugOk ||
             save.isPending ||
-            saveHeld
+            held
           }
-          aria-describedby={saveHeld ? saveHeldId : undefined}
+          aria-describedby={held ? saveHeldId : undefined}
           onClick={() => save.mutate()}
         >
           {t("serverDetail.settings.save")}
@@ -1959,17 +1973,17 @@ function Settings({
             <div>
               <strong>{t("serverDetail.danger.exportTitle")}</strong>
               <div className="desc">{t("serverDetail.danger.exportDesc")}</div>
+              {held && (
+                <div className="field-hint" id={exportHeldId}>
+                  {t(serverAssignedKey(refusal))}
+                </div>
+              )}
             </div>
             <button
               type="button"
               className="btn"
-              disabled={
-                exportMutation.isPending ||
-                !atRest(
-                  normalizeState(server.observed_state),
-                  normalizeState(server.desired_state),
-                )
-              }
+              disabled={exportMutation.isPending || writeRefusal !== null}
+              aria-describedby={held ? exportHeldId : undefined}
               onClick={() => exportMutation.mutate()}
             >
               {t("serverDetail.danger.exportButton")}

@@ -11,16 +11,19 @@
 
 import { CREDENTIAL_REQUIRED_FOR_BODY } from "../api/client.ts";
 import type { TranslationKey } from "../i18n/index.ts";
+import { type FinalSnapshotRefusal, serverAssignedKey } from "./serverState.ts";
 
 /**
  * Select the Backups-tab message for a failed operation or load. `fallback` is
  * the generic message for mutations; the load guards pass a load-context one so
- * an unmapped failure still reads as a load failure (#2554).
+ * an unmapped failure still reads as a load failure (#2554). `refusal` is the
+ * final-snapshot refusal the server is held for, if any.
  */
 export function backupErrorPresentation(
   status: number | undefined,
   reason: string | undefined,
   fallback: TranslationKey = "backups.error.generic",
+  refusal: FinalSnapshotRefusal | null = null,
 ): TranslationKey {
   // Check reason first (most specific).
   switch (reason) {
@@ -31,8 +34,8 @@ export function backupErrorPresentation(
     case "server_assigned":
       // A create or restore the stop's Worker still holds the server for
       // (#3998): the server reads stopped, and waiting for the release is the
-      // remedy (#4003).
-      return "common.serverAssigned";
+      // remedy (#4003). Worded by the refusal the caller knows (#4057, #4146).
+      return serverAssignedKey(refusal);
     case "server_busy":
     case "worker_busy":
       // Two layers, one remedy (issue #2436). `server_busy` is API-side
