@@ -526,16 +526,16 @@ describe("ServerResourcePackSection — unsettled mutation errors", () => {
 
 describe("ServerResourcePackSection — storage failure", () => {
   // Reading or writing server.properties failed before the assignment changed,
-  // so the API answers 503 seed_failed and the same action is safe to retry
-  // (#3278).
+  // so the same action is safe to retry (#3278): the assign's write answers
+  // 503 seed_failed, the reads and the unassign's write 503 storage_unavailable.
   it.each([
-    ["assign", null],
-    ["unassign", ASSIGNMENT],
+    ["seed_failed", "assign", null],
+    ["storage_unavailable", "unassign", ASSIGNMENT],
   ] as const)(
-    "toasts a retryable storage message for %s on a 503 seed_failed",
-    async (action, assignment) => {
+    "toasts a retryable storage message on a 503 %s (%s)",
+    async (reason, action, assignment) => {
       routeGet({ assignment });
-      const failed = new ApiError(503, { reason: "seed_failed" });
+      const failed = new ApiError(503, { reason });
       if (action === "assign") {
         mockApi.post.mockRejectedValue(failed);
       } else {

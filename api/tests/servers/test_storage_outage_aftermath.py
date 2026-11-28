@@ -9,10 +9,8 @@ injected at a chosen call); only the database is a fake.
 
 - Where the repeat completes the operation, the route answers 503
   ``storage_unavailable``: file write / upload / archive extract, a start's EULA
-  read and ``accept_eula`` write, and a plugin install's cache ingest. A resource
-  pack assign's properties read and an unassign's read and write answer 503
-  ``seed_failed`` instead, the code the assign's properties write answers
-  (issue #3278).
+  read and ``accept_eula`` write, a resource pack assign's properties read and an
+  unassign's read and write, and a plugin install's cache ingest.
 - Where it does not — the row is already committed, or the mutation already
   landed — no route maps the outage and the edge keeps its 500: file delete and
   rename, and the working-set write that follows a plugin install's or removal's
@@ -67,7 +65,6 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PluginNotFoundError,
     ServerFileNotFoundError,
     ServerFileStorageUnavailableError,
-    WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.resource_pack import (
     ResourcePack,
@@ -343,7 +340,7 @@ async def test_assign_whose_properties_read_hits_an_outage_assigns_nothing() -> 
     )
     rig.faults.always()
 
-    with pytest.raises(WorkingSetSeedFailedError):
+    with pytest.raises(ServerFileStorageUnavailableError):
         await assign(
             **rig.scope,
             resource_pack_id=pack.id,
@@ -365,7 +362,7 @@ async def test_unassign_whose_properties_read_hits_an_outage_keeps_the_row() -> 
     unassign = UnassignResourcePack(uow=rig.uow, file_store=rig.files)
     rig.faults.always()
 
-    with pytest.raises(WorkingSetSeedFailedError):
+    with pytest.raises(ServerFileStorageUnavailableError):
         await unassign(**rig.scope)
 
     rig.faults.clear()
@@ -384,7 +381,7 @@ async def test_unassign_whose_write_hits_an_outage_is_finished_by_a_repeat() -> 
     unassign = UnassignResourcePack(uow=rig.uow, file_store=rig.files)
     rig.faults.when = _generation_bump
 
-    with pytest.raises(WorkingSetSeedFailedError):
+    with pytest.raises(ServerFileStorageUnavailableError):
         await unassign(**rig.scope)
 
     rig.faults.clear()

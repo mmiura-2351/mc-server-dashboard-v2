@@ -49,8 +49,13 @@ function resourcePackErrorMessage(
     // A change the stop's Worker still holds the server for (#3998, #4003).
     if (error.reason === "server_assigned") return "common.serverAssigned";
     // Reading or writing server.properties failed before the assignment
-    // changed, so the same action is safe to retry (#3278).
-    if (error.reason === "seed_failed")
+    // changed, so the same action is safe to retry (#3278): seed_failed for
+    // the assign's write, storage_unavailable for the reads and the
+    // unassign's write.
+    if (
+      error.reason === "seed_failed" ||
+      error.reason === "storage_unavailable"
+    )
       return "serverDetail.resourcePack.storageUnavailable";
   }
   return fallback;

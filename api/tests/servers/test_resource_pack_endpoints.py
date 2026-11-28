@@ -54,6 +54,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ResourcePackStorageUnavailableError,
     ServerAssignedError,
     ServerBusyError,
+    ServerFileStorageUnavailableError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
     WorkingSetSeedFailedError,
@@ -1374,19 +1375,34 @@ class TestAssignEndpoint:
         assert resp.json()["reason"] == "seed_failed"
         assert recorder.events == []
 
+    def test_assign_properties_read_outage_is_503(self) -> None:
+        # The server.properties READ hit a store outage (issue #3233). It runs
+        # before the assignment is upserted, so nothing changed.
+        uc = _FakeUseCase(error=ServerFileStorageUnavailableError("nope"))
+        recorder = RecordingAuditRecorder()
+        app = _assignment_app(assign=uc, recorder=recorder)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.post(
+                _ASSIGN_PATH,
+                json={"resource_pack_id": str(uuid.uuid4())},
+            )
+        assert resp.status_code == 503
+        assert resp.json()["reason"] == "storage_unavailable"
+        assert recorder.events == []
+
 
 class TestUnassignEndpoint:
-    def test_unassign_properties_storage_failure_is_503(self) -> None:
-        # Reading or clearing server.properties failed (issues #3233, #3278).
+    def test_unassign_store_outage_is_503(self) -> None:
+        # Reading or clearing server.properties hit a store outage (issue #3233).
         # Both precede the row's delete, so the assignment stands and unassigning
-        # again is all the caller has to do: the 503 assign's write answers.
-        uc = _FakeUseCase(error=WorkingSetSeedFailedError("nope"))
+        # again is all the caller has to do.
+        uc = _FakeUseCase(error=ServerFileStorageUnavailableError("nope"))
         recorder = RecordingAuditRecorder()
         app = _assignment_app(unassign=uc, recorder=recorder)
         with TestClient(app) as client:  # type: ignore[arg-type]
             resp = client.delete(_ASSIGN_PATH)
         assert resp.status_code == 503
-        assert resp.json()["reason"] == "seed_failed"
+        assert resp.json()["reason"] == "storage_unavailable"
         assert recorder.events == []
 
     def test_unassign_204(self) -> None:
