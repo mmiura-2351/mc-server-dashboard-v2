@@ -13,6 +13,7 @@ cases and authorization Ports faked (NFR-TEST-1, no database). Verifies:
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
@@ -42,6 +43,7 @@ from mc_server_dashboard_api.dependencies import (
     get_current_user,
     get_download_client_modpack,
     get_get_plugin,
+    get_install_from_catalog,
     get_install_plugin,
     get_list_client_mods,
     get_list_plugin_dependencies,
@@ -59,8 +61,10 @@ from mc_server_dashboard_api.servers.adapters.plugin_cache_store import (
 )
 from mc_server_dashboard_api.servers.api import plugins as plugins_api
 from mc_server_dashboard_api.servers.application.catalog import (
+    InstallFromCatalog,
     PluginDependencyInfo,
     PluginUpdateInfo,
+    UpdatePlugin,
 )
 from mc_server_dashboard_api.servers.application.client_modpack_zip import (
     stream_client_modpack,
@@ -75,8 +79,14 @@ from mc_server_dashboard_api.servers.application.plugin_validation import (
     PluginValidation,
 )
 from mc_server_dashboard_api.servers.application.plugins import (
+    InstallPlugin,
     SetPluginSide,
     TogglePlugin,
+)
+from mc_server_dashboard_api.servers.domain.catalog_provider import (
+    CatalogFile,
+    CatalogProject,
+    CatalogVersion,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
@@ -116,7 +126,13 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 from tests.audit.fakes import RecordingAuditRecorder
 from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
-from tests.servers.fakes import FakeClock, FakeFileStore, FakeUnitOfWork
+from tests.servers.fakes import (
+    FakeCatalogProvider,
+    FakeClock,
+    FakeFileStore,
+    FakePluginCacheStore,
+    FakeUnitOfWork,
+)
 from tests.servers.upload_display_names import (
     accepted_display_names,
     refused_display_names,
@@ -821,14 +837,14 @@ def test_update_plugin_unsettled_is_409() -> None:
 
 
 # A catalog file name the upload rule still refuses once sanitised keeps its own
-# reason; any other path refusal is ``invalid_path`` (issue #3957).
+# reason (issue #3957), and a path the store refuses keeps the store's (#4001).
 @pytest.mark.parametrize(
     ("error", "reason"),
     [
         pytest.param(InvalidFilePathError("x"), "invalid_path", id="path"),
         pytest.param(
             InvalidFilePathError("x", reason="name_too_long"),
-            "invalid_path",
+            "name_too_long",
             id="store-refusal",
         ),
         pytest.param(
@@ -1435,10 +1451,9 @@ def test_update_plugin_cache_outage_is_503() -> None:
 
 
 def test_install_plugin_working_set_outage_after_the_commit_stays_500() -> None:
-    # The working-set write follows the row's commit, so a retry of the install
-    # could only answer 409 ``plugin_already_exists``. The outage reaches the edge
-    # as the servers type and deliberately keeps the 500 rather than a 503 that
-    # would invite that retry.
+    # The working-set write follows the row's commit, and the use case takes the
+    # row back out when it fails (issue #4001). The outage reaches the edge as
+    # the servers type, which this route does not map: it answers the 500.
     app = _app(
         member=True,
         allow=True,
@@ -1595,3 +1610,251 @@ async def test_set_side_whose_jar_is_missing_from_the_cache_is_409() -> None:
     assert "plugin-cache" not in resp.text
     assert (await rig.recorded()).side == "server"
     rig.assert_audited(recorder, ops.PLUGIN_SET_SIDE)
+
+
+class _CommittedOnlyUnitOfWork(FakeUnitOfWork):
+    """A :class:`FakeUnitOfWork` whose plugin rows keep only what was committed.
+
+    Leaving a block rolls back what the block did not commit, as the real
+    adapter's exit does, so a test reads the rows a failed request leaves in the
+    database rather than the fake's staged writes.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._committed: dict[PluginId, ServerPlugin] = {}
+
+    async def __aenter__(self) -> _CommittedOnlyUnitOfWork:
+        self._committed = dict(self.plugins.by_id)
+        return self
+
+    async def commit(self) -> None:
+        await super().commit()
+        self._committed = dict(self.plugins.by_id)
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.plugins.by_id = dict(self._committed)
+
+
+class _FailingWorkingSet(FakeFileStore):
+    """A file store whose working-set writes and renames fail with ``error``.
+
+    A rename of a file that is not there still misses first, as the store's
+    does, so the reconcile step falls back to writing the jar from the cache.
+    """
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self.error = error
+
+    async def write_file(self, **_: Any) -> None:
+        raise self.error
+
+    async def rename_file(
+        self,
+        *,
+        community_id: ServersCommunityId,
+        server_id: ServerId,
+        from_path: str,
+        to_path: str,
+    ) -> None:
+        await self.read_file(
+            community_id=community_id, server_id=server_id, rel_path=from_path
+        )
+        raise self.error
+
+
+_JAR = b"old-jar-bytes"
+_NEW_JAR = b"new-jar-bytes"
+
+
+class _WriteFailureRig:
+    """A stopped Fabric server whose working-set writes fail, behind the real
+    plugin use cases, with at most one mod installed (issue #4001)."""
+
+    def __init__(
+        self,
+        error: Exception,
+        *,
+        enabled: bool = True,
+        side: str = "both",
+        jar_in_working_set: bool = True,
+        installed: bool = True,
+    ) -> None:
+        self.uow = _CommittedOnlyUnitOfWork()
+        self.server = Server(
+            id=ServerId.new(),
+            community_id=ServersCommunityId(uuid.uuid4()),
+            name=ServerName("survival"),
+            mc_edition="java",
+            mc_version="1.21.1",
+            server_type=ServerType.FABRIC,
+            config={},
+            desired_state=DesiredState.STOPPED,
+            observed_state=ObservedState.STOPPED,
+            observed_at=_NOW,
+            assigned_worker_id=None,
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+        self.uow.servers.seed(self.server)
+        self.file_store = _FailingWorkingSet(error)
+        self.cache = FakePluginCacheStore()
+        self.plugin_id = PluginId(uuid.uuid4())
+        if installed:
+            plugin = _plugin(
+                server_id=self.server.id.value,
+                plugin_id=self.plugin_id.value,
+                side=side,
+            )
+            plugin.loader_type = LoaderType.MOD
+            plugin.source = PluginSource.MODRINTH
+            plugin.source_project_id = "proj-1"
+            plugin.source_version_id = "ver-1"
+            plugin.filename = "old.jar"
+            plugin.enabled = enabled
+            plugin.rel_path = "mods/old.jar" if enabled else "mods/old.jar.disabled"
+            plugin.sha256 = hashlib.sha256(_JAR).hexdigest()
+            self.uow.plugins.seed(plugin)
+            self.cache.blobs[plugin.sha256] = _JAR
+            if jar_in_working_set and side != "client":
+                self.file_store.files[plugin.rel_path] = _JAR
+        self.catalog = FakeCatalogProvider()
+        new_file = CatalogFile(
+            url="https://cdn.modrinth.com/data/new.jar",
+            filename="new.jar",
+            size=len(_NEW_JAR),
+            sha512=hashlib.sha512(_NEW_JAR).hexdigest(),
+            primary=True,
+        )
+        self.catalog.seed_project(
+            CatalogProject(
+                project_id="proj-1",
+                slug="proj",
+                title="Proj",
+                description="",
+                body="",
+                author=None,
+                icon_url=None,
+                downloads=0,
+                categories=[],
+                game_versions=["1.21.1"],
+                loaders=["fabric"],
+            ),
+            [
+                CatalogVersion(
+                    version_id="ver-2",
+                    version_number="2.0",
+                    name="Proj 2.0",
+                    game_versions=["1.21.1"],
+                    loaders=["fabric"],
+                    files=[new_file],
+                    date_published="2026-06-01T00:00:00Z",
+                )
+            ],
+        )
+        self.catalog.seed_file(new_file.url, _NEW_JAR)
+
+    def app(self) -> object:
+        deps: dict[str, Any] = {
+            "uow": self.uow,
+            "file_store": self.file_store,
+            "cache": self.cache,
+            "clock": FakeClock(_NOW),
+        }
+        app = _app(member=True, allow=True)
+        overrides = app.dependency_overrides  # type: ignore[attr-defined]
+        overrides[get_install_plugin] = lambda: InstallPlugin(**deps)
+        overrides[get_install_from_catalog] = lambda: InstallFromCatalog(
+            catalog=self.catalog, **deps
+        )
+        overrides[get_update_plugin] = lambda: UpdatePlugin(
+            catalog=self.catalog, **deps
+        )
+        overrides[get_toggle_plugin] = lambda: TogglePlugin(**deps)
+        overrides[get_set_plugin_side] = lambda: SetPluginSide(**deps)
+        return app
+
+    def send(self, request: str) -> Any:
+        client = _client(self.app())
+        community, server = self.server.community_id.value, self.server.id.value
+        plugin = f"/{self.plugin_id.value}"
+        if request == "install":
+            return client.post(
+                _url(community, server),
+                data={"display_name": "New"},
+                files={"file": ("new.jar", _NEW_JAR, "application/java-archive")},
+            )
+        if request == "catalog install":
+            return client.post(
+                f"/api/communities/{community}/servers/{server}/catalog/install",
+                json={"project_id": "proj-1", "version_id": "ver-2"},
+            )
+        if request == "update":
+            return client.post(
+                _url(community, server, f"{plugin}/update"),
+                json={"version_id": "ver-2"},
+            )
+        if request == "side":
+            return client.post(
+                _url(community, server, f"{plugin}/side"), json={"side": "server"}
+            )
+        return client.post(_url(community, server, f"{plugin}/{request}"))
+
+    def state(self) -> tuple[list[ServerPlugin], dict[str, bytes]]:
+        rows = sorted(self.uow.plugins.by_id.values(), key=lambda p: str(p.id.value))
+        return rows, dict(self.file_store.files)
+
+
+# Each request whose working-set write or rename runs after its row is written,
+# with the plugin state it starts from: the request, then the rig's arguments.
+_WRITE_FAILURE_CASES = [
+    pytest.param("install", {"installed": False}, id="install"),
+    pytest.param("catalog install", {"installed": False}, id="catalog-install"),
+    pytest.param("update", {}, id="update"),
+    pytest.param("update", {"enabled": False}, id="update-while-disabled"),
+    pytest.param("enable", {"enabled": False}, id="enable"),
+    pytest.param(
+        "enable",
+        {"enabled": False, "jar_in_working_set": False},
+        id="enable-from-the-cache",
+    ),
+    pytest.param("disable", {}, id="disable"),
+    pytest.param("side", {"side": "client"}, id="side"),
+    pytest.param(
+        "side", {"side": "client", "enabled": False}, id="side-while-disabled"
+    ),
+]
+
+
+@pytest.mark.parametrize(("request_name", "rig_args"), _WRITE_FAILURE_CASES)
+def test_a_failed_working_set_write_leaves_the_row_and_the_jar_as_they_were(
+    request_name: str, rig_args: dict[str, Any]
+) -> None:
+    # The row is committed before the working set is written (issues #1706,
+    # #1826), so a failed write must take the row back (issue #4001): the
+    # plugin list and the working set then still describe the same jar.
+    rig = _WriteFailureRig(ServerFileStorageUnavailableError("down"), **rig_args)
+    before = rig.state()
+
+    resp = rig.send(request_name)
+
+    assert resp.status_code >= 400
+    assert rig.state() == before
+
+
+@pytest.mark.parametrize("reason", ["invalid_path", "name_too_long"])
+@pytest.mark.parametrize(("request_name", "rig_args"), _WRITE_FAILURE_CASES)
+def test_a_working_set_path_the_store_refuses_is_a_named_422(
+    request_name: str, rig_args: dict[str, Any], reason: str
+) -> None:
+    # A path or name the store refuses on the write is the client's 422, named
+    # as the store names it, never a 500, and nothing is left changed (#4001).
+    rig = _WriteFailureRig(InvalidFilePathError("x", reason=reason), **rig_args)
+    before = rig.state()
+
+    resp = rig.send(request_name)
+
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == reason
+    assert rig.state() == before

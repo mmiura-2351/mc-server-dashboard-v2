@@ -13,8 +13,10 @@ injected at a chosen call); only the database is a fake.
   unassign's read and write, and a plugin install's cache ingest.
 - Where it does not — the row is already committed, or the mutation already
   landed — no route maps the outage and the edge keeps its 500: file delete and
-  rename, and the working-set write that follows a plugin install's or removal's
-  commit.
+  rename, and the working-set delete that follows a plugin removal's commit.
+- A plugin install's working-set write follows its commit too, but the failed
+  write takes the row back out (issue #4001), so the repeat installs. The route
+  still answers the 500.
 """
 
 from __future__ import annotations
@@ -60,7 +62,6 @@ from mc_server_dashboard_api.servers.application.resource_packs import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     FileAlreadyExistsError,
-    PluginAlreadyExistsError,
     PluginCacheStorageUnavailableError,
     PluginNotFoundError,
     ServerFileNotFoundError,
@@ -429,12 +430,10 @@ async def test_install_whose_cache_ingest_hits_an_outage_is_finished_by_a_repeat
     assert await rig.read(plugin.rel_path) == b"jar-bytes"
 
 
-async def test_install_whose_working_set_write_hits_an_outage_cannot_be_repeated() -> (
-    None
-):
-    """Why the install keeps its 500 for THIS outage: the jar is written after
-    the row commits, so the row is in and the jar is not, and installing again
-    is refused as a duplicate."""
+async def test_install_whose_working_set_write_hits_an_outage_can_be_repeated() -> None:
+    """The jar is written after the row commits, and the failed write takes the
+    row back out (issue #4001), so no row is left without its jar and the repeat
+    installs normally."""
 
     rig = _Rig(server_type=ServerType.FABRIC)
     await rig.seed({"eula.txt": b"eula=true\n"})
@@ -444,9 +443,11 @@ async def test_install_whose_working_set_write_hits_an_outage_cannot_be_repeated
         await _install_mod(rig)
 
     rig.faults.clear()
-    assert len(await rig.uow.plugins.list_for_server(rig.server.id)) == 1
-    with pytest.raises(PluginAlreadyExistsError):
-        await _install_mod(rig)
+    assert await rig.uow.plugins.list_for_server(rig.server.id) == []
+
+    plugin = await _install_mod(rig)
+
+    assert await rig.read(plugin.rel_path) == b"jar-bytes"
 
 
 async def test_remove_whose_working_set_delete_hits_an_outage_cannot_be_repeated() -> (

@@ -526,7 +526,9 @@ async def install_plugin(
     except UnsupportedPluginServerTypeError as exc:
         raise _unprocessable("unsupported_server_type") from exc
     except InvalidFilePathError as exc:
-        raise _unprocessable("invalid_path") from exc
+        # A path the store refuses keeps the store's reason, such as
+        # name_too_long; the install is taken back by then (issue #4001).
+        raise _unprocessable(exc.reason) from exc
     except FileTooLargeError as exc:
         raise _too_large() from exc
     except PluginAlreadyExistsError as exc:
@@ -587,8 +589,8 @@ async def install_plugin(
         # The jar cache is reached before the plugin row is committed, and it is
         # content-addressed, so nothing is left for a retry to trip over (issue
         # #3233). A store outage on the working-set write that FOLLOWS the commit
-        # is deliberately not mapped here: the row is in by then, and a retry
-        # could only answer 409.
+        # is not mapped here: the use case takes the row back out (issue #4001),
+        # and the outage answers the 500 it always did.
         raise _service_unavailable("storage_unavailable") from exc
     await _record_plugin(
         recorder, ops.PLUGIN_INSTALL, authorized, community_id, plugin.id.value
@@ -930,10 +932,9 @@ async def update_plugin(
         raise _bad_gateway("checksum_mismatch") from exc
     except InvalidFilePathError as exc:
         # A catalog file name the upload rule refuses even sanitized keeps its
-        # own reason (issue #3957); any other path refusal is invalid_path.
-        raise _unprocessable(
-            "invalid_filename" if exc.reason == "invalid_filename" else "invalid_path"
-        ) from exc
+        # own reason (issue #3957), and a path the store refuses keeps the
+        # store's, the update taken back by then (issue #4001).
+        raise _unprocessable(exc.reason) from exc
     except FileTooLargeError as exc:
         raise _too_large() from exc
     except PluginAlreadyExistsError as exc:
@@ -968,8 +969,8 @@ async def update_plugin(
     except PluginCacheStorageUnavailableError as exc:
         # Resolving the new jar reaches the cache before the row is updated, so
         # the plugin is still on its old version and a retry starts over (issue
-        # #3233). An outage on the working-set writes after the commit is not
-        # mapped, as on install.
+        # #3233). An outage on the working-set write after the commit is not
+        # mapped, as on install: the row goes back to its old version (#4001).
         raise _service_unavailable("storage_unavailable") from exc
     await _record_plugin(
         recorder, ops.PLUGIN_UPDATE, authorized, community_id, plugin.id.value
@@ -1112,13 +1113,15 @@ async def enable_plugin(
 ) -> PluginResponse:
     """Enable a disabled plugin (plugin:manage).
 
-    The new state is committed before the working set is reconciled. When that
-    step needs the plugin's jar -- the working-set file is gone -- and the jar is
-    missing from the content-addressed cache too, the route answers ``409``
-    ``plugin_jar_missing`` (issue #3323) over the committed state: the plugin
-    list shows it, the working set holds no file for the plugin, and repeating the
-    request is a no-op. Removing the plugin and installing it again restores its
-    jar.
+    The new state is committed before the working set is reconciled, and taken
+    back when that step fails (issue #4001), so the plugin list stays as it was;
+    a path the store refuses is a 422 that names it, such as ``name_too_long``.
+    When that step needs the plugin's jar -- the working-set file is gone -- and
+    the jar is missing from the content-addressed cache too, the route answers
+    ``409`` ``plugin_jar_missing`` (issue #3323) over the committed state: the
+    plugin list shows it, the working set holds no file for the plugin, and
+    repeating the request is a no-op. Removing the plugin and installing it again
+    restores its jar.
     """
 
     try:
@@ -1132,6 +1135,8 @@ async def enable_plugin(
         raise _not_found() from exc
     except PluginNotFoundError as exc:
         raise _not_found() from exc
+    except InvalidFilePathError as exc:
+        raise _unprocessable(exc.reason) from exc
     except PluginAlreadyExistsError as exc:
         raise _conflict("plugin_already_exists") from exc
     except ServerFilesUnsettledError as exc:
@@ -1197,13 +1202,15 @@ async def disable_plugin(
 ) -> PluginResponse:
     """Disable an enabled plugin (plugin:manage).
 
-    The new state is committed before the working set is reconciled. When that
-    step needs the plugin's jar -- the working-set file is gone -- and the jar is
-    missing from the content-addressed cache too, the route answers ``409``
-    ``plugin_jar_missing`` (issue #3323) over the committed state: the plugin
-    list shows it, the working set holds no file for the plugin, and repeating the
-    request is a no-op. Removing the plugin and installing it again restores its
-    jar.
+    The new state is committed before the working set is reconciled, and taken
+    back when that step fails (issue #4001), so the plugin list stays as it was;
+    a path the store refuses is a 422 that names it, such as ``name_too_long``.
+    When that step needs the plugin's jar -- the working-set file is gone -- and
+    the jar is missing from the content-addressed cache too, the route answers
+    ``409`` ``plugin_jar_missing`` (issue #3323) over the committed state: the
+    plugin list shows it, the working set holds no file for the plugin, and
+    repeating the request is a no-op. Removing the plugin and installing it again
+    restores its jar.
     """
 
     try:
@@ -1217,6 +1224,8 @@ async def disable_plugin(
         raise _not_found() from exc
     except PluginNotFoundError as exc:
         raise _not_found() from exc
+    except InvalidFilePathError as exc:
+        raise _unprocessable(exc.reason) from exc
     except PluginAlreadyExistsError as exc:
         raise _conflict("plugin_already_exists") from exc
     except ServerFilesUnsettledError as exc:
@@ -1287,12 +1296,14 @@ async def set_plugin_side(
     removed from the running server, and a server-relevant jar is materialized
     from the content-addressed cache. At-rest gated (409 ``server_unsettled``).
 
-    The new side is committed before the working set is reconciled. When the jar
-    to materialize is missing from the cache, the route answers ``409``
-    ``plugin_jar_missing`` (issue #3323) over the committed side: the plugin list
-    shows it, the working set holds no file for the plugin, and repeating the
-    request is a no-op. Removing the plugin and installing it again restores its
-    jar.
+    The new side is committed before the working set is reconciled, and taken
+    back when that step fails (issue #4001), so the plugin list stays as it was;
+    a path the store refuses is a 422 that names it, such as ``name_too_long``.
+    When the jar to materialize is missing from the cache, the route answers
+    ``409`` ``plugin_jar_missing`` (issue #3323) over the committed side: the
+    plugin list shows it, the working set holds no file for the plugin, and
+    repeating the request is a no-op. Removing the plugin and installing it again
+    restores its jar.
     """
 
     try:
@@ -1308,6 +1319,8 @@ async def set_plugin_side(
         raise _not_found() from exc
     except InvalidPluginSideError as exc:
         raise _unprocessable("invalid_side") from exc
+    except InvalidFilePathError as exc:
+        raise _unprocessable(exc.reason) from exc
     except PluginAlreadyExistsError as exc:
         raise _conflict("plugin_already_exists") from exc
     except ServerFilesUnsettledError as exc:
