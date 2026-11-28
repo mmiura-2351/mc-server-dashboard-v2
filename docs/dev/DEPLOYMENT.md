@@ -554,8 +554,10 @@ reclaim while the collection lives; three collections are in play here (the
 metadata log), so the stock budget of 8 cannot hold them: after a few runs the
 filer's metadata log claims the last free volume, and every run from then on
 fails with `No writable volumes and no free volumes left`. At 24 repeated runs
-pass with the volume count flat. The deployment itself is unaffected and keeps
-the stock budget — it only ever has the one bucket.
+pass with the volume count flat. The deployment has one bucket, but the
+metadata log is a second collection there too, and the stock budget of 8 left
+the live store at 8/8 with no slot to grow (issue #2786). `compose.yaml`
+therefore sets its own budget ([Disk headroom](#disk-headroom)).
 
 ### Vacuum tuning and manual recovery
 
@@ -901,36 +903,62 @@ automatic vacuum compacts one volume at a time, and a volume grows to about
 full one can need about 30 GiB. On a filesystem smaller than about 600 GiB, 5%
 is less than that: plan for the larger of 5% and 30 GiB free.
 
-**Volume slots.** `compose.yaml` sets no `-volume.max`, so `weed server` keeps
-its default of 8 volumes, each up to 30 GiB: about 240 GiB of volume data at
-most, garbage included until it is vacuumed, however large the disk. The bucket
-gets less. SeaweedFS does not create volumes one at a time: a collection that
+**Volume slots.** `compose.yaml` runs `weed server` with `-volume.max=70`, so
+the store holds at most 70 volumes, each up to 30 GiB, garbage included until it
+is vacuumed. SeaweedFS does not create volumes one at a time: a collection that
 needs a volume gets 7 at once by default, and the bucket (`mcsd`) and the
-filer's metadata log (collection `""`) are separate collections. Whichever of
-the two needs a volume first takes 7 of the 8 slots, and the other gets what is
-left. The filer normally first writes its metadata log a minute after it
-starts:
+filer's metadata log (collection `""`) are separate collections. The filer
+normally first writes its metadata log a minute after it starts, so which of the
+two asks first depends on when the first S3 write comes. The number is chosen
+this way (issue #2786):
 
-- If the first S3 write comes before that, `mcsd` takes 7 and the metadata log
-  the last one. The bucket's ceiling is then about 210 GiB. Production is in
-  this state (issue #2786).
-- If the metadata log comes first, it takes the 7, and the bucket is left with
-  about one volume, about 30 GiB. This case is inferred from the growth count:
-  a check on 4.54 saw the metadata log grow first and create volumes 1-3, but
-  did not observe the rest.
+- **At SeaweedFS's default of 8, the first to ask took 7 and the other got what
+  was left.** The live store was measured at 8/8 under that default: `mcsd`
+  held 7 volumes and the metadata log 1, with no slot left to grow, so the
+  bucket's ceiling was about 210 GiB. Had the metadata log asked first, the
+  bucket would have had one volume, about 30 GiB.
+- **14 slots give both collections their 7 in either order.** The other 56
+  leave the bucket up to 63 volumes, 1890 GiB, more than a 2 TB disk holds
+  (1863 GiB). On such a disk the 5% minimum above stops the store before the
+  slot count does. A host whose `seaweedfs-data` filesystem is larger raises
+  the number in `compose.yaml`.
+- **A slot costs nothing until a volume is grown into it**, and a new volume is
+  a few bytes: the whole `/data` of the probe below, 14 volumes and the filer's
+  and master's own stores, was 268 KiB.
+- **`0`, one slot per 30 GiB of free disk, is not used.** On a fresh store on a
+  200 GiB filesystem it gave 6 slots. The first S3 write took all 6 for `mcsd`,
+  and the metadata log got none: from its first flush on, every metadata-log
+  write failed with `No writable volumes and no free volumes left`, about
+  every 0.75 s.
 
-Check the split with `volume.list`: the bucket's ceiling is the number of
-`mcsd` volumes it lists, times 30 GiB. `free:` does not show it, because a
-healthy store shows `volume:8/8 active:8 free:0` almost from its first write.
+Probe numbers, not the deployment's: 2026-11-28, `chrislusf/seaweedfs:4.54`,
+the compose entrypoint and command line, on a fresh 2 GiB tmpfs store outside
+compose. After a first S3 PUT and the filer's first metadata-log flush (60.0 s
+after the filer started), the master's `/dir/status` showed `Max` 70 and
+`Free` 56, with 7 volumes for `mcsd` and 7 for `""`. That held in both orders:
+the PUT before the flush, and the flush before any PUT. Neither run logged
+`Not enough data nodes`; the same PUT-first run at the default of 8 logged
+`create 7 volume, created 1: Not enough data nodes found!` and ended at `Max` 8,
+`Free` 0, `mcsd` 7 and `""` 1. The numbers read on the deployment after the
+update are recorded on issue #2786.
 
-So a full slot count is normal, not a warning. The signal that the slots
-have run out is writes failing with `No writable volumes and no free volumes
-left for …` while no `disk free … < required` line is logged (next
-subsection): no volume of the collection takes writes, and no slot is left to
-grow one. Low disk fails writes with the same message, and the `disk free` line
-is what tells the two apart; in `volume.list` low disk shows as `active:0`, with
-every volume `ReadOnly:true`. Raising `-volume.max` is a change to
-`compose.yaml`; issue #2786 tracks it.
+Read the budget from the master:
+
+```sh
+docker compose exec seaweedfs curl -s http://localhost:9333/dir/status
+```
+
+`Topology.Max` is the budget and `Topology.Free` the slots left; under
+`Layouts`, each collection lists its writable volume ids. `volume.list` shows
+the same counts; on the probe they read `volume:14/70 active:14 free:56`.
+
+The signal that the slots have run out is `Free` at 0 while writes fail with
+`No writable volumes and no free volumes left for …` and no
+`disk free … < required` line is logged (next subsection): no volume of the
+collection takes writes, and no slot is left to grow one. Low disk fails writes
+with the same message, and the `disk free` line is what tells the two apart; in
+`volume.list` low disk shows as `active:0`, with every volume `ReadOnly:true`.
+Raising `-volume.max` is a change to `compose.yaml`.
 
 **The API's temporary files.** On the object backend the API spools whole
 archives in its container's temporary directory. That directory and the store's

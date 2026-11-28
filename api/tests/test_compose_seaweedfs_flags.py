@@ -21,6 +21,12 @@ flag, weed's glog also writes its whole log as files in the container's
 root. The ``chown`` before it re-owns a volume the root-run weed wrote, so an
 existing deployment keeps working.
 
+The store sets its own volume budget (issue #2786). Unset, ``-volume.max``
+defaults to 8. The bucket and the filer's metadata log are two collections,
+and each asks for 7 volumes at once, so the first to ask took 7 and the other
+got 1: the live store sat at 8/8 with no slot left to grow. DEPLOYMENT.md
+Section 5, "Disk headroom", gives the reason for the number.
+
 Static text parsing, like the other ``compose.yaml`` guards in this suite: the
 api has no YAML dependency. Only the entrypoint's ``exec`` line is read, as the
 argv the shell passes, with a ``#`` comment dropped as the shell drops it. A
@@ -58,6 +64,11 @@ def test_seaweedfs_does_not_bind_the_lance_namespace_listener() -> None:
         arg for arg in _weed_server_argv() if arg.startswith("-s3.port.lance=")
     ]
     assert lance_ports == ["-s3.port.lance=0"]
+
+
+def test_seaweedfs_sets_its_volume_budget() -> None:
+    budgets = [arg for arg in _weed_server_argv() if arg.startswith("-volume.max=")]
+    assert budgets == ["-volume.max=70"]
 
 
 def test_seaweedfs_logs_to_stderr_only() -> None:
