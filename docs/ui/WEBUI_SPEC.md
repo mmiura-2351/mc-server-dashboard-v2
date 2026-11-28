@@ -402,11 +402,12 @@ Global resource pack library (not community-scoped) and per-server assignment.
 | Path | Notes |
 |---|---|
 | `WS /communities/{cid}/servers/{sid}/events?streams=status,log,metrics,notification` | Typed frames `{stream, ts, payload}`. `status`: `{state, detail, reason}` for an observed transition (`reason`: the crash reason the Worker classified — `forge_install_failed` / `forge_install_out_of_memory` / `forge_install_java_incompatible` — or `""`; CONTROL_PLANE.md Section 6), `{desired_state}` for a change of the server's intent, `{assigned_worker_id}` for a placement or release (a release also carries `final_snapshot_refusal: null`), or `{final_snapshot_refusal}` for a refusal of a stop's final snapshot recorded or cleared, each carried by the frame of the write that changed it (see below) · `log`: `{line, stream}` · `metrics`: `{cpu_millis, memory_bytes, player_count}` · `notification`: `{kind, title, detail}` (operator notice) · `gap`: client fell behind (always delivered) · `snapshot`: `{state, desired_state, assigned_worker_id, crash_reason, crash_detail, crash_not_restarted, final_snapshot_refusal}` (see below). |
-| `WS /communities/{cid}/events` | Community-wide **status + notification** firehose; frames carry `server_id`. `snapshot`: `{servers: [{server_id, state, desired_state, assigned_worker_id, crash_reason, crash_detail, crash_not_restarted, final_snapshot_refusal}]}` with `server_id: null` (see below). |
+| `WS /communities/{cid}/events` | Community-wide **status + notification + servers** firehose; frames carry `server_id`. `servers`: `{change}`, `created` or `deleted`: the server the frame names joined or left the community's server set (see below). `snapshot`: `{servers: [{server_id, state, desired_state, assigned_worker_id, crash_reason, crash_detail, crash_not_restarted, final_snapshot_refusal}]}` with `server_id: null` (see below). |
 
 Missed frames are never replayed (delivery is best-effort), so a connection
 that carries status opens with a **`snapshot`** frame and gets a fresh one
-right after a `gap` frame when status frames were dropped since the previous
+right after a `gap` frame when status frames, or on the community stream
+`servers` frames, were dropped since the previous
 such check (a gap that dropped only other streams cost no status and is not
 followed by one; neither is a gap whose status losses happened while the
 previous gap was being delivered, since that gap's snapshot already covers
@@ -479,6 +480,17 @@ next refused retry after a write of the refusal whose commit failed, since that
 commit may have landed unpublished. An API restart in between loses that, and a
 reload shows the refusal (#4152).
 
+Every change of a community's server set publishes a `servers` frame on the
+community stream, after the write that made it commits (#3308): `{change:
+"created"}` for a server created or imported, `{change: "deleted"}` for one
+deleted. The frame's `server_id` names the server, and its payload carries
+nothing else, so a client applies it by reading the server list again. A
+creation or deletion whose transaction rolls back publishes nothing. The
+per-server stream carries no `servers` frame. A rename or any other edit of a
+server's settings changes no server set and publishes no frame (and the
+snapshot carries no name or settings), so another client keeps showing the
+old ones until its next read of the list.
+
 A client applies each `status` frame by setting the fields it carries, so
 another tab's dashboard offers the actions of the current intent without a
 reload (#3428), gates Start and Stop on the current assignment (#3818), and
@@ -488,7 +500,8 @@ malformed frame.
 
 Ordering: the subscription is registered before the snapshot is read, so every
 status transition published from then on reaches the subscriber's buffer.
-Right before each snapshot read, the status frames still buffered are
+Right before each snapshot read, the status frames (and on the community
+stream the `servers` frames) still buffered are
 discarded: each was published, hence committed, before the read, so the
 snapshot already shows it or a newer state, and delivering one after the
 snapshot could only roll the client back. A status frame published after the
@@ -748,7 +761,8 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 - Grid of server cards: name, type/version badge, backend badge, observed
   state pill (color-coded: running=green, starting/stopping/restarting=amber,
   crashed=red, stopped=gray, unknown=striped), game port, assigned worker.
-- Live updates over `WS /communities/{cid}/events` (status stream); on WS
+- Live updates over `WS /communities/{cid}/events` (status stream, and the
+  `servers` frames of a server created or deleted elsewhere); on WS
   loss fall back to 10s polling of `GET …/servers` with a "live degraded"
   indicator.
 - Quick actions on card: start / stop / restart (permission-scoped). Several
@@ -1333,7 +1347,9 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   a read separately, as different frames carry them. The dashboard reconciles
   the server set the same way:
   a live server missing from the landed list, or a listed server missing from
-  a newer snapshot, triggers one list refetch.
+  a newer snapshot, triggers one list refetch, and so does a `servers` frame
+  newer than the landed list for a created server it lacks or a deleted one
+  it still holds.
 
 ### 7.3 Permission-driven rendering
 - Capabilities come from `GET /communities/{cid}/me/permissions`:

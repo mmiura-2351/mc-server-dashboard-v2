@@ -5,9 +5,10 @@
  * (`eventsSocket.ts`) for the dashboard's one community-scoped events stream
  * (`WS /communities/{cid}/events`, STATUS only). The core owns the socket
  * lifecycle (connect, backoff reconnect, reconnect-on-rotate, teardown); this
- * module supplies the community URL and parses the API's status frames, the
- * status snapshot it sends on subscribe and after every gap that dropped status,
- * and the GAP marker
+ * module supplies the community URL and parses the API's status frames, its
+ * server-set frames (a server created or deleted, #3308), the status snapshot
+ * it sends on subscribe and after every gap that dropped status or the server
+ * set, and the GAP marker
  * (the client fell behind and frames were dropped).
  *
  * This module carries no React or TanStack Query: the caller supplies callbacks
@@ -77,13 +78,25 @@ export interface NotificationEvent {
 }
 
 /**
- * A parsed community-stream frame: a routable STATUS, a NOTIFICATION, the
- * status SNAPSHOT (every server's observed and desired state, sent on
- * subscribe and after every gap that dropped status, #1795), or the GAP marker.
+ * A SERVERS frame from the community stream (#3308): a server of the
+ * community was created or deleted. The server rides the community frame's
+ * `server_id`.
+ */
+export interface ServerSetEvent {
+  serverId: string;
+  change: "created" | "deleted";
+}
+
+/**
+ * A parsed community-stream frame: a routable STATUS, a NOTIFICATION, a
+ * SERVERS change, the status SNAPSHOT (every server's observed and desired
+ * state, sent on subscribe and after every gap that dropped status, #1795), or
+ * the GAP marker.
  */
 export type CommunityFrame =
   | ({ kind: "status" } & StatusEvent)
   | ({ kind: "notification" } & NotificationEvent)
+  | ({ kind: "servers" } & ServerSetEvent)
   | { kind: "snapshot"; servers: SnapshotEntry[] }
   | { kind: "gap" };
 
@@ -94,6 +107,8 @@ export interface CommunityEventsCallbacks {
   onSnapshot: (servers: SnapshotEntry[]) => void;
   /** A parsed NOTIFICATION frame (operator notice, e.g. a schedule failure). */
   onNotification: (event: NotificationEvent) => void;
+  /** A parsed SERVERS frame: a server of the community was created or deleted. */
+  onServerSet: (event: ServerSetEvent) => void;
   /** The stream fell behind and dropped frames (slow-client overflow). */
   onGap: () => void;
   /** The connection opened (resubscribe / clear degraded). */
@@ -139,6 +154,9 @@ export function parseCommunityFrame(raw: string): CommunityFrame | null {
   }
   if (stream === "snapshot") {
     return parseSnapshot(payload);
+  }
+  if (stream === "servers") {
+    return parseServerSet(server_id, payload);
   }
   if (stream !== "status" || typeof server_id !== "string") {
     return null;
@@ -204,6 +222,27 @@ function parseNotification(
     title,
     detail: typeof detail === "string" ? detail : "",
   };
+}
+
+/**
+ * Parse a SERVERS frame. It names its server, and its payload's `change` is
+ * `created` or `deleted`.
+ */
+function parseServerSet(
+  serverId: unknown,
+  payload: unknown,
+): CommunityFrame | null {
+  if (typeof serverId !== "string") {
+    return null;
+  }
+  if (typeof payload !== "object" || payload === null) {
+    return null;
+  }
+  const { change } = payload as { change?: unknown };
+  if (change !== "created" && change !== "deleted") {
+    return null;
+  }
+  return { kind: "servers", serverId, change };
 }
 
 /**
@@ -276,6 +315,13 @@ export class CommunityEventsClient {
           }
           if (frame.kind === "snapshot") {
             callbacks.onSnapshot(frame.servers);
+            return;
+          }
+          if (frame.kind === "servers") {
+            callbacks.onServerSet({
+              serverId: frame.serverId,
+              change: frame.change,
+            });
             return;
           }
           if (frame.kind === "notification") {

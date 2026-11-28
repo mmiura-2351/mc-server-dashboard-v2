@@ -20,7 +20,9 @@
  * response lands unless that read's request started after it
  * ({@link observeRestResponses}), so an older response never rolls a pill back.
  * The server set is reconciled the same way: a live server missing from the
- * landed list, or a listed server missing from a newer snapshot, refetches it.
+ * landed list, or a listed server missing from a newer snapshot, refetches it,
+ * and so does a newer server-set frame (#3308): a server created elsewhere that
+ * the landed list lacks, or one deleted elsewhere that it still holds.
  *
  * The client is recreated per active community id and torn down on switch /
  * unmount (sign-out unmounts the dashboard), so a stale community's socket
@@ -35,6 +37,7 @@ import { useServerToast } from "../components/useServerToast.ts";
 import {
   CommunityEventsClient,
   type NotificationEvent,
+  type ServerSetEvent,
   type SnapshotEntry,
   type StatusEvent,
 } from "./communityEvents.ts";
@@ -93,6 +96,9 @@ export function useCommunityEvents(communityId: string): boolean {
     const notRestarted = new Map<string, Stamped<boolean>>();
     // The latest snapshot's server set, until a REST read supersedes it.
     let members: { ids: Set<string>; at: number } | null = null;
+    // Each server's latest server-set change (#3308), until a REST read or a
+    // snapshot supersedes it.
+    const changes = new Map<string, Stamped<ServerSetEvent["change"]>>();
 
     const refetch = () => {
       queryClient.invalidateQueries({ queryKey: key });
@@ -125,8 +131,10 @@ export function useCommunityEvents(communityId: string): boolean {
 
     // Write `fields` over the cached list and reconcile its server set: a
     // live server it lacks was created after its read, a listed server a
-    // newer snapshot lacks was deleted since — either way one refetch loads
-    // the current set. Deferred until the list has loaded.
+    // newer snapshot lacks was deleted since, and a newer server-set frame
+    // (#3308) names a server created that it lacks or one deleted that it
+    // holds — either way one refetch loads the current set. Deferred until the
+    // list has loaded.
     //
     // A REST response or a snapshot replaces every state, so all live states
     // are written over it; a status frame writes only the fields it carries,
@@ -146,14 +154,19 @@ export function useCommunityEvents(communityId: string): boolean {
         );
       }
       const listed = new Set(current.map((s) => s.id));
-      const created = [
-        ...observed.keys(),
-        ...desired.keys(),
-        ...assigned.keys(),
-        ...refused.keys(),
-      ].some((id) => !listed.has(id));
+      const created =
+        [
+          ...observed.keys(),
+          ...desired.keys(),
+          ...assigned.keys(),
+          ...refused.keys(),
+        ].some((id) => !listed.has(id)) ||
+        [...changes].some(
+          ([id, change]) => change.value === "created" && !listed.has(id),
+        );
       const deleted =
-        members !== null && current.some((s) => !members?.ids.has(s.id));
+        (members !== null && current.some((s) => !members?.ids.has(s.id))) ||
+        current.some((s) => changes.get(s.id)?.value === "deleted");
       if (created || deleted) {
         refetch();
       }
@@ -169,6 +182,7 @@ export function useCommunityEvents(communityId: string): boolean {
           assigned,
           refused,
           notRestarted,
+          changes,
         ]) {
           for (const [id, entry] of live) {
             if (entry.at < readStartedAt) {
@@ -258,6 +272,7 @@ export function useCommunityEvents(communityId: string): boolean {
       assigned.clear();
       refused.clear();
       notRestarted.clear();
+      changes.clear();
       for (const s of servers) {
         observed.set(s.serverId, { value: s.state, at });
         if (s.desiredState !== undefined) {
@@ -275,6 +290,13 @@ export function useCommunityEvents(communityId: string): boolean {
       }
       members = { ids: new Set(observed.keys()), at };
       reconcile(live);
+    };
+
+    // A server created or deleted elsewhere (#3308) changes the server set
+    // the list holds: it is reconciled by the change, as by a snapshot's set.
+    const applyServerSet = (event: ServerSetEvent) => {
+      changes.set(event.serverId, { value: event.change, at: stamp() });
+      reconcile(() => null);
     };
 
     // Resync gate (#1723): true only until the socket's first connect outcome.
@@ -307,6 +329,7 @@ export function useCommunityEvents(communityId: string): boolean {
       onStatus: applyStatus,
       onSnapshot: applySnapshot,
       onNotification: notify,
+      onServerSet: applyServerSet,
       onGap: () => {
         // The stream fell behind and dropped status frames for an unknown set
         // of servers: one list refetch reconciles them (#1723).
