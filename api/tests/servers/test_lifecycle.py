@@ -3185,7 +3185,7 @@ async def test_late_failed_snapshot_logs_the_worker_message(
 ) -> None:
     # Issue #2766: the Worker's failure detail is the only text that names WHY the
     # late snapshot failed — here the compose-internal data-plane URL a second-host
-    # worker was handed (#2595/#2765) — so the release WARN must carry it verbatim,
+    # worker was handed (#2595/#2765) — so the late line must carry it verbatim,
     # exactly as the final-snapshot and periodic-snapshot failures log theirs.
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
@@ -3223,7 +3223,7 @@ async def test_late_failed_snapshot_logs_publication_as_unconfirmed(
 ) -> None:
     # Issue #3048: a failed CommandResult confirms only that the Worker reported a
     # failure. The API may already have committed before its response was lost, so
-    # the WARN must state the cross-worker exposure without asserting that
+    # the late line must state the cross-worker exposure without asserting that
     # publication or progression loss is certain, and point the operator at the
     # authoritative snapshot rather than inviting speculative recovery.
     community, server_id, worker = _ids()
@@ -3254,8 +3254,9 @@ async def test_late_failed_snapshot_logs_publication_as_unconfirmed(
         "publication of the final snapshot is unconfirmed, so a cross-worker "
         "re-placement may lose progression since the last periodic snapshot "
         "(#845/#847). Check authoritative Storage's current snapshot before "
-        "recovery: this result cannot distinguish a failed publish from a lost "
-        "publish response" in record.getMessage()
+        "recovery: this result carries no publication receipt and cannot "
+        "distinguish a failed publish from a lost publish response"
+        in record.getMessage()
         for record in caplog.records
     )
 

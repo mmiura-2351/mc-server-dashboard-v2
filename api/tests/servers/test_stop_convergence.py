@@ -810,7 +810,7 @@ def _late_releases(caplog: pytest.LogCaptureFixture, server: Server) -> list[str
         r.getMessage()
         for r in caplog.records
         if r.name == _LIFECYCLE_LOGGER
-        and r.getMessage().startswith("released worker ")
+        and "released worker " in r.getMessage()
         and str(server.id.value) in r.getMessage()
     ]
 
