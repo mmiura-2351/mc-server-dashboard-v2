@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import datetime as dt
+import errno
 import os
 import tarfile
 import uuid
@@ -97,6 +98,7 @@ from mc_server_dashboard_api.servers.application.files import (
     MAX_EDIT_BYTES,
     DirListing,
     DownloadFile,
+    ReadFile,
     RenameFile,
     SearchResult,
     UploadFile,
@@ -135,6 +137,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerId as ServerScopeId,
 )
+from mc_server_dashboard_api.storage.adapters import fs as fs_adapter
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
 from tests.audit.fakes import RecordingAuditRecorder
@@ -3497,6 +3500,43 @@ def test_a_rename_whose_subtree_cannot_be_measured_answers_as_a_failed_move(
     assert refused.status_code == 500
     assert refused.json()["reason"] == "internal_error"
     assert moved.status_code == 204
+
+
+def test_a_device_fault_reading_a_file_on_fs_is_503_storage_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A transient device fault on the fs backend is the store outage the object
+    backend reports, not an opaque 500 (issue #3316). Through the real route,
+    ReadFile and fs Storage."""
+
+    community, server = uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_stopped_server(community, server))
+    file_store = StorageFileStoreAdapter(storage=FsStorage(tmp_path))
+    asyncio.run(
+        file_store.write_file(
+            community_id=ServerCommunityId(community),
+            server_id=ServerScopeId(server),
+            rel_path="server.properties",
+            content=b"motd=x\n",
+        )
+    )
+    app = _app(member=True, allow=True)
+    app.dependency_overrides[get_read_file] = lambda: ReadFile(  # type: ignore[attr-defined]
+        uow=uow,
+        control_plane=None,  # type: ignore[arg-type]
+        file_store=file_store,
+    )
+    client = enter_client(TestClient(app, raise_server_exceptions=False))  # type: ignore[arg-type]
+
+    def _eio(*args: object) -> object:
+        raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+    monkeypatch.setattr(fs_adapter, "_open_readable_sync", _eio)
+    resp = client.get(_url(community, server), params={"path": "server.properties"})
+
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "storage_unavailable"
 
 
 # --- download: the stream is begun before the headers (issue #3234) --------

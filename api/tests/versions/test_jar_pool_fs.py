@@ -10,7 +10,10 @@ from pathlib import Path
 import pytest
 
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
-from mc_server_dashboard_api.storage.domain.errors import StorageUnreachableError
+from mc_server_dashboard_api.storage.domain.errors import (
+    StorageUnavailableError,
+    StorageUnreachableError,
+)
 from mc_server_dashboard_api.versions.adapters.storage_jar_pool import StorageJarPool
 from mc_server_dashboard_api.versions.domain.errors import JarPoolUnreachableError
 
@@ -84,13 +87,19 @@ async def test_a_delete_that_fails_at_once_is_not_unreachable(
     # A file in use or a permission is about this file. A read-only filesystem is
     # about the whole store, but it fails at once rather than after a timeout.
     # The GC skips the JAR and goes on (issue #3871), and five failures in a row
-    # end its pass (issue #3906).
+    # end its pass (issue #3906). EBUSY is a transient fault, which every fs Port
+    # operation reports as the wider StorageUnavailableError (issue #3316).
     pool = StorageJarPool(FsStorage(tmp_path))
     key = await pool.put(_JAR)
     _fail_unlink(monkeypatch, code)
 
-    with pytest.raises(OSError) as excinfo:
+    with pytest.raises((OSError, StorageUnavailableError)) as excinfo:
         await pool.delete(key)
 
-    assert excinfo.value.errno == code
     assert not isinstance(excinfo.value, StorageUnreachableError)
+    fault: BaseException | None = excinfo.value
+    if code == errno.EBUSY:
+        assert isinstance(fault, StorageUnavailableError)
+        fault = fault.__cause__
+    assert isinstance(fault, OSError)
+    assert fault.errno == code

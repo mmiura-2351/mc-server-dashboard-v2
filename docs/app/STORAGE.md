@@ -273,6 +273,20 @@ Operations are grouped by the requirement area they serve. Signatures are
 language-neutral sketches; the binding Python interface is the `Storage` ABC in
 `api/`'s storage domain layer (`storage/domain/port.py`).
 
+**Outages.** Every operation, and every stream and view it hands out, reports a
+fault of the store's own I/O as `StorageUnavailableError` on every backend, so a
+caller can tell "the store is down, retry" from a refusal or a miss (issues
+#2555, #3316). On object that is a 5xx answer or a transport failure
+(`ObjectStoreUnavailableError`). On fs and remote-fs it is an `OSError` whose
+errno says the device or the mount is failing: `EIO`, `ENODEV`, `ENXIO`, `ESTALE`
+and `EBUSY`, and the networked-mount transport errnos `ETIMEDOUT`, `ENOTCONN`,
+`EHOSTDOWN`, `EHOSTUNREACH`, `ENETDOWN` and `ENETUNREACH`. Every other errno
+keeps the outcome the operation gives it. A path that names nothing (`ENOENT`,
+`ENOTDIR`, `EISDIR`, `ELOOP`, `ENAMETOOLONG`) is the operation's miss or refusal,
+such as `NotFoundError`. A standing condition an operator has to clear (`EACCES`,
+`EPERM`, `EROFS`, `ENOSPC`, `EDQUOT`) stays the raw `OSError`, which the API
+answers 500: a 503 would invite a retry that never succeeds.
+
 ### 3.1 Working-set hydrate / snapshot
 
 Serve the runtime data lifecycle (FR-DATA-4). These move the whole working set
