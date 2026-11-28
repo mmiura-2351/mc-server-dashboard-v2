@@ -252,7 +252,8 @@ class _World:
         """No status event was published over an uncommitted state write.
 
         The journal reads ``write`` (an UPDATE of ``observed_state``,
-        ``desired_state``, ``assigned_worker_id`` or ``final_snapshot_refusal``,
+        ``desired_state``, ``assigned_worker_id``, ``final_snapshot_refusal`` or
+        ``backup_retention``,
         or the INSERT or DELETE of a server row), ``commit`` and ``publish`` in
         the order they happened; a ``publish``
         whose nearest earlier DB activity is a ``write`` announced a state no
@@ -295,6 +296,7 @@ async def world() -> AsyncIterator[_World]:
                 or "desired_state=" in statement
                 or "assigned_worker_id=" in statement
                 or "final_snapshot_refusal=" in statement
+                or "backup_retention=" in statement
             )
         ) or statement.startswith(("INSERT INTO server ", "DELETE FROM server ")):
             journal.append("write")
@@ -1313,6 +1315,34 @@ async def test_server_set_changes_publish_after_commit_and_not_when_rolled_back(
     ] == [
         (str(server.id.value), {"change": "created"}, community),
         (str(server.id.value), {"change": "deleted"}, community),
+    ]
+    world.assert_published_after_commit()
+
+
+# --- Retention writes: the policy frame (issue #4169) ------------------------
+
+
+async def test_retention_writes_publish_after_commit_and_not_when_rolled_back(
+    world: _World,
+) -> None:
+    """A set and a clear each announce the policy once committed."""
+
+    server = await world.server("survival")
+    watching = world.watch(server)
+
+    async with world.uow() as uow:
+        await uow.servers.update_backup_retention(server.id, {"keep_last": 3})
+        # Left without a commit: the unit of work rolls back.
+    async with world.uow() as uow:
+        await uow.servers.update_backup_retention(server.id, {"keep_last": 5})
+        await uow.commit()
+    async with world.uow() as uow:
+        await uow.servers.update_backup_retention(server.id, None)
+        await uow.commit()
+
+    assert [event.payload for event in await _received(watching)] == [
+        {"backup_retention": {"keep_last": 5}},
+        {"backup_retention": None},
     ]
     world.assert_published_after_commit()
 

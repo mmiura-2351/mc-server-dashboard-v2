@@ -119,6 +119,7 @@ class _FakeServer:
     crash_detail: str | None = None
     not_restarted: bool = False
     final_snapshot_refusal: FinalSnapshotRefusal | None = None
+    backup_retention: dict[str, int] | None = None
 
     def crash_not_restarted(self) -> bool:
         return self.not_restarted
@@ -469,9 +470,10 @@ def test_community_frame_wire_text_is_the_exact_compact_json() -> None:
 
 def test_stream_opens_with_a_snapshot_of_every_community_server() -> None:
     # Each entry carries the desired state (#3428), the assigned Worker
-    # (#3818), the last crash (#3281) and the final-snapshot refusal (#4054)
-    # beside the observed state, so a client that missed an intent change, a
-    # release, a crash or a refusal converges on it too.
+    # (#3818), the last crash (#3281), the final-snapshot refusal (#4054) and
+    # the backup retention policy (#4169) beside the observed state, so a
+    # client that missed an intent change, a release, a crash, a refusal or a
+    # policy converges on it too.
     bus = InProcessRealTimeEvents()
     community = uuid.uuid4()
     server_a, server_b, worker = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
@@ -487,6 +489,7 @@ def test_stream_opens_with_a_snapshot_of_every_community_server() -> None:
                 crash_detail="java.lang.UnsupportedClassVersionError",
                 not_restarted=True,
                 final_snapshot_refusal=FinalSnapshotRefusal.BUSY,
+                backup_retention={"keep_last": 7},
             ),
         ]
     )
@@ -507,6 +510,7 @@ def test_stream_opens_with_a_snapshot_of_every_community_server() -> None:
                 "crash_detail": None,
                 "crash_not_restarted": False,
                 "final_snapshot_refusal": None,
+                "backup_retention": None,
             },
             {
                 "server_id": str(server_b),
@@ -517,6 +521,7 @@ def test_stream_opens_with_a_snapshot_of_every_community_server() -> None:
                 "crash_detail": "java.lang.UnsupportedClassVersionError",
                 "crash_not_restarted": True,
                 "final_snapshot_refusal": "busy",
+                "backup_retention": {"keep_last": 7},
             },
         ]
     }
@@ -539,7 +544,7 @@ def test_snapshot_wire_text_is_the_compact_community_frame_shape() -> None:
         f'"payload":{{"servers":[{{"server_id":"{server}","state":"running",'
         '"desired_state":"running","assigned_worker_id":null,'
         '"crash_reason":null,"crash_detail":null,"crash_not_restarted":false,'
-        '"final_snapshot_refusal":null}]},'
+        '"final_snapshot_refusal":null,"backup_retention":null}]},'
         '"server_id":null}'
     )
 
@@ -590,6 +595,7 @@ def test_gap_is_followed_by_a_fresh_snapshot() -> None:
                 "crash_detail": None,
                 "crash_not_restarted": False,
                 "final_snapshot_refusal": None,
+                "backup_retention": None,
             }
         ]
     }

@@ -10,7 +10,8 @@ durable, and a rollback — of the transaction or of a savepoint — discards th
 ones it undid (issue #3212): the servers repository stages one per changed row,
 so a use case that writes ``observed_state`` cannot forget the live frame, and
 no frame precedes its commit. A ``desired_state`` change stages one the same
-way (issue #3428), and so does a server's creation or deletion, the community
+way (issue #3428), so does a write of a server's backup retention policy
+(issue #4169), and so does a server's creation or deletion, the community
 stream's frame of the server set (issue #3308). A unit of work built without
 the bus refuses to commit such a write rather than drop its frame.
 """
@@ -73,9 +74,10 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
         # The bus a commit publishes its status events on. Required by any
         # unit of work that writes ``observed_state``, changes
         # ``desired_state`` (issue #3428), places or releases a server
-        # (issue #3818), or adds or deletes one (issue #3308): without it such
-        # a commit raises ``StatusEventsNotWiredError``. ``None`` suits only a
-        # unit of work that does none of these.
+        # (issue #3818), adds or deletes one (issue #3308), or writes its
+        # backup retention policy (issue #4169): without it such a commit
+        # raises ``StatusEventsNotWiredError``. ``None`` suits only a unit of
+        # work that does none of these.
         self._real_time_events = real_time_events
 
     async def __aenter__(self) -> SqlAlchemyUnitOfWork:

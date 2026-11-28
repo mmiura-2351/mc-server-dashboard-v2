@@ -606,7 +606,7 @@ async def test_backup_retention_round_trip_and_clear(engine: AsyncEngine) -> Non
     )
     assert created.backup_retention is None
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         await uow.servers.update_backup_retention(created.id, {"keep_last": 3})
         await uow.commit()
     async with ServersUnitOfWork(factory) as uow:
@@ -614,7 +614,7 @@ async def test_backup_retention_round_trip_and_clear(engine: AsyncEngine) -> Non
     assert loaded is not None
     assert loaded.backup_retention == {"keep_last": 3}
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         await uow.servers.update_backup_retention(
             created.id, {"daily": 7, "weekly": 4, "monthly": 6}
         )
@@ -624,7 +624,7 @@ async def test_backup_retention_round_trip_and_clear(engine: AsyncEngine) -> Non
     assert loaded is not None
     assert loaded.backup_retention == {"daily": 7, "weekly": 4, "monthly": 6}
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         await uow.servers.update_backup_retention(created.id, None)
         await uow.commit()
     async with ServersUnitOfWork(factory) as uow:
