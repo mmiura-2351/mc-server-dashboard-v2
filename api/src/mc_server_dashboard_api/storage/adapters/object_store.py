@@ -326,6 +326,15 @@ class S3Client(Protocol):
         """
         ...
 
+    async def ping(self) -> None:
+        """Make one bounded request to the bucket, raising if the store cannot
+        answer it (issue #3949).
+
+        A bucket that does not exist yet answers (issue #946); an outage is typed,
+        as for ``list_objects``.
+        """
+        ...
+
     async def list_multipart_uploads(self, prefix: str) -> list[S3MultipartUpload]:
         """List in-progress multipart uploads whose key starts with ``prefix``.
 
@@ -476,17 +485,18 @@ class ObjectStorage(Storage):
         self._server_locks: dict[str, asyncio.Lock] = {}
 
     async def check_reachable(self, *, endpoint: str, bucket: str) -> None:
-        """Probe the object store with a lightweight listing, failing fast.
+        """Probe the object store with one bounded request, failing fast.
 
         Called at API boot (issue #945) before the crash-recovery sweep so a
         misconfigured or unreachable backend surfaces immediately with a clear
         diagnostic naming the endpoint and bucket, instead of degrading silently
-        and failing only at the first runtime storage operation.
+        and failing only at the first runtime storage operation. One request,
+        however large the bucket (issue #3949).
         """
 
         try:
             async with self._client_factory() as client:
-                await client.list_objects("")
+                await client.ping()
         except Exception as exc:
             raise RuntimeError(
                 f"Object storage unreachable at endpoint {endpoint!r}, "

@@ -380,6 +380,20 @@ class _Aioboto3S3Client:
                     return None
                 raise
 
+    async def ping(self) -> None:
+        # The boot reachability probe (issue #3949): one ListObjectsV2 of at most
+        # one key, whose contents are not read. The same operation as
+        # ``list_objects``, so it fails the same way: a bucketless store answers
+        # (issue #946) and an outage is typed. Not HeadBucket: a HEAD response has
+        # no body, so its refusal names only a status (``403``), where a listing
+        # names the cause (``InvalidAccessKeyId``, ``SignatureDoesNotMatch``).
+        with _translating_backend_faults("list", ""):
+            try:
+                await self._client.list_objects_v2(Bucket=self._bucket, MaxKeys=1)
+            except ClientError as exc:
+                if not _is_no_such_bucket(exc):
+                    raise
+
     async def list_multipart_uploads(self, prefix: str) -> list[S3MultipartUpload]:
         # Paginate ListMultipartUploads so a crash-leftover orphan upload is found
         # regardless of count (issue #903). A backend without the operation (e.g. a

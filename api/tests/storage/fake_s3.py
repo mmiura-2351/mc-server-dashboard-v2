@@ -185,6 +185,9 @@ class FakeS3Client:
             default=None,
         )
 
+    async def ping(self) -> None:
+        return None
+
     async def list_multipart_uploads(self, prefix: str) -> list[S3MultipartUpload]:
         if self._store.list_multipart_uploads_unsupported:
             raise MultipartUploadsUnsupportedError("stub: operation unsupported")

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 
 import aiohttp
 import pytest
@@ -31,6 +32,8 @@ from mc_server_dashboard_api.storage.adapters.object_client import (
 )
 from mc_server_dashboard_api.storage.adapters.object_store import (
     ConditionalPutUnsupportedError,
+    ObjectStorage,
+    S3Client,
 )
 from mc_server_dashboard_api.storage.domain.errors import (
     NotFoundError,
@@ -525,6 +528,74 @@ async def test_first_key_is_none_only_on_the_final_page() -> None:
 
     assert await client.first_key("jars/") is None
     assert len(double.calls) == 2
+
+
+class _ThreePageBucketClient:
+    """A client double over a bucket three listing pages long.
+
+    Records every ListObjectsV2 request it serves, made directly or as one page
+    of a paginator, so a test counts what a call costs the store.
+    """
+
+    def __init__(self) -> None:
+        self.requests: list[dict[str, object]] = []
+
+    def _serve(self, request: dict[str, object]) -> dict[str, object]:
+        self.requests.append(request)
+        n = len(self.requests)
+        page: dict[str, object] = {
+            "Contents": [
+                {
+                    "Key": f"jars/{n}.jar",
+                    "Size": 1,
+                    "LastModified": dt.datetime(2026, 1, 1, tzinfo=dt.UTC),
+                }
+            ],
+            "IsTruncated": n < 3,
+        }
+        if n < 3:
+            page["NextContinuationToken"] = f"t{n}"
+        return page
+
+    async def list_objects_v2(self, **kwargs: object) -> dict[str, object]:
+        return self._serve(kwargs)
+
+    def get_paginator(self, _name: str) -> _ThreePagePaginator:
+        return _ThreePagePaginator(self)
+
+
+class _ThreePagePaginator:
+    def __init__(self, client: _ThreePageBucketClient) -> None:
+        self._client = client
+
+    async def _pages(
+        self, request: dict[str, object]
+    ) -> AsyncIterator[dict[str, object]]:
+        while True:
+            page = self._client._serve(request)
+            yield page
+            if not page["IsTruncated"]:
+                return
+            request = {**request, "ContinuationToken": page["NextContinuationToken"]}
+
+    def paginate(self, **kwargs: object) -> AsyncIterator[dict[str, object]]:
+        return self._pages(kwargs)
+
+
+async def test_check_reachable_makes_one_bounded_request() -> None:
+    # The boot probe (issue #945) asks only whether the store answers. A full
+    # listing cost one request per page of the bucket (issue #3949).
+    double = _ThreePageBucketClient()
+
+    @asynccontextmanager
+    async def factory() -> AsyncIterator[S3Client]:
+        yield _Aioboto3S3Client(double, "mcsdata")
+
+    await ObjectStorage(factory).check_reachable(
+        endpoint="http://seaweedfs:8333", bucket="mcsdata"
+    )
+
+    assert double.requests == [{"Bucket": "mcsdata", "MaxKeys": 1}]
 
 
 async def test_list_multipart_uploads_no_such_bucket_returns_empty() -> None:
