@@ -822,8 +822,8 @@ reserves for root (5% by default on ext4) out of its total.
 **What it does not cover.** The minimum stops only the store's volume writes,
 and only at its next check, up to a minute late. PostgreSQL, the worker scratch,
 the API's temporary files and the container logs keep writing into the
-remaining 5%, and so does SeaweedFS itself: delete tombstones into its volumes,
-the filer's metadata store, and its own logs. While the store is low, the filer
+remaining 5%, and so does SeaweedFS itself: delete tombstones into its volumes
+and the filer's metadata store. While the store is low, the filer
 retries its metadata-log write about every 0.75 s after a metadata change,
 logging `metadata log write failed` each time, so its log grows several times
 faster. The minimum keeps the store from taking the last of the disk; it does
