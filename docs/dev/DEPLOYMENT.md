@@ -368,6 +368,50 @@ API starts.
 The data lives in the `seaweedfs-data` volume — include it in your backups
 (Section 10).
 
+### Supported SeaweedFS version
+
+The supported SeaweedFS version is the one `compose.yaml` pins for the
+`seaweedfs` service, and it is the only version the object store is tested on:
+the api workflow's `live-s3` job runs the same image, and `make
+image-pins-check` fails a compose bump that leaves that job behind. This
+document does not restate the tag, so it cannot fall behind the pin. To read
+it:
+
+```sh
+sed -n 's/^ *image: \(chrislusf\/seaweedfs:.*\)$/\1/p' compose.yaml
+```
+
+Older versions are not supported. SeaweedFS 4.33 has these known faults, most
+of them found in the review of the store owner claim (issues #3886 and #3949):
+
+- **A one-key listing misses keys behind deleted directories.** SeaweedFS keeps
+  the directories of deleted keys, and 4.33 reads only `MaxKeys + 2` entries of
+  a directory, so a `MaxKeys=1` listing behind three emptied directories
+  returned no key although one followed.
+- **Emptied directories hide a namespace's keys.** With 1,100 emptied
+  directories directly under a namespace, both the claim's first-key probe and
+  the paginated listing return nothing on 4.33 although the namespace holds a
+  key; 4.53 finds it. The claim's sample (STORAGE.md Section 4.3) then reads
+  that namespace as empty, and every GC pass that lists it sees none of its
+  keys.
+- **Listing order.** 4.33 lists keys in path-component order. 4.53 lists them
+  by full key, the order S3 specifies.
+- **No `Initiated` on multipart uploads.** 4.33 omits it from
+  `ListMultipartUploads`; 4.54 returns it (Orphan multipart parts, below).
+
+Each fault was checked only on the versions named.
+
+**Moving the pin does not move a running store.** A container keeps the image
+it was created from. An upgrade that does not recreate the `seaweedfs`
+container, such as one that rebuilds and restarts only `api`, leaves the store
+on its old version, and the API's first start after the upgrade runs the store
+owner claim on that version. On 2026-11-21 the canonical host's store still ran
+`chrislusf/seaweedfs:4.41` while `compose.yaml` pinned 4.53 (issue #3949), and
+4.41 has not been checked for the faults above. Recreate the store on the
+pinned image with or before the API: the `docker compose up -d` of Section 9
+(or `make update`) recreates each service whose configuration changed, so it
+recreates `seaweedfs` when its pin moved.
+
 ### Operational trade-off: cost/perf scales with operation count
 
 The object backend's cost and latency are driven by **operation count**, not
@@ -390,14 +434,18 @@ A hard crash mid-upload can leave in-progress multipart parts. The API's startup
 sweep reclaims them via `ListMultipartUploads` + `AbortMultipartUpload`, aborting
 only uploads older than a 1h age threshold so a live upload is never touched.
 
-SeaweedFS 4.33 returns `ListMultipartUploads` **without** the per-upload
-`Initiated` timestamp, so the sweep cannot read the age directly. It instead
+The per-upload `Initiated` timestamp is optional in the `ListMultipartUploads`
+response. An older SeaweedFS omits it (Supported SeaweedFS version, above);
+4.54 returns it, for an upload with no parts too (checked 2026-11-28 against a
+throwaway container). Where it is missing, the sweep cannot read the age
+directly. It instead
 derives the effective age from the upload's parts via `ListParts` (SeaweedFS does
 return a per-part `LastModified`), using the newest part's timestamp — so a
-genuine crash-orphan with parts **is** reclaimed on SeaweedFS, not just on real
-S3/MinIO. One residual gap: an upload that crashes after `CreateMultipartUpload`
-but **before** its first part has no `Initiated` and no part timestamp, so the
-sweep treats it as just-started and leaves it. Such an entry holds no part bytes.
+genuine crash-orphan with parts **is** reclaimed there too, not just on real
+S3/MinIO. One residual gap on such a store: an upload that crashes after
+`CreateMultipartUpload` but **before** its first part has no `Initiated` and no
+part timestamp, so the sweep treats it as just-started and leaves it. Such an
+entry holds no part bytes.
 If you want to reclaim those on a schedule too, `weed shell s3.clean.uploads` is
 the SeaweedFS-native operator-side cleanup (it removes incomplete uploads older
 than its default 24h); it is optional and complementary to the API sweep.

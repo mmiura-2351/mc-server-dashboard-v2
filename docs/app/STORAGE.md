@@ -922,8 +922,10 @@ the threshold may belong to a live write still in flight, so it is left alone â€
 mirroring the `incoming/` lease-guard discipline and keeping the periodic
 passes as safe as the startup one (the long-upload caveat is in Section 9.5).
 
-`Initiated` is **optional** in the S3 `ListMultipartUploads` response, and
-SeaweedFS 4.33 omits it. When it is absent the adapter age-gates the upload by
+`Initiated` is **optional** in the S3 `ListMultipartUploads` response. An older
+SeaweedFS omits it (Section 7.3, **Supported SeaweedFS version**); 4.54 returns
+it, for an upload with no parts too (checked 2026-11-28). When it is absent the
+adapter age-gates the upload by
 its parts instead: `ListParts` returns a per-part `LastModified` (SeaweedFS does
 supply this), and the newest part's timestamp stands in for `Initiated` â€” so a
 genuine crash-orphan with parts is still reclaimed on SeaweedFS, not only on real
@@ -1084,9 +1086,9 @@ store:
   namespace only when no id was found. Each listing reads the store's default
   page size until it finds a key, and follows a page that is truncated but holds
   none. It lists keys, not common prefixes: SeaweedFS keeps the directories of
-  deleted keys and reports an emptied one as a common prefix. Its 4.33 also reads
-  only `MaxKeys + 2` entries of a directory, so a one-key listing reported a store
-  holding a live object as empty. On fs, the sample is up to three entries each of `communities/` and
+  deleted keys and reports an emptied one as a common prefix. A one-key listing
+  is not enough on an older SeaweedFS, which misses keys behind emptied
+  directories (Section 7.3, **Supported SeaweedFS version**). On fs, the sample is up to three entries each of `communities/` and
   `jars/`; there are no resource packs on fs, and a directory left empty by
   deletes counts, which errs on the side of refusing.
 
@@ -2035,6 +2037,34 @@ copies every world file into a fresh prefix and uploads members via multipart â€
 operating cost/latency scale with **operation count** (files Ã— snapshot
 frequency), not stored size or egress; keep the snapshot interval coarse enough
 that a publish completes well within it.
+
+**Supported SeaweedFS version.** The one `compose.yaml` pins for the
+`seaweedfs` service. The `live-s3` job runs the same image, so it is the only
+version the object store is tested on. Older versions are not supported.
+SeaweedFS 4.33 has these known faults, the listing ones found in the review of
+the store owner claim (issues #3886 and #3949):
+
+- SeaweedFS keeps the directories of deleted keys, and 4.33 reads only
+  `MaxKeys + 2` entries of a directory, so a `MaxKeys=1` listing behind three
+  emptied directories returned no key although one followed.
+- With 1,100 emptied directories directly under a namespace, both `first_key`
+  and the paginated `list_objects` return nothing on 4.33 although the
+  namespace holds a key; 4.53 finds it. The claim's sample (Section 4.3) then
+  reads that namespace as empty, and every GC pass that lists it sees none of
+  its keys.
+- 4.33 lists keys in path-component order; 4.53 lists them by full key, the
+  order S3 specifies.
+- 4.33 omits `Initiated` from `ListMultipartUploads`; 4.54 returns it
+  (Section 4.3).
+
+Each fault was checked only on the versions named. A container keeps the image
+it was created from, so a store whose container is not recreated by an upgrade
+stays on its old version, and the API's first start after the upgrade runs the
+store owner claim on that version. On 2026-11-21 the canonical host's store
+still ran `chrislusf/seaweedfs:4.41`, which has not been checked, while
+`compose.yaml` pinned 4.53 (issue #3949).
+How to read the pin and recreate the store:
+[DEPLOYMENT.md Section 5](../dev/DEPLOYMENT.md#supported-seaweedfs-version).
 
 **Explicit transport budget.** The S3 client is built with an
 explicit `botocore.config.Config` rather than inheriting botocore's hidden
