@@ -126,14 +126,14 @@ async def test_clear_logs_on_non_uuid_worker_id(
     assert any(record.levelno == logging.ERROR for record in caplog.records)
 
 
-async def test_clear_carries_the_worker_message_into_the_release_warning(
+async def test_clear_carries_the_worker_message_into_the_release_error(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Issue #2766: the Worker's failure detail is the only text that names WHY the
     # late snapshot failed — here the compose-internal data-plane URL a second-host
     # worker was handed (#2595/#2765). This delegation is the seam that dropped it,
     # so drive the real adapter with well-formed ids and assert the detail comes out
-    # of the real use case's release WARN, verbatim. Only the per-call UnitOfWork is
+    # of the real use case's release ERROR, verbatim. Only the per-call UnitOfWork is
     # substituted (in-memory fakes, no database); everything from the parse through
     # the log is production code.
     server_id, worker_id = uuid.uuid4(), uuid.uuid4()
@@ -158,7 +158,7 @@ async def test_clear_carries_the_worker_message_into_the_release_warning(
         )
 
     assert any(
-        record.levelno == logging.WARNING and detail in record.getMessage()
+        record.levelno == logging.ERROR and detail in record.getMessage()
         for record in caplog.records
     )
 
