@@ -60,8 +60,9 @@ Missed events are never replayed, so every status subscription opens with a
 ``snapshot`` frame of the persisted observed and desired states (#3428) and
 assigned Worker (#3818) of its scope, and gets a
 fresh one right after every ``gap`` frame whose overflow dropped status events
-(#1795): a (re)connecting or overflowed client converges from the stream
-alone, whatever its own resync discipline. The snapshot is read after the
+(#1795), or on the community stream server-set events (#3308): a
+(re)connecting or overflowed client converges from the stream alone, whatever
+its own resync discipline. The snapshot is read after the
 subscription is registered, so no transition falls between the two
 (:func:`_relay`).
 
@@ -164,8 +165,9 @@ _REAUTHZ_INTERVAL_SECONDS = 60.0
 # :class:`EventStream`.
 _SNAPSHOT_STREAM = "snapshot"
 
-# The buffered events a snapshot supersedes (:func:`_relay`).
-_SNAPSHOT_SUPERSEDES = frozenset({EventStream.STATUS})
+# The buffered events a snapshot supersedes (:func:`_relay`): the states, and
+# on the community stream the server set (#3308).
+_SNAPSHOT_SUPERSEDES = frozenset({EventStream.STATUS, EventStream.SERVERS})
 
 # The streams a client may subscribe to (the gap marker is always delivered and
 # is never selectable).
@@ -300,12 +302,14 @@ async def community_events(
     The community-level analogue of :func:`server_events`: the two-layer gate is
     applied before accept (and re-applied mid-stream), but at community scope —
     ``server:read`` with no specific resource, the honest gate for a stream that
-    carries the lifecycle of all the community's servers. Only the STATUS and
-    NOTIFICATION streams are forwarded (lifecycle transitions and operator
-    notices); log/metrics are per-server detail.
+    carries the lifecycle of all the community's servers. Only the STATUS,
+    NOTIFICATION and SERVERS streams are forwarded (lifecycle transitions,
+    operator notices and the servers created and deleted, #3308); log/metrics
+    are per-server detail.
 
     Fan-out is a firehose subscription over the relay filtered by community
-    membership of each event's server. The server->community mapping is resolved
+    membership of each event's server. An event that carries its community is
+    routed by it; for any other the server->community mapping is resolved
     lazily and cached for the life of the connection, so a hot server is one
     bounded lookup; servers created after connect are picked up because the
     firehose carries every server's events.
@@ -338,7 +342,9 @@ async def community_events(
     if not await _accept(websocket, handshake):
         return
     subscription = bus.subscribe_all(
-        streams=frozenset({EventStream.STATUS, EventStream.NOTIFICATION})
+        streams=frozenset(
+            {EventStream.STATUS, EventStream.NOTIFICATION, EventStream.SERVERS}
+        )
     )
     # Per-connection server->community cache: each server id is looked up at most
     # once, bounding queries while the firehose may carry many servers' events.
@@ -417,12 +423,13 @@ async def _relay(
     """Deliver events until the client goes away, authz is revoked, or ``expires_at``.
 
     When ``snapshot`` is given, its frame is sent first, and again right after
-    a delivered GAP marker when ``take_dropped`` reports status drops recorded
-    since the previous accounting check (#1795): the stream replays nothing, so
-    the snapshot is what lets a (re)connecting or overflowed client converge
-    without a REST round-trip. A gap that dropped only other streams cost the
-    client no status, so it reads nothing — a slow client on a chatty log
-    stream does not turn every gap into a DB read. A pending GAP may also
+    a delivered GAP marker when ``take_dropped`` reports drops of the streams
+    it supersedes (status, and the community stream's server set, #3308)
+    recorded since the previous accounting check (#1795): the stream replays
+    nothing, so the snapshot is what lets a (re)connecting or overflowed client
+    converge without a REST round-trip. A gap that dropped only other streams
+    cost the client no status, so it reads nothing — a slow client on a chatty
+    log stream does not turn every gap into a DB read. A pending GAP may also
     concern losses the preceding snapshot already covers (a status event
     evicted while the previous GAP was being delivered is accounted to that
     GAP's snapshot), so it reads no further snapshot. Its ordering argument:
@@ -433,7 +440,9 @@ async def _relay(
       discarded. Each was published before the read, and every observed-state
       write is committed before it is published (#3212), so the read sees it
       or a newer state. Delivering it after the snapshot could only roll the
-      client back.
+      client back. The same holds for a buffered server-set event: its
+      creation or deletion committed before the read, which lists the server
+      set as it left it.
     - A status event published after the discard is delivered after the
       snapshot, in order. One that raced the read may repeat what the snapshot
       showed, which is harmless: status frames are idempotent sets. It may also
@@ -557,7 +566,7 @@ async def _relay(
                 await _send_event(event)
                 if (
                     event.stream is EventStream.GAP
-                    and EventStream.STATUS in subscription.take_dropped()
+                    and _SNAPSHOT_SUPERSEDES & subscription.take_dropped()
                 ):
                     code = await _send_snapshot()
                     if code is not None or disconnected.done():
@@ -631,8 +640,14 @@ async def _in_community(
     lookup: ServerCommunityLookup,
     membership: dict[str, bool],
 ) -> bool:
-    """Return whether ``event``'s server belongs to ``community_id`` (cached)."""
+    """Return whether ``event``'s server belongs to ``community_id`` (cached).
 
+    An event that carries its community is routed by it, with no lookup: the
+    deletion of a server has no row left to look up (#3308).
+    """
+
+    if event.community_id is not None:
+        return event.community_id == str(community_id)
     server_id = event.server_id
     if server_id is None:
         return False

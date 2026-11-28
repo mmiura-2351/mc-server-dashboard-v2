@@ -51,6 +51,15 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
     StartServer,
     StopServer,
 )
+from mc_server_dashboard_api.servers.application.release_held_server import (
+    ReleaseHeldServer,
+)
+from mc_server_dashboard_api.servers.application.stop_convergence import (
+    StopConvergenceGuard,
+)
+from mc_server_dashboard_api.servers.application.unannounced_refusals import (
+    UnannouncedRefusals,
+)
 from mc_server_dashboard_api.servers.domain.control_plane import (
     MAX_CONSOLE_LINE_BYTES,
     CommandOutcome,
@@ -1239,7 +1248,9 @@ def _released(community_id: uuid.UUID) -> Server:
 
 
 def _release_app(
-    use_case: _FakeUseCase, *, granted: tuple[str, ...] = ("server:stop",)
+    use_case: _FakeUseCase | ReleaseHeldServer,
+    *,
+    granted: tuple[str, ...] = ("server:stop",),
 ) -> tuple[object, RecordingAuditRecorder]:
     app = _app(member=True, allow=True)
     recorder = RecordingAuditRecorder()
@@ -1336,3 +1347,57 @@ def test_only_server_stop_grants_the_release_without_snapshot(granted: str) -> N
 
     assert resp.status_code == 403
     assert use_case.kwargs == {}
+
+
+# --- a server of another community, while it converges (issue #4077) --------
+
+
+def _held_in_flight() -> tuple[Server, FakeUnitOfWork, StopConvergenceGuard]:
+    """A held server, seeded, with the guard its convergence is in flight on."""
+
+    server = dataclasses.replace(
+        _desired_stopped(uuid.uuid4(), ObservedState.STOPPED, assigned=True),
+        final_snapshot_refusal=FinalSnapshotRefusal.UNAVAILABLE,
+    )
+    uow = FakeUnitOfWork()
+    uow.servers.seed(server)
+    return server, uow, StopConvergenceGuard()
+
+
+def test_a_stop_of_another_communitys_converging_server_is_404_unaudited() -> None:
+    # The community check comes before the convergence claim, so the foreign id
+    # answers as a missing one would, not 409 and a DENIED row saying it exists
+    # and is converging.
+    server, uow, guard = _held_in_flight()
+    use_case = StopServer(
+        uow=uow,
+        control_plane=FakeControlPlane(),
+        clock=FakeClock(_NOW),
+        stop_convergence=guard,
+    )
+    app = _app(member=True, allow=True)
+    recorder = RecordingAuditRecorder()
+    _shared_app.dependency_overrides[get_stop_server] = lambda: use_case
+    _shared_app.dependency_overrides[get_audit_recorder] = lambda: recorder
+
+    with guard.claim(server.id):
+        resp = _client(app).post(_url(uuid.uuid4(), server.id.value, "stop"))
+
+    assert resp.status_code == 404
+    assert resp.json()["reason"] == "not_found"
+    assert recorder.events == []
+
+
+def test_a_release_of_another_communitys_converging_server_is_404_unaudited() -> None:
+    server, uow, guard = _held_in_flight()
+    use_case = ReleaseHeldServer(
+        uow=uow, stop_convergence=guard, unannounced_refusals=UnannouncedRefusals()
+    )
+    app, recorder = _release_app(use_case)
+
+    with guard.claim(server.id):
+        resp = _client(app).post(_url(uuid.uuid4(), server.id.value, _RELEASE))
+
+    assert resp.status_code == 404
+    assert resp.json()["reason"] == "not_found"
+    assert recorder.events == []

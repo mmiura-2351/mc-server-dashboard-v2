@@ -465,6 +465,7 @@ describe("CommunityEventsClient", () => {
         onStatus,
         onGap,
         onNotification,
+        onServerSet: vi.fn(),
         onSnapshot,
         onOpen,
         onDown,

@@ -508,14 +508,17 @@ sees.
 
 Enumerated 2026-08-02 by TCP connect from inside a **booted** Minecraft server
 container on `mcsd-servers`, by service name and by raw control-plane IP, with a
-positive control from a container on `mcsd` confirming each target was live. Two
-entries, marked (†) and (‡), are closed by a bind or a flag rather than by the
+positive control from a container on `mcsd` confirming each target was live. The
+entries marked (†) and (‡) are closed by a bind or a flag rather than by the
 network split; their control column reports the post-deploy probe of 2026-08-25
-from the `api` container (an `mcsd` peer), not the 2026-08-02 enumeration:
+from the `api` container (an `mcsd` peer), not the 2026-08-02 enumeration. The
+`9101` row is the exception: that listener is new in a later SeaweedFS
+release, so neither the enumeration nor that probe covers it:
 
 | Target | From `mcsd` (control) | From `mcsd-servers` |
 |---|---|---|
 | `seaweedfs` `8333` S3, `8888` filer, `9333` master, `8080` volume, `18333` S3 gRPC, `18080` volume gRPC, `18888` filer gRPC, `19333` master gRPC; `8181` Iceberg REST (‡) | all open; `8181` refused — disabled by flag (‡) | all blocked |
+| `seaweedfs` `9101` Lance Namespace (‡) | disabled by flag; post-deploy probe not yet run (‡) | not probed |
 | `api` `8000`, `api` `50051` | open | blocked |
 | `db` `5432` | open | blocked |
 | `cloudflared` `20241` | refused — loopback bind (†) | blocked |
@@ -540,8 +543,8 @@ urllib.request.urlopen('http://cloudflared:20241/metrics', timeout=3)"` — and
 refused (`Errno 111`). The same command re-checks it after any change to the
 `cloudflared` command line.
 
-(‡) **`seaweedfs` `8181` — disabled by flag.** `compose.yaml`'s `weed server`
-command passes `-s3.port.iceberg=0`, which `weed server -h` on
+(‡) **`seaweedfs` `8181` and `9101` — disabled by flag.** `compose.yaml`'s
+`weed server` command passes `-s3.port.iceberg=0`, which `weed server -h` on
 `chrislusf/seaweedfs` `4.41` documents as `Iceberg REST Catalog server listen
 port (0 to disable)`. Verified 2026-08-21 against `chrislusf/seaweedfs:4.41`,
 outside compose, on a throwaway internal docker network: with the flag, `8181`
@@ -556,7 +559,26 @@ urllib.request.urlopen('http://seaweedfs:8181/', timeout=3)"` — and refused
 (`Errno 111`); `compose.yaml` pinned `4.41` from 2026-08-20 (#2733) until
 2026-08-26 (#2804), so that deploy ran `4.41` too, not the pinned version. The
 same command re-checks it after an image bump or a change to the `weed server`
-command line.
+command line. On `4.54` the 2026-11-28 listing below has no `8181`, with the
+flag; it sent no request to `8181`.
+
+`9101` is the Lance Namespace listener, new since the 2026-08-02 enumeration
+(issue #4207). `chrislusf/seaweedfs` `4.54` binds it by default, on the
+container address as well as on loopback, and its `weed server -h` documents
+`-s3.port.lance` as `Lance Namespace server listen port (0 to disable)
+(default 9101)`. `compose.yaml`'s `weed server` command passes
+`-s3.port.lance=0`. Verified 2026-11-28 against `chrislusf/seaweedfs:4.54`
+(digest `sha256:4b42c212543a0acd4c0e675215ecdcaf62a186ef98def76c7e12701871222d15`),
+outside compose, with the compose entrypoint and command line, on a throwaway
+internal docker network. Without the flag, `netstat -ltnup` in the container
+lists `weed` on `8333`, `8888`, `9333`, `8080`, `9101`, `18333`, `18080`,
+`18888` and `19333`, and a peer container's `GET http://<container>:9101/`
+answers 404. With it, the same listing loses `9101` and nothing else, and the
+peer's connect to `9101` is refused. No post-deploy probe has been run for
+`9101` yet. After a deploy, `docker compose exec api python -c "import
+urllib.request; urllib.request.urlopen('http://seaweedfs:9101/', timeout=3)"`
+should be refused (`Errno 111`), and the same command re-checks it after an
+image bump or a change to the `weed server` command line.
 
 **This covers docker-network paths only.** A port **published to the host** on a
 non-loopback interface is reachable from `mcsd-servers` through the bridge
@@ -1012,11 +1034,11 @@ security model, and the following remain true:
   …), so a caller on `mcsd` can mint itself an S3 identity; `-s3.iam.readOnly`
   does not guard that path. Only the S3 gateway (`8333`) enforces on every
   data-path call (its `/status` probe answers 200 uncredentialed, which is what
-  the compose healthcheck uses). The ninth listener, the Iceberg REST port
-  (`8181`), does not bind — see the (‡) footnote above. Who reaches the
-  remaining eight: the long-running members of `mcsd` are
-  `api`, `db`, `worker`, `relay` and `cloudflared` (the table above names three
-  more — `seaweedfs` itself, and the one-shots `migrate` and
+  the compose healthcheck uses). The two catalog listeners, the Iceberg REST
+  port (`8181`) and the Lance Namespace port (`9101`), do not bind — see the
+  (‡) footnote above. Who reaches the remaining eight: the long-running
+  members of `mcsd` are `api`, `db`, `worker`, `relay` and `cloudflared`
+  (the table above names three more — `seaweedfs` itself, and the one-shots `migrate` and
   `seaweedfs-lifecycle`, which run to completion and exit). Membership of `mcsd`
   is therefore equivalent to object-store admin for those five, two of which,
   `relay` and `cloudflared`, terminate internet traffic.
@@ -1027,7 +1049,8 @@ security model, and the following remain true:
   JWT in `security.toml`), and `security.toml`'s `grpc.s3` mTLS cannot be
   scoped to the S3 gRPC port — turning it on escalates to mTLS across the whole
   cluster, all-or-nothing. The one reduction available without that escalation
-  is applied instead: `-s3.port.iceberg=0`, above. So read "first-party" in the
+  is applied instead: closing the catalog listeners with `-s3.port.iceberg=0`
+  and `-s3.port.lance=0`, above. So read "first-party" in the
   table above as a statement about *who is
   attached*, never about what an attached process would have to prove — a
   compromise of `relay` or `cloudflared` lands on a network where every storage

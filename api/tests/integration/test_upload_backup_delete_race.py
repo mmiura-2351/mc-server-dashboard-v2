@@ -48,6 +48,9 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.community.domain.value_objects import CommunityName
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.fleet.adapters.real_time_events import (
+    InProcessRealTimeEvents,
+)
 from mc_server_dashboard_api.servers.adapters import (
     lifecycle_lock as lifecycle_lock_mod,
 )
@@ -171,7 +174,7 @@ async def _create_server(factory: async_sessionmaker[AsyncSession]) -> Server:
         await community_uow.communities.add(community)
         await community_uow.commit()
     return await CreateServer(
-        uow=ServersUnitOfWork(factory),
+        uow=ServersUnitOfWork(factory, InProcessRealTimeEvents()),
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=FakeFileStore(),
@@ -241,7 +244,9 @@ async def test_server_delete_in_the_upload_window_waits_for_the_publication(
 ) -> None:
     factory, server, store, lock = await _setup(engine, tmp_path)
     delete = DeleteServer(
-        uow=ServersUnitOfWork(factory), backup_store=store, lifecycle_lock=lock
+        uow=ServersUnitOfWork(factory, InProcessRealTimeEvents()),
+        backup_store=store,
+        lifecycle_lock=lock,
     )
     deletes: list[asyncio.Task[None]] = []
 
@@ -315,7 +320,9 @@ async def test_upload_behind_a_server_delete_is_refused_as_not_found(
     store.on_prune = _park_prune
     delete_task = asyncio.create_task(
         DeleteServer(
-            uow=ServersUnitOfWork(factory), backup_store=store, lifecycle_lock=lock
+            uow=ServersUnitOfWork(factory, InProcessRealTimeEvents()),
+            backup_store=store,
+            lifecycle_lock=lock,
         )(community_id=server.community_id, server_id=server.id)
     )
     await in_prune.wait()

@@ -83,7 +83,12 @@ SUBAGENT_REASON = (
 )
 
 # A here-document body is text, not commands: ``cat > body.md <<EOF ... EOF``.
-HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1.*?^\s*\2\s*$", re.DOTALL | re.MULTILINE)
+# The body starts on the line after the ``<<``, so the rest of that line, in
+# group ``line``, is kept: ``cat <<EOF | gh issue create ...`` is a command.
+HEREDOC = re.compile(
+    r"<<-?\s*(['\"]?)(\w+)\1(?P<line>[^\n]*\n).*?^\s*\2\s*$",
+    re.DOTALL | re.MULTILINE,
+)
 
 # An environment assignment before a command: ``GH_CONFIG_DIR=~/.config/gh gh``.
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
@@ -94,6 +99,11 @@ FALLBACK_LABEL = re.compile(
     r"(?:--add-label|--label|-l)[=\s]+[\"']?[\w,-]*\bapproved\b",
     re.IGNORECASE,
 )
+
+
+def without_heredoc_bodies(command: str) -> str:
+    """``command`` with each here-document operator and body removed."""
+    return HEREDOC.sub(r" \g<line>", command)
 
 
 def shell_tokens(command: str) -> list[tuple[str, bool]]:
@@ -108,6 +118,7 @@ def shell_tokens(command: str) -> list[tuple[str, bool]]:
     tokens: list[tuple[str, bool]] = []
     word: str | None = None
     quote = ""
+    redirect: int | None = None  # index of the last unquoted ``<`` or ``>``
     index = 0
     while index < len(command):
         char = command[index]
@@ -136,7 +147,7 @@ def shell_tokens(command: str) -> list[tuple[str, bool]]:
                 index += 1
             continue
         elif char in "&|" and (
-            (word or "")[-1:] in ("<", ">") or (char == "&" and following == ">")
+            redirect == index - 1 or (char == "&" and following == ">")
         ):
             word = (word or "") + char  # part of a redirect: 2>&1, >|, &>
         elif char in ";&|()\n":
@@ -145,6 +156,8 @@ def shell_tokens(command: str) -> list[tuple[str, bool]]:
                 word = None
             tokens.append((char, True))
         else:
+            if char in "<>":
+                redirect = index
             word = (word or "") + char
         index += 1
     if quote:
@@ -167,7 +180,7 @@ def gh_invocations(command: str) -> list[list[str]]:
     calls: list[list[str]] = []
     current: list[str] | None = None
     outer: list[list[str] | None] = []
-    for text, is_operator in shell_tokens(HEREDOC.sub(" ", command)):
+    for text, is_operator in shell_tokens(without_heredoc_bodies(command)):
         if not is_operator:
             if current is not None:
                 current.append(text)
@@ -311,7 +324,7 @@ def decide(
     try:
         calls = gh_invocations(command)
     except ValueError:
-        text = HEREDOC.sub(" ", command)
+        text = without_heredoc_bodies(command)
         return LABEL_FORM_REASON if FALLBACK_LABEL.search(text) else None
     for args in calls:
         if adds_approved(args):
@@ -404,6 +417,14 @@ CASES = [
         False,
         True,
     ),
+    # The body starts on the next line: the rest of the ``<<`` line is commands.
+    (
+        "gh issue comment 77 --body-file - <<'EOF' && "
+        "gh issue edit 77 --add-label approved\nbody\nEOF",
+        False,
+        True,
+    ),
+    ("cat <<'EOF' | gh issue create --title t --body-file -\nbody\nEOF", True, True),
     # A line break ends a command.
     ("gh pr edit 7 --add-label chore\ngrep -l approved docs/dev/*.md", False, False),
     ("gh pr edit 7 --add-label chore\n\ngrep -l approved f", False, False),
@@ -422,6 +443,8 @@ CASES = [
     ("gh issue edit 3 &>/dev/null --add-label approved", False, True),
     ("gh issue list --label approved 2>&1 | head -3", False, False),
     ("(cd /tmp && gh issue list --label approved) && gh pr list", False, False),
+    # A quoted ``<`` or ``>`` starts no redirect: the ``|`` after it is a pipe.
+    ('echo "<b>"|gh issue edit 77 --add-label approved', False, True),
     # A command substitution is an argument, not the end of the call.
     ("gh issue edit $(cat nums.txt) --add-label approved", False, True),
     (

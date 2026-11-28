@@ -109,6 +109,9 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     UserId,
 )
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.fleet.adapters.real_time_events import (
+    InProcessRealTimeEvents,
+)
 from mc_server_dashboard_api.identity.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as IdentityUnitOfWork,
 )
@@ -1047,7 +1050,7 @@ class _ServersUnitOfWork(ServersUnitOfWork):
         session_factory: async_sessionmaker[AsyncSession],
         pid: asyncio.Future[int],
     ) -> None:
-        super().__init__(session_factory)
+        super().__init__(session_factory, InProcessRealTimeEvents())
         self._pid = pid
         self._entries = 0
 

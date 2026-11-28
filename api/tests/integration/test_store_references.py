@@ -32,6 +32,9 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.community.domain.value_objects import CommunityName
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.fleet.adapters.real_time_events import (
+    InProcessRealTimeEvents,
+)
 from mc_server_dashboard_api.servers.adapters.store_references import (
     SqlAlchemyStoreDatabase,
 )
@@ -104,7 +107,9 @@ async def test_a_community_alone_names_nothing(engine: AsyncEngine) -> None:
 async def test_a_server_row_names_its_stored_objects(engine: AsyncEngine) -> None:
     community_id = await _seed_community(engine)
     await CreateServer(
-        uow=ServersUnitOfWork(create_session_factory(engine)),
+        uow=ServersUnitOfWork(
+            create_session_factory(engine), InProcessRealTimeEvents()
+        ),
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=FakeFileStore(),

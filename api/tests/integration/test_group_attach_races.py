@@ -43,6 +43,9 @@ from sqlalchemy import Delete, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.fleet.adapters.real_time_events import (
+    InProcessRealTimeEvents,
+)
 from mc_server_dashboard_api.servers.adapters.group_models import GroupPlayerModel
 from mc_server_dashboard_api.servers.adapters.group_repository import (
     SqlAlchemyGroupRepository,
@@ -195,7 +198,7 @@ class _PidUnitOfWork(ServersUnitOfWork):
         session_factory: async_sessionmaker[AsyncSession],
         pid: asyncio.Future[int],
     ) -> None:
-        super().__init__(session_factory)
+        super().__init__(session_factory, InProcessRealTimeEvents())
         self._pid = pid
 
     async def __aenter__(self) -> _PidUnitOfWork:
@@ -833,7 +836,9 @@ async def _behind_a_server_delete(world: _World, kind: str) -> asyncio.Task[None
     await world.attach_now()
     pause = _Pause()
     deletion = asyncio.create_task(
-        _delete_server(world, ServersUnitOfWork(world.factory), pause)
+        _delete_server(
+            world, ServersUnitOfWork(world.factory, InProcessRealTimeEvents()), pause
+        )
     )
     await asyncio.wait_for(pause.reached.wait(), SETTLE_TIMEOUT)
     pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()

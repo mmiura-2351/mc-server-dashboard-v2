@@ -15,6 +15,9 @@ from mc_server_dashboard_api.fleet.adapters.control_plane import (
     ControlPlaneState,
     GrpcControlPlane,
 )
+from mc_server_dashboard_api.fleet.adapters.real_time_events import (
+    InProcessRealTimeEvents,
+)
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
 from mc_server_dashboard_api.servers.adapters.deleted_server_reclaim import (
@@ -96,6 +99,7 @@ async def test_the_delete_use_case_reports_through_the_fleet() -> None:
     app = FastAPI()
     app.state.engine = create_async_engine("postgresql+asyncpg://u:p@h/db")
     app.state.worker_registry = registry
+    app.state.real_time_events = InProcessRealTimeEvents()
     app.state.control_plane = GrpcControlPlane(
         state, clock=FakeClock(_T0), timeout_seconds=5.0
     )

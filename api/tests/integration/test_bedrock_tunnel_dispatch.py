@@ -150,7 +150,7 @@ async def _create_running_server(
     community_id = await _seed_community(engine)
     factory = create_session_factory(engine)
     server = await CreateServer(
-        uow=ServersUnitOfWork(factory),
+        uow=ServersUnitOfWork(factory, InProcessRealTimeEvents()),
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=FakeFileStore(),
