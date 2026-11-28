@@ -1901,9 +1901,14 @@ class ObjectStorage(Storage):
         local fault on the spool raises ``StorageUnavailableError`` — the base, not
         the ``ObjectStoreUnavailableError`` caught below — so it never reaches the
         short-body classification.
+
+        The decompressed bytes count toward the restore cap, and a stream past it
+        raises ``ArchiveTooLargeError`` as soon as a part takes it there. Each part
+        is decompressed on a worker thread: one part of a gzip bomb can inflate to
+        the whole cap (issue #3914).
         """
 
-        gzip_probe = GzipReadProbe()
+        gzip_probe = GzipReadProbe(self._max_restore_bytes)
         read = 0
         try:
             with _translating_io_faults():
@@ -1913,7 +1918,7 @@ class ObjectStorage(Storage):
                 ):
                     async for chunk in body:
                         read += len(chunk)
-                        gzip_probe.feed(chunk)
+                        await asyncio.to_thread(gzip_probe.feed, chunk)
                         await out.write(chunk)
             if read < declared:
                 # A body that simply STOPPED early, with no transport error — some

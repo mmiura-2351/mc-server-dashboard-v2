@@ -2126,7 +2126,12 @@ download and restore paths read — and requires both that the delivered byte co
 equals the declared length **and** that the bytes decompress as a gzip stream
 terminating at a well-formed CRC32 + ISIZE trailer, so silent bit-rot is caught
 and not only truncation. Decompressed output is discarded as it is produced
-(`GzipReadProbe`), and nothing is buffered whole. The bytes the read delivers are
+(`GzipReadProbe`), and nothing is buffered whole. The probe counts the bytes it
+decompresses toward the restore decompressed-size cap, and a stream past it
+raises `ArchiveTooLargeError` there, before the rest of the body is read. One
+part of a gzip bomb can still inflate to the whole cap, so the probe
+decompresses each part the store delivers on a worker thread, not on the event
+loop (issue #3914). The bytes the read delivers are
 spooled to a local temp file, which a sound read then walks member by member the
 way restore does, discarding the bytes: bytes the store can produce can still hold
 nothing restore can stage. A member the archive member rule (Section 3.3)

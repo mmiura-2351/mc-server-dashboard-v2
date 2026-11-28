@@ -22,13 +22,16 @@ stays an availability failure.
 from __future__ import annotations
 
 import gzip
+import threading
 from collections.abc import AsyncIterator
 
 import pytest
 
+from mc_server_dashboard_api.archive_member import GzipDecoder
 from mc_server_dashboard_api.storage.adapters import object_store
 from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
 from mc_server_dashboard_api.storage.domain.errors import (
+    ArchiveTooLargeError,
     ArchiveUnreadableError,
     NotFoundError,
     ObjectStoreUnavailableError,
@@ -42,6 +45,7 @@ from mc_server_dashboard_api.storage.integrity.archive import GzipReadProbe
 from tests import gzip_shapes
 from tests.storage.fake_s3 import FakeS3Store, close_tracking_factory, fake_s3_factory
 from tests.storage.helpers import (
+    bomb_targz,
     healthy_region_bytes,
     new_scope,
     region_targz,
@@ -238,24 +242,80 @@ def test_the_probe_refuses_no_part_of_a_sound_stream_before_its_end() -> None:
     body = first + bytes(512) + second + bytes(1024)
 
     for at in range(len(body) + 1):
-        probe = GzipReadProbe()
+        probe = GzipReadProbe(object_store._DEFAULT_MAX_RESTORE_BYTES)
         probe.feed(body[:at])
         probe.feed(body[at:])
         probe.finish()
 
 
 def test_the_probe_refuses_more_than_10000_gzip_members_as_they_arrive() -> None:
-    """The probe reads the parts the store delivers on the event loop, so it
+    """The probe reads the parts the store delivers as they arrive, so it
     stops at the 10,001st gzip member rather than walking every member of the
     part (issue #3835)."""
 
     body = gzip_shapes.refused(tar_bytes({"server.properties": b"k=v"}))[
         "over-the-member-cap"
     ]
-    probe = GzipReadProbe()
+    probe = GzipReadProbe(object_store._DEFAULT_MAX_RESTORE_BYTES)
 
     with pytest.raises(ArchiveUnreadableError, match="more than 10000 gzip members"):
         probe.feed(body)
+
+
+async def test_the_probe_stops_decompressing_a_bomb_at_the_restore_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe counts what it decompresses against the cap restore holds the
+    archive to, and refuses past it as restore does (issue #3914), so a bomb of
+    about 1000:1 is not inflated whole before the member walk refuses it. Every
+    byte the health check decompresses is counted, the walk's included."""
+
+    cap = 64 * 1024
+    storage = ObjectStorage(fake_s3_factory(FakeS3Store()), max_restore_bytes=cap)
+    community, server = new_scope()
+    bomb = bomb_targz(decompressed=16 * 1024 * 1024)
+    key = await _put_backup(storage, community, server, bomb)
+    decompressed = 0
+    decompress = GzipDecoder.decompress
+
+    def counting(self: GzipDecoder, max_length: int) -> bytes:
+        nonlocal decompressed
+        data = decompress(self, max_length)
+        decompressed += len(data)
+        return data
+
+    monkeypatch.setattr(GzipDecoder, "decompress", counting)
+
+    with pytest.raises(ArchiveTooLargeError):
+        await storage.check_backup_health(community, server, key)
+
+    assert decompressed <= cap + 1
+
+
+async def test_the_probe_decompresses_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One part the store delivers can inflate to the whole cap, 8 GiB, so the
+    probe decompresses each part on a worker thread, not on the event loop
+    (issue #3914)."""
+
+    _store, storage = _store_and_storage()
+    community, server = new_scope()
+    key = await _put_backup(storage, community, server, _sound_archive())
+    threads: list[int] = []
+    feed = GzipReadProbe.feed
+
+    def recording(self: GzipReadProbe, chunk: bytes) -> None:
+        threads.append(threading.get_ident())
+        feed(self, chunk)
+
+    monkeypatch.setattr(GzipReadProbe, "feed", recording)
+
+    report = await storage.check_backup_health(community, server, key)
+
+    assert report.healthy
+    assert threads
+    assert threading.get_ident() not in threads
 
 
 async def test_reproducible_mid_stream_teardown_is_unreadable() -> None:

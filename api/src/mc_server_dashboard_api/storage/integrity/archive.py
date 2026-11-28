@@ -81,16 +81,34 @@ class GzipReadProbe:
     What the probe catches, then: a stream that never reaches a trailer
     (truncation) and a trailer that no longer describes its payload (bit-rot),
     as soon as the store delivers the bytes, before the short-body re-read.
+
+    It counts what it decompresses against ``max_bytes``, the cap restore holds
+    the archive's decompressed stream to, and refuses a stream past it as
+    :class:`ArchiveTooLargeError`, as restore does, having decompressed at most
+    one byte more than the cap (issue #3914). One part a gzip bomb delivers can
+    inflate to the whole cap, so :meth:`feed` belongs off the event loop.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_bytes: int) -> None:
         self._decoder = GzipDecoder()
+        self._max_bytes = max_bytes
+        self._decompressed = 0
 
     def feed(self, chunk: bytes) -> None:
         self._decoder.feed(chunk)
         try:
-            while self._decoder.decompress(_OUT_CHUNK):
-                pass
+            # Only the length is kept, so one output is held at a time.
+            while taken := len(
+                self._decoder.decompress(
+                    min(_OUT_CHUNK, self._max_bytes + 1 - self._decompressed)
+                )
+            ):
+                self._decompressed += taken
+                if self._decompressed > self._max_bytes:
+                    raise ArchiveTooLargeError(
+                        f"restore archive decompresses to more than "
+                        f"{self._max_bytes} bytes"
+                    )
         except (zlib.error, gzip.BadGzipFile) as exc:
             raise ArchiveUnreadableError(
                 f"archive is not a readable gzip stream: {exc}"
