@@ -986,6 +986,32 @@ describe("ServerBackupsTab permission gating", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("shows the API's detail under the invalid-archive message (#3892)", async () => {
+    // The 422 names the refused member in its `detail` (issue #3586), which the
+    // fixed message cannot, so the toast shows the API's own English words.
+    const detail =
+      "unsafe member: 'world//level.dat' has an empty or '.' segment";
+    routeGet();
+    mockPostFormWithProgress.mockRejectedValue(
+      new ApiError(422, { reason: "invalid_archive", detail }),
+    );
+    await openBackups();
+
+    const input = (await screen.findByLabelText(
+      t("backups.upload"),
+    )) as HTMLInputElement;
+    const file = new File(["x"], "b.tar.gz", { type: "application/gzip" });
+    fireEvent.change(input, { target: { files: [file] } });
+
+    const message = await screen.findByText(t("backups.error.invalidArchive"));
+    const shown = screen.getByText(detail);
+    expect(shown).toHaveAttribute("lang", "en");
+    expect(message.closest("[role='alert']")).toContainElement(shown);
+    expect(
+      message.compareDocumentPosition(shown) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+  });
+
   it("routes a create 403 through the permission glue", async () => {
     routeGet();
     mockApi.post.mockRejectedValue(

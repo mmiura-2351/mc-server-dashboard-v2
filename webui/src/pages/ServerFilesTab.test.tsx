@@ -1725,6 +1725,39 @@ describe("ServerFilesTab error presentation glue", () => {
       screen.queryByText(t("files.error.invalidInput")),
     ).not.toBeInTheDocument();
   });
+
+  it("shows the API's detail under the invalid-archive message (#3892)", async () => {
+    // A refused extract can name the header limit it hit in its `detail`
+    // (issue #3810), which the fixed message cannot, so the toast shows the
+    // API's own English words.
+    const detail = "more than 1048576 bytes of headers before a member";
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "world.zip", kind: "file" }]),
+    });
+    mockPostFormWithProgress.mockRejectedValue(
+      new ApiError(422, { reason: "invalid_archive", detail }),
+    );
+    renderPage();
+    await openFiles();
+
+    fireEvent.contextMenu(await screen.findByText(/world\.zip/));
+    fireEvent.click(
+      screen.getByRole("menuitem", {
+        name: t("files.contextMenu.extractHere"),
+      }),
+    );
+
+    const message = await screen.findByText(t("files.error.invalidArchive"));
+    const [url] = mockPostFormWithProgress.mock.calls[0];
+    expect(url).toBe(`${FILES_BASE}/upload?path=&extract=true`);
+    const shown = screen.getByText(detail);
+    expect(shown).toHaveAttribute("lang", "en");
+    expect(message.closest("[role='alert']")).toContainElement(shown);
+    expect(
+      message.compareDocumentPosition(shown) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+  });
 });
 
 describe("ServerFilesTab refused existing name", () => {
