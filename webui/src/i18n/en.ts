@@ -2161,6 +2161,8 @@ export const en = {
     "Could not assign the resource pack.",
   "serverDetail.resourcePack.unassignError":
     "Could not unassign the resource pack.",
+  "serverDetail.resourcePack.storageUnavailable":
+    "Server file storage is unavailable right now. Please try again shortly.",
   "serverDetail.resourcePack.assignDialog.title": "Assign resource pack",
   "serverDetail.resourcePack.assignDialog.select": "Resource pack",
   "serverDetail.resourcePack.assignDialog.selectPlaceholder": "Select a pack…",
