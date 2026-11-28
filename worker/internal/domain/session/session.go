@@ -315,8 +315,9 @@ func (r *Runner) serve(ctx context.Context, transport Transport, interval time.D
 
 // receiveLoop reads inbound commands and routes each, never blocking on a
 // slow command for one server. A command targeting a server is handed to that
-// server's lane, which executes the server's commands serially (so start/stop for
-// one server never interleave) while different servers' lanes run concurrently —
+// server's lane, which executes the server's commands in arrival order (so
+// start/stop for one server never interleave; runLane has the one exception)
+// while different servers' lanes run concurrently —
 // a slow graceful Stop on one server no longer delays commands for another (issue
 // #95). A command with no server id (or an unset/unknown oneof) has no lane to
 // order against, so it is handled inline; the inline path is guaranteed instant:
@@ -547,12 +548,13 @@ func IsHandledKind(kind string) bool {
 }
 
 // dispatcher routes commands to per-server lanes (issue #95). Each lane runs one
-// server's commands serially on its own goroutine; lanes run concurrently up to
-// sem's capacity. A lane is created on first use and removed once its queue
-// drains, so an ever-growing roster of servers leaks no goroutines. All state is
-// guarded by mu; the lane queue lives inline on the lane so enqueue and the
-// drain-and-exit decision are made under the same lock, closing the race where a
-// command arrives just as a lane decides to exit.
+// server's commands in order on its own goroutine (runLane); lanes run
+// concurrently up to sem's capacity. A lane is created on first use and removed
+// once its queue drains and its snapshot has finished, so an ever-growing roster
+// of servers leaks no goroutines. All state is guarded by mu; the lane queue
+// lives inline on the lane so enqueue and the drain-and-exit decision are made
+// under the same lock, closing the race where a command arrives just as a lane
+// decides to exit.
 type dispatcher struct {
 	r       *Runner
 	ctx     context.Context
