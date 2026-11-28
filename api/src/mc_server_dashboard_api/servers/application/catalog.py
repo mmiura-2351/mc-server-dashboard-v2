@@ -20,6 +20,8 @@ from mc_server_dashboard_api.servers.application.plugin_manifest import (
 )
 from mc_server_dashboard_api.servers.application.plugins import (
     allocate_bedrock_port_if_geyser,
+    undo_on_failure,
+    withdraw_install,
 )
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
     CatalogDependency,
@@ -481,6 +483,7 @@ class InstallFromCatalog:
                     side=side,
                     catalog_dependencies=catalog_dependencies,
                 )
+                bedrock_port = server.bedrock_port
                 await self.uow.plugins.add(plugin)
                 # Geyser detection (issue #1541): a Geyser install switches the
                 # server Bedrock-on, allocating its public UDP port in the same
@@ -500,14 +503,25 @@ class InstallFromCatalog:
                 # enabled jar goes into the working set; a client-only jar is
                 # tracked + cached but never written there. The write follows
                 # the commit so a commit failure cannot orphan a working-set
-                # jar with no DB row (issue #1826).
+                # jar with no DB row (issue #1826), and a failed write takes
+                # the row back out (issue #4001).
                 if working_set_present(enabled=True, side=side):
-                    await self.file_store.write_file(
-                        community_id=community_id,
-                        server_id=server_id,
-                        rel_path=rel_path,
-                        content=content,
-                    )
+                    async with undo_on_failure(
+                        self.uow,
+                        lambda: withdraw_install(
+                            self.uow,
+                            server=server,
+                            plugin_id=plugin.id,
+                            bedrock_port=bedrock_port,
+                            now=now,
+                        ),
+                    ):
+                        await self.file_store.write_file(
+                            community_id=community_id,
+                            server_id=server_id,
+                            rel_path=rel_path,
+                            content=content,
+                        )
                 return plugin
 
 
@@ -768,15 +782,19 @@ class UpdatePlugin:
                 await self.uow.commit()
                 # Write the fresh bytes at the desired path and remove the old
                 # file after the DB commit so a commit failure does not leave
-                # diverged files (#1826). A client-only jar has no working-set
-                # file.
+                # diverged files (#1826), and put the row back on its old
+                # version when the write fails (#4001): the old file is still
+                # in place then. A client-only jar has no working-set file.
                 if new_path is not None:
-                    await self.file_store.write_file(
-                        community_id=community_id,
-                        server_id=server_id,
-                        rel_path=new_path,
-                        content=content,
-                    )
+                    async with undo_on_failure(
+                        self.uow, lambda: self.uow.plugins.update(plugin)
+                    ):
+                        await self.file_store.write_file(
+                            community_id=community_id,
+                            server_id=server_id,
+                            rel_path=new_path,
+                            content=content,
+                        )
                 if old_path is not None and old_path != new_path:
                     try:
                         await self.file_store.delete_file(

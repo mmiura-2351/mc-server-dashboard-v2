@@ -2,13 +2,20 @@
 
 All mutations require the server at rest and hold the per-server lifecycle lock.
 The at-rest gate and lock pattern mirrors the file and backup use cases.
+
+Every mutation that changes a plugin's jar in the working set writes in one
+order: it commits the row first, then changes the working set, and takes the
+row back when that change fails (:func:`undo_on_failure`, issue #4001).
 """
 
 from __future__ import annotations
 
+import contextlib
+import dataclasses
 import datetime as dt
 import hashlib
 import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.servers.application.archive_validation import (
@@ -31,6 +38,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidFilePathError,
     InvalidPluginSideError,
     PluginAlreadyExistsError,
+    PluginCacheBlobNotFoundError,
     PluginNotFoundError,
     ServerFileNotFoundError,
     ServerFilesUnsettledError,
@@ -188,6 +196,59 @@ async def allocate_bedrock_port_if_geyser(
     server.bedrock_port = pick_lowest_free_port(port_range, taken=taken)
     server.updated_at = now
     await uow.servers.update(server)
+
+
+@contextlib.asynccontextmanager
+async def undo_on_failure(
+    uow: UnitOfWork, undo: Callable[[], Awaitable[None]]
+) -> AsyncIterator[None]:
+    """Take a committed plugin change back when the working-set step fails.
+
+    The one order every plugin mutation that changes a jar's file writes in
+    (issue #4001): install, catalog install, update, enable, disable and side
+    change. The row commits first, so a failed commit leaves no file that no row
+    describes (issues #1706, #1826). The working-set write, rename or delete then
+    runs inside this block. When it fails, ``undo`` writes the row back as it was
+    before the request, which commits too, still under the lifecycle lock, and
+    the failure goes on to the caller. The row and the file are then as they were:
+    a failed write leaves the old file in place, and a failed rename leaves the
+    file at its old name.
+
+    A jar missing from the content-addressed cache as well is not undone (issue
+    #3437): no retry can bring its bytes back, so the change stands, and the edge
+    answers ``409 plugin_jar_missing``.
+    """
+
+    try:
+        yield
+    except PluginCacheBlobNotFoundError:
+        raise
+    except Exception:
+        await undo()
+        await uow.commit()
+        raise
+
+
+async def withdraw_install(
+    uow: UnitOfWork,
+    *,
+    server: Server,
+    plugin_id: PluginId,
+    bedrock_port: int | None,
+    now: dt.datetime,
+) -> None:
+    """Take back an install's row, and the Bedrock port it allocated (#1541).
+
+    ``bedrock_port`` is the server's port as it was before the install; a Geyser
+    install that allocated one (:func:`allocate_bedrock_port_if_geyser`) gives it
+    back.
+    """
+
+    await uow.plugins.delete(plugin_id)
+    if server.bedrock_port != bedrock_port:
+        server.bedrock_port = bedrock_port
+        server.updated_at = now
+        await uow.servers.update(server)
 
 
 @dataclass(frozen=True)
@@ -358,6 +419,7 @@ class InstallPlugin:
                     mc_versions=manifest.mc_versions,
                     side=side,
                 )
+                bedrock_port = server.bedrock_port
                 await self.uow.plugins.add(plugin)
                 # Geyser detection (issue #1541): a Geyser jar switches the
                 # server Bedrock-on, allocating its public UDP port in the same
@@ -377,14 +439,25 @@ class InstallPlugin:
                 # enabled jar goes into the working set; a client-only jar is
                 # tracked + cached but never written there. The write follows
                 # the commit so a commit failure cannot orphan a working-set
-                # jar with no DB row (issue #1706).
+                # jar with no DB row (issue #1706), and a failed write takes
+                # the row back out (issue #4001).
                 if working_set_present(enabled=True, side=side):
-                    await self.file_store.write_file(
-                        community_id=community_id,
-                        server_id=server_id,
-                        rel_path=rel_path,
-                        content=content,
-                    )
+                    async with undo_on_failure(
+                        self.uow,
+                        lambda: withdraw_install(
+                            self.uow,
+                            server=server,
+                            plugin_id=plugin.id,
+                            bedrock_port=bedrock_port,
+                            now=now,
+                        ),
+                    ):
+                        await self.file_store.write_file(
+                            community_id=community_id,
+                            server_id=server_id,
+                            rel_path=rel_path,
+                            content=content,
+                        )
                 return plugin
 
 
@@ -503,6 +576,7 @@ class TogglePlugin:
                     if existing is not None and existing.id != plugin.id:
                         raise PluginAlreadyExistsError(new_path)
 
+                previous = dataclasses.replace(plugin)
                 plugin.enabled = enable
                 plugin.rel_path = new_path if new_path is not None else clean_path
                 plugin.updated_at = self.clock.now()
@@ -511,16 +585,20 @@ class TogglePlugin:
                 await lock.ensure_held()
                 await self.uow.commit()
                 # Reconcile the working-set file after the DB commit so a
-                # commit failure does not leave rel_path diverged (#1706).
-                await _reconcile_working_set(
-                    file_store=self.file_store,
-                    cache=self.cache,
-                    community_id=community_id,
-                    server_id=server_id,
-                    sha256=plugin.sha256,
-                    current_path=current_path,
-                    desired_path=new_path,
-                )
+                # commit failure does not leave rel_path diverged (#1706), and
+                # put the row back when the reconcile fails (#4001).
+                async with undo_on_failure(
+                    self.uow, lambda: self.uow.plugins.update(previous)
+                ):
+                    await _reconcile_working_set(
+                        file_store=self.file_store,
+                        cache=self.cache,
+                        community_id=community_id,
+                        server_id=server_id,
+                        sha256=plugin.sha256,
+                        current_path=current_path,
+                        desired_path=new_path,
+                    )
                 return plugin
 
 
@@ -593,6 +671,7 @@ class SetPluginSide:
                     if existing is not None and existing.id != plugin.id:
                         raise PluginAlreadyExistsError(desired_path)
 
+                previous = dataclasses.replace(plugin)
                 plugin.side = new_side
                 plugin.rel_path = (
                     desired_path if desired_path is not None else clean_path
@@ -603,14 +682,18 @@ class SetPluginSide:
                 await lock.ensure_held()
                 await self.uow.commit()
                 # Reconcile the working-set file after the DB commit so a
-                # commit failure does not leave the file diverged (#1706).
-                await _reconcile_working_set(
-                    file_store=self.file_store,
-                    cache=self.cache,
-                    community_id=community_id,
-                    server_id=server_id,
-                    sha256=plugin.sha256,
-                    current_path=current_path,
-                    desired_path=desired_path,
-                )
+                # commit failure does not leave the file diverged (#1706), and
+                # put the row back when the reconcile fails (#4001).
+                async with undo_on_failure(
+                    self.uow, lambda: self.uow.plugins.update(previous)
+                ):
+                    await _reconcile_working_set(
+                        file_store=self.file_store,
+                        cache=self.cache,
+                        community_id=community_id,
+                        server_id=server_id,
+                        sha256=plugin.sha256,
+                        current_path=current_path,
+                        desired_path=desired_path,
+                    )
                 return plugin
