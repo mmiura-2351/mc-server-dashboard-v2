@@ -2083,6 +2083,10 @@ class StopServer:
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId, force: bool = False
     ) -> Server:
+        # A server of another community is not found before the claim (issue
+        # #4077): the claim's 409 would say that it exists and is converging.
+        async with self.uow:
+            await _load(self.uow, community_id, server_id)
         # Held from before the desired flip to the release, so a stop that finds
         # another stop convergence in flight for the server refuses (409) without
         # flipping, dispatching or releasing anything (issue #3491).
