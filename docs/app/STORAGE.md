@@ -555,9 +555,11 @@ issue #3931). Our header read reports `tarfile`'s `RecursionError` there as an
 archive that does not read. The gate runs off the event loop thread
 (issue #3801), on a pool of two threads that it shares with the files upload's
 extract and the server import (issues #3843, #3912), so a slow archive cannot
-hold the default executor that the fs backend and the sweep run on. The plugin
-upload's manifest read and the resource-pack upload's validation run on that
-pool too, but are not admitted, so an admitted upload can wait behind them. The
+hold the default executor that the fs backend and the sweep run on. Every
+read of a plugin jar's manifest (the plugin upload, the catalog install and
+update, and the restore's plugin reconcile, issue #3936) and the resource-pack
+upload's validation run on that pool too, but are not admitted, so an admitted
+upload can wait behind them. The
 three archive upload routes admit at most four archive uploads at a time between
 them: two validating and two waiting. One past that is `503 upload_busy`, refused before
 its body is read into memory. A validating thread still holds the GIL, so the

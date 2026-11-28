@@ -10,6 +10,7 @@ row back when that change fails (:func:`undo_on_failure`, issue #4001).
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import dataclasses
 import datetime as dt
@@ -327,11 +328,15 @@ class InstallPlugin:
     can wait there as long as the slowest validation ahead of it. Holding the
     lock and an open unit of work meanwhile would pin two DB connections for that
     wait, with nothing bounding how many installs wait. So a short unit of work
-    first loads the server (404) and resolves its loader (422 for a type that
-    runs no plugins), and the parse then runs holding nothing. A server's type
-    never changes after create, so that loader stays right. Under the lock every
-    check is made again on the server as it is then, since a start or a delete
-    can land while the parse runs.
+    first loads the server (404) and makes every check :meth:`_installable_path`
+    makes, so an install that would be refused is refused before its body waits
+    for the pool (issue #3936). The parse then runs holding nothing. A server's
+    type never changes after create, so the loader resolved first stays right.
+    Under the lock every check is made again on the server as it is then, since a
+    start, a delete or another install can land while the parse runs.
+
+    Both hashes of the jar run off the event loop, as each takes seconds for a
+    jar near the cap (issue #3936).
     """
 
     uow: UnitOfWork
@@ -358,10 +363,11 @@ class InstallPlugin:
         filename = sanitize_plugin_filename(filename)
 
         # Parse the jar manifest for dependency metadata (issue #1307), holding
-        # no lock and no unit of work (see the docstring, issue #3912). Tolerant
-        # of an unreadable jar (the install still proceeds).
+        # no lock and no unit of work (see the docstring, issues #3912, #3936).
+        # Tolerant of an unreadable jar (the install still proceeds).
         async with self.uow:
             server = await _load(self.uow, community_id, server_id)
+            await self._installable_path(server, filename)
         loader = modrinth_loader_for_server_type(server.server_type)
         manifest = await run_archive_validation(
             parse_manifest_at_ingest, content, loader=loader
@@ -370,17 +376,8 @@ class InstallPlugin:
         async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
-                if not server.is_quiescent():
-                    raise server.not_quiescent_error(ServerFilesUnsettledError)
-
-                content_dir = content_dir_for_server_type(server.server_type)
+                rel_path = await self._installable_path(server, filename)
                 loader_type = loader_type_for_server_type(server.server_type)
-                rel_path = f"{content_dir}/{filename}"
-                self.file_store.validate_rel_path(rel_path)
-
-                existing = await self.uow.plugins.get_by_rel_path(server_id, rel_path)
-                if existing is not None:
-                    raise PluginAlreadyExistsError(rel_path)
 
                 # Ingest into the content-addressed cache (dedup-on-ingest). The
                 # jar is the byte source for the working set; a client-only mod is
@@ -393,7 +390,9 @@ class InstallPlugin:
                 else:
                     side = manifest.side
 
-                checksum = hashlib.sha512(content).hexdigest()
+                checksum = (
+                    await asyncio.to_thread(hashlib.sha512, content)
+                ).hexdigest()
                 now = self.clock.now()
 
                 plugin = ServerPlugin(
@@ -461,6 +460,24 @@ class InstallPlugin:
                             content=content,
                         )
                 return plugin
+
+    async def _installable_path(self, server: Server, filename: str) -> str:
+        """The path the jar installs at, or the refusal the server answers with.
+
+        422 ``unsupported_server_type`` for a type that runs no plugins, 409
+        ``server_unsettled`` (or ``server_assigned``) for a server that is not at
+        rest, 422 for a path the store refuses, and 409 ``plugin_already_exists``
+        for a path a plugin already holds.
+        """
+
+        content_dir = content_dir_for_server_type(server.server_type)
+        if not server.is_quiescent():
+            raise server.not_quiescent_error(ServerFilesUnsettledError)
+        rel_path = f"{content_dir}/{filename}"
+        self.file_store.validate_rel_path(rel_path)
+        if await self.uow.plugins.get_by_rel_path(server.id, rel_path) is not None:
+            raise PluginAlreadyExistsError(rel_path)
+        return rel_path
 
 
 @dataclass(frozen=True)

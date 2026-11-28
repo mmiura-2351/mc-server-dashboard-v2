@@ -805,7 +805,9 @@ async def _reconcile_plugins(
 
     Errors during ghost ingestion or manifest parsing for a single file are
     logged and skipped (the restore must not fail for a bad jar). A listed jar
-    gone by its read (the typed miss) is skipped too.
+    gone by its read (the typed miss) is skipped too. Opening a jar parses its
+    whole zip directory, so each manifest is parsed on the archive-validation
+    pool (issue #3936).
 
     The listing of the content directory is the evidence every step above rests
     on, so only the typed miss (:class:`ServerFileNotFoundError`) reads as "no
@@ -934,7 +936,9 @@ async def _reconcile_plugins(
                     pass
             try:
                 loader = modrinth_loader_for_server_type(server.server_type)
-                manifest = parse_manifest_at_ingest(jar_bytes, loader=loader)
+                manifest = await run_archive_validation(
+                    parse_manifest_at_ingest, jar_bytes, loader=loader
+                )
                 plugin.mod_identifier = manifest.mod_identifier or None
                 plugin.provides = manifest.provides
                 plugin.dependencies = manifest.dependencies
@@ -1002,7 +1006,9 @@ async def _ingest_ghost(
     filename = raw_name.removesuffix(".disabled") if disabled else raw_name
     loader_type = loader_type_for_server_type(server.server_type)
     loader = modrinth_loader_for_server_type(server.server_type)
-    manifest = parse_manifest_at_ingest(jar_bytes, loader=loader)
+    manifest = await run_archive_validation(
+        parse_manifest_at_ingest, jar_bytes, loader=loader
+    )
     checksum = hashlib.sha512(jar_bytes).hexdigest()
 
     sha256: str | None = None

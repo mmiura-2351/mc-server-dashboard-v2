@@ -44,6 +44,9 @@ import zipfile
 import zlib
 from dataclasses import dataclass, field
 
+from mc_server_dashboard_api.servers.application.zip_entries import (
+    has_more_entries_than,
+)
 from mc_server_dashboard_api.servers.domain.errors import InvalidModJarError
 from mc_server_dashboard_api.servers.domain.plugin import PluginSide
 
@@ -141,13 +144,14 @@ def parse_manifest(jar_bytes: bytes, *, server_type: str) -> ParsedManifest:
 
     if not zipfile.is_zipfile(io.BytesIO(jar_bytes)):
         raise InvalidModJarError("not a valid jar (zip)")
+    # Before the jar is opened, which builds an entry per directory record.
+    if has_more_entries_than(jar_bytes, _MAX_ENTRY_COUNT):
+        raise InvalidModJarError("too many entries")
 
     names: dict[str, str] = {}
     try:
         with zipfile.ZipFile(io.BytesIO(jar_bytes)) as zf:
             infos = zf.infolist()
-            if len(infos) > _MAX_ENTRY_COUNT:
-                raise InvalidModJarError("too many entries")
             wanted = set(manifests)
             for info in infos:
                 if info.is_dir() or info.filename not in wanted:
