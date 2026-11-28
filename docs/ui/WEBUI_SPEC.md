@@ -986,7 +986,7 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   | 422 | `path_too_deep` | A mutation's destination, or a name a directory rename would create below it, is more than 128 directory levels deep (#3973). Shown with the limit, since a shallower path is the remedy. |
   | 422 | `path_too_long` | A mutation's destination, or a name a directory rename would create below it, is over 4,095 bytes (#3973). Shown with the limit. |
   | 422 | `invalid_name_character` | A mutation's destination carries a character no name may carry: a `\`, a C1 control character, a line or paragraph separator, a lone surrogate or a Unicode noncharacter (#3969, #3973). Another name is the remedy. |
-  | 422 | `invalid_archive` | The archive reader failed on an extract upload (not an archive, cut short, damage it detects, an encrypted member); nothing was written. A tar.gz is read to its gzip end, so a header that does not read, data past its end-of-archive marker and a bad gzip trailer are caught too (#3778). |
+  | 422 | `invalid_archive` | The archive reader failed on an extract upload (not an archive, cut short, damage it detects, an encrypted member); nothing was written. A tar.gz is read to its gzip end, so a header that does not read, data past its end-of-archive marker and a bad gzip trailer are caught too (#3778). A problem `detail`, which names a header limit the archive broke (#3810), shows under the message as the API's own English text, untranslated (#3892). |
   | 413 | `file_too_large` | Read result or edit payload exceeds the file size cap. |
   | 503 | `worker_unavailable` | The Worker hosting a running server is not connected or did not answer in time. |
   | 503 | `storage_unavailable` | The store holding the server's files did not answer (Section 2.3). Shown as its own message, distinct from the Worker one: retrying is the remedy, and nothing about the server's Worker is wrong. |
@@ -1023,10 +1023,12 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   server's files smaller, since retrying as they are fails the same way. An
   upload answering 503 `upload_busy` (too many archive uploads being checked
   at once, #3843) was not stored; its message asks the user to try again
-  shortly rather than naming a server host. An upload whose member the
-  member-name rule refuses (#3973) answers 422 `invalid_archive`, and the tab
-  shows its invalid-archive message: the rule's reason rides only in the
-  problem's `detail`, which names the member, and the tab does not render it.
+  shortly rather than naming a server host. An upload answering 422
+  `invalid_archive` shows the invalid-archive message, and under it the
+  problem's `detail`, which names the refused member and the reason, or the
+  header limit the archive broke (#3586, #3810). The `detail` is the API's own
+  English text and shows untranslated (#3892). An upload whose member the
+  member-name rule refuses (#3973) answers the same way.
 - Schedule: backup cadence is a first-class `backup` schedule on the general
   scheduler (the `…/{sid}/schedules` surface, Section 6.13), not an inline
   cadence field on this tab; the Backups tab shows a short note pointing
@@ -1504,8 +1506,12 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   pushes out an error, nor an error a timed toast. An error raised again while
   its toast still shows, about the same server when it is about one, does not
   stack a copy: that toast shows a count badge and counts as the newest for
-  the drop order. A toast is at most 32rem wide, never wider than the screen
-  less 2rem, and its message wraps anywhere; the stack is at most the
+  the drop order. An error may show a line under its message: an API
+  `detail`, the API's own English text, shown as it is, marked as English and
+  never translated. Only the Files and Backups `invalid_archive` toasts carry
+  one (6.6, 6.7). An error counts as raised again only with the same line. A
+  toast is at most 32rem wide, never wider than the screen less 2rem, and its
+  message wraps anywhere; the stack is at most the
   screen's height less 2rem and scrolls beyond that, so every toast stays
   reachable on a phone. A toast raised, or raised again, scrolls into view,
   unless keyboard focus is in the stack.

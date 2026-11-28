@@ -100,6 +100,19 @@ export function backupErrorPresentation(
 }
 
 /**
+ * Select the problem `detail` a Backups-tab toast shows under its message, or
+ * `undefined` for none (issue #3892). Only an `invalid_archive`'s shows: it
+ * names the member or the header limit refused (issues #3586, #3810), which the
+ * message cannot. It is the API's own English text, shown as it is.
+ */
+export function backupErrorDetail(
+  reason: string | undefined,
+  detail: string | undefined,
+): string | undefined {
+  return reason === "invalid_archive" && detail !== "" ? detail : undefined;
+}
+
+/**
  * Select the restore dialog's message. A 409 `server_not_stopped` means the
  * state changed mid-flight, so it names restoring rather than the generic
  * stopped-only operation. A 409 `backup_unreadable` (#2374) means the backup's

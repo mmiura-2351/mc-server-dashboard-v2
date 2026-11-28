@@ -43,6 +43,7 @@ import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 import { classifyQueryResult } from "../queryState.ts";
 import {
+  backupErrorDetail,
   backupErrorPresentation,
   backupRestoreErrorPresentation,
 } from "./serverBackupsErrorPresentation.ts";
@@ -64,8 +65,8 @@ type ServerResponse = components["schemas"]["ServerResponse"];
 type BackupResponse = components["schemas"]["BackupResponse"];
 type RetentionPolicyBody = components["schemas"]["RetentionPolicyBody"];
 
-// The presentation contract reads only an API problem's status and reason; a
-// failure that is not an API problem (a network error) takes the fallback.
+// The message reads only an API problem's status and reason; a failure that is
+// not an API problem (a network error) takes the fallback.
 function backupErrorKey(
   error: unknown,
   fallback?: TranslationKey,
@@ -137,7 +138,13 @@ export function ServerBackupsTab({
     if (onForbidden(error)) {
       return;
     }
-    showToast(t(backupErrorKey(error, undefined, refusal)), "error");
+    const problem = error instanceof ApiError ? error : undefined;
+    showToast(
+      t(backupErrorKey(error, undefined, refusal)),
+      "error",
+      undefined,
+      backupErrorDetail(problem?.reason, problem?.detail),
+    );
   };
 
   const statsQuery = useQuery({

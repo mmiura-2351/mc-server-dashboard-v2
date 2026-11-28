@@ -99,9 +99,10 @@ export class ApiError extends Error {
    */
   readonly workerState: string | undefined;
   /**
-   * The RFC 9457 `detail` member. The UI does not render it (the API words it
-   * in English only); of the lifecycle 503s, only a stop of a server held by a
-   * refused final snapshot carries one (issue #4111), and the UI branches on
+   * The RFC 9457 `detail` member. The API words it in English only, so the UI
+   * renders it only under the Files and Backups `invalid_archive` messages, as
+   * it is (issue #3892). Of the lifecycle 503s, only a stop of a server held by
+   * a refused final snapshot carries one (issue #4111), and the UI branches on
    * that (issue #4057). Undefined when the body omits it.
    */
   readonly detail: string | undefined;
