@@ -61,11 +61,16 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
 from mc_server_dashboard_api.dependencies import (
     _build_token_service,
+    get_audit_recorder,
+    get_current_user,
     get_current_user_ws,
     get_list_servers,
     get_read_server,
     get_real_time_events,
     get_server_community_lookup,
+    get_servers_backup_store,
+    get_servers_file_store,
+    get_version_catalog,
 )
 from mc_server_dashboard_api.fleet.adapters.real_time_events import (
     InProcessRealTimeEvents,
@@ -101,10 +106,20 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId as ServersCommunityId,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId, WorkerId
+from mc_server_dashboard_api.versions.domain.catalog import VersionCatalog
+from mc_server_dashboard_api.versions.domain.value_objects import (
+    JarSource,
+    VersionRef,
+)
+from mc_server_dashboard_api.versions.domain.value_objects import (
+    ServerType as CatalogServerType,
+)
+from tests.audit.fakes import RecordingAuditRecorder
 from tests.client_utils import enter_client
 from tests.identity.fakes import make_authentication, make_user
 from tests.integration.migrate import downgrade_base, upgrade_head
 from tests.servers.fakes import (
+    FakeBackupArchiveStore,
     FakeClock,
     FakeControlPlane,
     FakeFileStore,
@@ -307,7 +322,9 @@ async def _seed_started_server(
     try:
         servers_community = ServersCommunityId(community.value)
         server = await CreateServer(
-            uow=ServersUnitOfWork(create_session_factory(engine)),
+            uow=ServersUnitOfWork(
+                create_session_factory(engine), InProcessRealTimeEvents()
+            ),
             clock=FakeClock(_NOW),
             version_validator=FakeVersionValidator(),
             file_store=FakeFileStore(),
@@ -610,6 +627,119 @@ async def test_community_stream_carries_the_desired_state_snapshot_and_change(
             },
         ),
         ("status", str(server), {"desired_state": "stopped"}),
+    ]
+
+
+# --- the community's server set over the real graph (issue #3308) ------------
+
+
+async def _seed_operator(
+    db_url: str, community: CommunityId, user_id: uuid.UUID
+) -> None:
+    """Make ``user_id`` a second member of ``community``, one who creates and
+    deletes servers."""
+
+    engine = create_async_engine(db_url)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    'INSERT INTO "user" '
+                    "(id, username, email, password_hash, is_platform_admin, "
+                    "created_at, updated_at) VALUES "
+                    "(:id, 'bob', 'bob@e.com', 'h', false, now(), now())"
+                ),
+                {"id": user_id},
+            )
+        factory = create_session_factory(engine)
+        role = Role(
+            id=RoleId.new(),
+            community_id=community,
+            name=RoleName("Builder"),
+            permissions={Permission("server:create"), Permission("server:delete")},
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+        membership = Membership(
+            id=MembershipId.new(),
+            user_id=CommunityUserId(user_id),
+            community_id=community,
+            created_at=_NOW,
+        )
+        async with CommunityUnitOfWork(factory) as uow:
+            await uow.roles.add(role)
+            await uow.memberships.add(membership)
+            await uow.commit()
+        async with CommunityUnitOfWork(factory) as uow:
+            await uow.memberships.assign_role(membership.id, role.id)
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+class _OneVersionCatalog(VersionCatalog):
+    """A catalog that offers every type at ``1.21.1`` and resolves nothing."""
+
+    async def list_versions(self, server_type: CatalogServerType) -> list[VersionRef]:
+        return [VersionRef(server_type=server_type, version="1.21.1")]
+
+    async def resolve(self, server_type: CatalogServerType, version: str) -> JarSource:
+        raise NotImplementedError
+
+
+async def test_community_stream_carries_servers_another_member_creates_and_deletes(
+    _database: str,
+) -> None:
+    """A dashboard sees another member's create and delete without a reload.
+
+    Both go through the REST routes and the composition root's units of work,
+    and the socket reads the app's own bus through the real membership lookup.
+    The deleted server existed before the socket connected and no frame named
+    it, so the connection had not learned its community before its row was
+    gone.
+    """
+
+    watcher = make_user()
+    community = await _seed_member(_database, watcher.id.value)
+    operator = make_user(username="bob", email="bob@example.com")
+    await _seed_operator(_database, community, operator.id.value)
+    app = create_app()
+    app.dependency_overrides[get_current_user_ws] = lambda: make_authentication(watcher)
+    app.dependency_overrides[get_current_user] = lambda: operator
+    app.dependency_overrides[get_audit_recorder] = RecordingAuditRecorder
+    app.dependency_overrides[get_version_catalog] = _OneVersionCatalog
+    app.dependency_overrides[get_servers_file_store] = FakeFileStore
+    app.dependency_overrides[get_servers_backup_store] = FakeBackupArchiveStore
+    client = _client(app)
+    servers = f"/api/communities/{community.value}/servers"
+    body = {
+        "mc_edition": "java",
+        "mc_version": "1.21.1",
+        "server_type": "vanilla",
+        "config": {},
+    }
+    doomed = client.post(servers, json={**body, "name": "old"})
+    assert doomed.status_code == 201, doomed.text
+    doomed_id = doomed.json()["id"]
+    with client.websocket_connect(f"/api/communities/{community.value}/events") as ws:
+        assert ws.receive_json()["stream"] == "snapshot"
+        created = client.post(servers, json={**body, "name": "new"})
+        assert created.status_code == 201, created.text
+        created_id = created.json()["id"]
+        deleted = client.delete(f"{servers}/{doomed_id}")
+        assert deleted.status_code == 204, deleted.text
+        _publish(
+            client,
+            app.state.real_time_events,
+            server_id=created_id,
+            event=notification_event(kind="race_over", title="race over"),
+        )
+        frames = _frames_until_race_over(ws)
+    assert [
+        (frame["stream"], frame["server_id"], frame["payload"]) for frame in frames
+    ] == [
+        ("servers", created_id, {"change": "created"}),
+        ("servers", doomed_id, {"change": "deleted"}),
     ]
 
 

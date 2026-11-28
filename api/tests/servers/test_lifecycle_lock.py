@@ -37,6 +37,9 @@ from mc_server_dashboard_api.dependencies import (
     get_restore_backup,
     get_upload_backup,
 )
+from mc_server_dashboard_api.fleet.adapters.real_time_events import (
+    InProcessRealTimeEvents,
+)
 from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleLock
 from mc_server_dashboard_api.servers.application.backups import (
     CreateBackup,
@@ -600,6 +603,7 @@ def test_restore_and_server_delete_factories_inject_the_shared_lifecycle_lock() 
                 settings=SimpleNamespace(server=SimpleNamespace(public_base_url=None)),
                 worker_registry=None,
                 control_plane=None,
+                real_time_events=InProcessRealTimeEvents(),
             )
         )
     )
@@ -707,6 +711,7 @@ def test_create_and_import_factories_inject_the_shared_lifecycle_lock() -> None:
             state=SimpleNamespace(
                 engine=engine,
                 settings=Settings(database=DatabaseSettings(url="postgresql://x/y")),
+                real_time_events=InProcessRealTimeEvents(),
             )
         )
     )

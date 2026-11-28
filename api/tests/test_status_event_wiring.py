@@ -3,7 +3,8 @@
 Every ``observed_state`` write stages its status event in the servers
 repository, and the unit of work publishes it after the commit -- on the bus it
 was built with (issue #3212); so does every ``desired_state`` change (issue
-#3428). The guarantee is enforced at runtime: a unit of
+#3428), and every server's creation and deletion its server-set event (issue
+#3308). The guarantee is enforced at runtime: a unit of
 work built without the bus refuses to commit such a write
 (``StatusEventsNotWiredError``, pinned in
 ``tests/integration/test_observed_state_status_events.py``).
@@ -27,13 +28,16 @@ from pathlib import Path
 _SRC = Path(__file__).resolve().parent.parent / "src" / "mc_server_dashboard_api"
 
 # The use cases that write ``observed_state`` or ``desired_state`` through their
-# unit of work (the latter since issue #3428; the reconciler's own since #4130).
+# unit of work (the latter since issue #3428; the reconciler's own since #4130),
+# or add or delete a server (issue #3308).
 _WRITERS = {
     "StartServer",
     "StopServer",
     "StopServersAssignedToWorker",
     "ResetUnverifiableObservedStates",
     "RunReconcilerTick",
+    "CreateServer",
+    "DeleteServer",
 }
 
 # The names the servers unit of work is constructed under.

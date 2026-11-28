@@ -44,6 +44,9 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.community.domain.value_objects import CommunityName
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.fleet.adapters.real_time_events import (
+    InProcessRealTimeEvents,
+)
 from mc_server_dashboard_api.servers.adapters.resource_pack_repository import (
     SqlAlchemyResourcePackRepository,
 )
@@ -113,7 +116,7 @@ async def _seed_server(engine: AsyncEngine) -> Server:
         await uow.communities.add(community)
         await uow.commit()
     return await CreateServer(
-        uow=ServersUnitOfWork(factory),
+        uow=ServersUnitOfWork(factory, InProcessRealTimeEvents()),
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=FakeFileStore(),
@@ -404,7 +407,7 @@ async def test_assignment_insert_for_a_deleted_server_reports_not_found(
     async with ServersUnitOfWork(factory) as uow:
         assert await uow.servers.get_by_id(server.id) is not None
         # A racer deletes the server after the pre-read found it.
-        async with ServersUnitOfWork(factory) as racer:
+        async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as racer:
             await racer.servers.delete(server.id)
             await racer.commit()
         with pytest.raises(ServerNotFoundError):

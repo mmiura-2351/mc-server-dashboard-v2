@@ -43,6 +43,9 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     UserId as CommunityUserId,
 )
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.fleet.adapters.real_time_events import (
+    InProcessRealTimeEvents,
+)
 from mc_server_dashboard_api.servers.adapters.repositories import (
     SqlAlchemyServerRepository,
 )
@@ -138,7 +141,7 @@ async def test_create_then_read_back(engine: AsyncEngine) -> None:
     community_id = await _seed_community(engine)
     factory = create_session_factory(engine)
     create = CreateServer(
-        uow=ServersUnitOfWork(factory),
+        uow=ServersUnitOfWork(factory, InProcessRealTimeEvents()),
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=FakeFileStore(),
@@ -168,7 +171,7 @@ async def test_duplicate_name_in_community_conflicts(engine: AsyncEngine) -> Non
     community_id = await _seed_community(engine)
     factory = create_session_factory(engine)
     create = CreateServer(
-        uow=ServersUnitOfWork(factory),
+        uow=ServersUnitOfWork(factory, InProcessRealTimeEvents()),
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=FakeFileStore(),
@@ -201,7 +204,7 @@ async def test_delete_cascades_to_resource_grants(engine: AsyncEngine) -> None:
 
     # Create the server first so we have its id for the grant's resource_id.
     create = CreateServer(
-        uow=ServersUnitOfWork(factory),
+        uow=ServersUnitOfWork(factory, InProcessRealTimeEvents()),
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=FakeFileStore(),
@@ -243,7 +246,7 @@ async def test_delete_cascades_to_resource_grants(engine: AsyncEngine) -> None:
 
     # Delete the server: the grant on it cascades away with the row.
     await DeleteServer(
-        uow=ServersUnitOfWork(factory),
+        uow=ServersUnitOfWork(factory, InProcessRealTimeEvents()),
         backup_store=FakeBackupArchiveStore(),
     )(community_id=CommunityId(community_id), server_id=server.id)
 
@@ -257,7 +260,7 @@ async def test_server_id_isolation_across_communities(engine: AsyncEngine) -> No
     community_a = await _seed_community(engine)
     factory = create_session_factory(engine)
     create = CreateServer(
-        uow=ServersUnitOfWork(factory),
+        uow=ServersUnitOfWork(factory, InProcessRealTimeEvents()),
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=FakeFileStore(),
@@ -311,7 +314,7 @@ async def test_list_ids_missing_game_port_finds_only_legacy_rows(
     community_id = await _seed_community(engine)
     factory = create_session_factory(engine)
     create = CreateServer(
-        uow=ServersUnitOfWork(factory),
+        uow=ServersUnitOfWork(factory, InProcessRealTimeEvents()),
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=FakeFileStore(),
@@ -383,7 +386,7 @@ async def test_update_game_port_persists_to_row(engine: AsyncEngine) -> None:
     community_id = await _seed_community(engine)
     factory = create_session_factory(engine)
     create = CreateServer(
-        uow=ServersUnitOfWork(factory),
+        uow=ServersUnitOfWork(factory, InProcessRealTimeEvents()),
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=FakeFileStore(),
@@ -430,7 +433,7 @@ async def test_update_game_port_rejects_taken_against_real_db(
     community_id = await _seed_community(engine)
     factory = create_session_factory(engine)
     create = CreateServer(
-        uow=ServersUnitOfWork(factory),
+        uow=ServersUnitOfWork(factory, InProcessRealTimeEvents()),
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=FakeFileStore(),
@@ -483,7 +486,7 @@ async def test_update_game_port_rejects_taken_against_real_db(
 
 def _creator(factory: object) -> CreateServer:
     return CreateServer(
-        uow=ServersUnitOfWork(factory),  # type: ignore[arg-type]
+        uow=ServersUnitOfWork(factory, InProcessRealTimeEvents()),  # type: ignore[arg-type]
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=FakeFileStore(),
@@ -570,7 +573,7 @@ async def test_bedrock_port_unique_backstop_and_delete_release(
     with pytest.raises(PortAlreadyTakenError):
         await _set_port(second.id, 19132)
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         await uow.servers.delete(first.id)
         await uow.commit()
 
@@ -587,7 +590,7 @@ async def test_backup_retention_round_trip_and_clear(engine: AsyncEngine) -> Non
     community_id = await _seed_community(engine)
     factory = create_session_factory(engine)
     create = CreateServer(
-        uow=ServersUnitOfWork(factory),
+        uow=ServersUnitOfWork(factory, InProcessRealTimeEvents()),
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=FakeFileStore(),
@@ -669,7 +672,7 @@ async def test_commit_after_concurrent_community_delete_reports_not_found(
             text("DELETE FROM community WHERE id = :id"), {"id": community_id}
         )
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         await uow.servers.add(_server_entity(community_id))
         with pytest.raises(CommunityNotFoundError):
             await uow.commit()
@@ -687,7 +690,7 @@ async def test_create_server_reports_a_concurrent_community_delete_as_not_found(
     community_id = await _seed_community(engine)
     factory = create_session_factory(engine)
     create = CreateServer(
-        uow=ServersUnitOfWork(factory),
+        uow=ServersUnitOfWork(factory, InProcessRealTimeEvents()),
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=FakeFileStore(),

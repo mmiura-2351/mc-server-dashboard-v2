@@ -32,6 +32,9 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.community.domain.value_objects import CommunityName
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.fleet.adapters.real_time_events import (
+    InProcessRealTimeEvents,
+)
 from mc_server_dashboard_api.servers.adapters.backup_store import (
     StorageBackupStoreAdapter,
 )
@@ -134,7 +137,7 @@ async def test_failed_delete_commit_never_lowers_the_store_generation(
         await community_uow.communities.add(community)
         await community_uow.commit()
     server = await CreateServer(
-        uow=ServersUnitOfWork(factory),
+        uow=ServersUnitOfWork(factory, InProcessRealTimeEvents()),
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=FakeFileStore(),
@@ -155,7 +158,7 @@ async def test_failed_delete_commit_never_lowers_the_store_generation(
 
     with pytest.raises(_CommitFailed):
         await DeleteServer(
-            uow=_FailingCommitUnitOfWork(factory),
+            uow=_FailingCommitUnitOfWork(factory, InProcessRealTimeEvents()),
             backup_store=StorageBackupStoreAdapter(storage=storage),
         )(community_id=server.community_id, server_id=server.id)
 

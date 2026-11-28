@@ -4,7 +4,8 @@ ARCHITECTURE.md Section 5.1 places ``RealTimeEvents`` on the API side: the
 control-plane gRPC servicer publishes the status / log / metrics events a Worker
 reports (FR-MON-1..3), and a WebSocket subscription drains them to a client. The
 bus also carries API-originated operator notifications
-(:data:`EventStream.NOTIFICATION`) — the pub/sub is stream-agnostic, so a
+(:data:`EventStream.NOTIFICATION`) and server-set changes
+(:data:`EventStream.SERVERS`) — the pub/sub is stream-agnostic, so a
 producer on either side publishes through the same Port. The interface lives in
 the fleet domain (the worker-facing context that owns the session stream),
 mirroring :class:`ServerStateSink`; the in-process pub/sub adapter fulfils it at
@@ -33,17 +34,27 @@ class EventStream(enum.Enum):
     client may subscribe to. ``NOTIFICATION`` is likewise subscribable but
     API-originated: an operator-facing notice about a server (e.g. a scheduled
     action failed), published by API-side producers rather than relayed from a
-    Worker; :func:`notification_event` builds its canonical payload. ``GAP`` is
-    an adapter-synthesised marker telling a subscriber that buffered events
-    were dropped because it fell behind (best-effort delivery, FR-MON-4); it is
-    never a subscribable stream.
+    Worker; :func:`notification_event` builds its canonical payload. ``SERVERS``
+    is API-originated too: a change of a community's server set (issue #3308),
+    which :func:`server_set_event` builds and only the community stream carries.
+    ``GAP`` is an adapter-synthesised marker telling a subscriber that buffered
+    events were dropped because it fell behind (best-effort delivery,
+    FR-MON-4); it is never a subscribable stream.
     """
 
     STATUS = "status"
     LOG = "log"
     METRICS = "metrics"
     NOTIFICATION = "notification"
+    SERVERS = "servers"
     GAP = "gap"
+
+
+class ServerSetChange(enum.Enum):
+    """How a ``SERVERS`` event changed its community's server set (issue #3308)."""
+
+    CREATED = "created"
+    DELETED = "deleted"
 
 
 @dataclass(frozen=True)
@@ -69,12 +80,18 @@ class RealTimeEvent:
     per-server subscription (where the id is the topic key the subscriber already
     knows) and is set by the relay on the firehose (``subscribe_all``), where one
     subscriber sees events from many servers and must tell them apart.
+
+    ``community_id`` is the id of that server's community, set by a publisher
+    that knows it and ``None`` otherwise. The community stream routes an event
+    that carries it by it rather than by looking the server up, which a
+    ``SERVERS`` event needs: the server it deletes has no row to look up.
     """
 
     stream: EventStream
     payload: dict[str, object] = field(default_factory=dict)
     emitted_at: dt.datetime | None = None
     server_id: str | None = None
+    community_id: str | None = None
 
 
 def notification_event(
@@ -100,6 +117,21 @@ def notification_event(
         stream=EventStream.NOTIFICATION,
         payload={"kind": kind, "title": title, "detail": detail},
         emitted_at=emitted_at,
+    )
+
+
+def server_set_event(*, change: ServerSetChange, community_id: str) -> RealTimeEvent:
+    """Build a SERVERS event with the canonical ``{change}`` payload (issue #3308).
+
+    The server it is about is publish-time context, as for a notification, and
+    reaches the community frame as its ``server_id``. ``community_id`` is the
+    server's community, which routes the event on the community stream.
+    """
+
+    return RealTimeEvent(
+        stream=EventStream.SERVERS,
+        payload={"change": change.value},
+        community_id=community_id,
     )
 
 

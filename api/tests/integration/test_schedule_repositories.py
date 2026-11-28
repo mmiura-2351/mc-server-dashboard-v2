@@ -30,6 +30,9 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.community.domain.value_objects import CommunityName
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.fleet.adapters.real_time_events import (
+    InProcessRealTimeEvents,
+)
 from mc_server_dashboard_api.servers.adapters.schedule_models import ScheduleModel
 from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
@@ -95,7 +98,7 @@ async def _seed_server(engine: AsyncEngine) -> uuid.UUID:
         await uow.communities.add(community)
         await uow.commit()
     server = await CreateServer(
-        uow=ServersUnitOfWork(factory),
+        uow=ServersUnitOfWork(factory, InProcessRealTimeEvents()),
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=FakeFileStore(),

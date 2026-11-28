@@ -9,7 +9,9 @@ and a client kept the pre-write state until its next snapshot.
 Every ``desired_state`` change does too (#3428): a dashboard that never
 learned of a start or stop made elsewhere offered the actions of the old
 intent. So does every change of the assignment (#3818): a dashboard holding a
-released server's old Worker offered a Start the API refuses.
+released server's old Worker offered a Start the API refuses. A server's
+creation and deletion publish the community stream's server-set event the
+same way (#3308).
 
 Each test drives one write path over a real PostgreSQL row through the real
 adapters -- the repository, the unit of work, the control-plane state sink --
@@ -25,6 +27,7 @@ DB-gated (TESTING.md Section 5): run only when ``MCD_TEST_DATABASE_URL`` is set
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import datetime as dt
 import os
 import uuid
@@ -95,6 +98,8 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     DesiredState,
     FinalSnapshotRefusal,
     ObservedState,
+    ServerId,
+    ServerName,
     WorkerId,
     bound_status_detail,
 )
@@ -124,14 +129,15 @@ _STATUS = frozenset({EventStream.STATUS})
 
 
 class _JournalingBus(InProcessRealTimeEvents):
-    """The real bus, journaling each status publish beside the DB activity."""
+    """The real bus, journaling each status and server-set publish beside the
+    DB activity."""
 
     def __init__(self, journal: list[str]) -> None:
         super().__init__()
         self._journal = journal
 
     def publish(self, *, server_id: str, event: RealTimeEvent) -> None:
-        if event.stream is EventStream.STATUS:
+        if event.stream in (EventStream.STATUS, EventStream.SERVERS):
             self._journal.append("publish")
         super().publish(server_id=server_id, event=event)
 
@@ -246,8 +252,9 @@ class _World:
         """No status event was published over an uncommitted state write.
 
         The journal reads ``write`` (an UPDATE of ``observed_state``,
-        ``desired_state``, ``assigned_worker_id`` or ``final_snapshot_refusal``),
-        ``commit`` and ``publish`` in the order they happened; a ``publish``
+        ``desired_state``, ``assigned_worker_id`` or ``final_snapshot_refusal``,
+        or the INSERT or DELETE of a server row), ``commit`` and ``publish`` in
+        the order they happened; a ``publish``
         whose nearest earlier DB activity is a ``write`` announced a state no
         reader could see.
         """
@@ -281,12 +288,15 @@ async def world() -> AsyncIterator[_World]:
     locking_selects: list[str] = []
 
     def _on_execute(_conn: object, _cursor: object, statement: str, *_: object) -> None:
-        if statement.startswith("UPDATE") and (
-            "observed_state=" in statement
-            or "desired_state=" in statement
-            or "assigned_worker_id=" in statement
-            or "final_snapshot_refusal=" in statement
-        ):
+        if (
+            statement.startswith("UPDATE")
+            and (
+                "observed_state=" in statement
+                or "desired_state=" in statement
+                or "assigned_worker_id=" in statement
+                or "final_snapshot_refusal=" in statement
+            )
+        ) or statement.startswith(("INSERT INTO server ", "DELETE FROM server ")):
             journal.append("write")
         if statement.startswith("SELECT") and "FOR UPDATE" in statement:
             locking_selects.append(statement)
@@ -1261,6 +1271,50 @@ async def test_lost_lifecycle_compare_and_set_publishes_nothing(
         await uow.commit()
 
     assert await _received(watching) == []
+
+
+# --- Server-set writes: the community stream's frame (issue #3308) ----------
+
+
+async def test_server_set_changes_publish_after_commit_and_not_when_rolled_back(
+    world: _World,
+) -> None:
+    """A creation and a deletion each announce themselves once committed.
+
+    The event carries the server's community, by which the community stream
+    routes it: a deleted server has no row left to look it up by.
+    """
+
+    watching = world.bus.subscribe_all(streams=frozenset({EventStream.SERVERS}))
+    world.journal.clear()
+    server = await world.server("survival")
+    async with world.uow() as uow:
+        await uow.servers.add(
+            dataclasses.replace(
+                server,
+                id=ServerId.new(),
+                name=ServerName("undone"),
+                game_port=25600,
+                slug="undone",
+            )
+        )
+        # Left without a commit: the unit of work rolls back.
+    async with world.uow() as uow:
+        await uow.servers.delete(server.id)
+        # Left without a commit: the unit of work rolls back.
+    async with world.uow() as uow:
+        await uow.servers.delete(server.id)
+        await uow.commit()
+
+    community = str(world.community.value)
+    assert [
+        (event.server_id, event.payload, event.community_id)
+        for event in await _received(watching)
+    ] == [
+        (str(server.id.value), {"change": "created"}, community),
+        (str(server.id.value), {"change": "deleted"}, community),
+    ]
+    world.assert_published_after_commit()
 
 
 # --- The unit of work: nothing is published for a write that did not commit --

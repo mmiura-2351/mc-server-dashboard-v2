@@ -41,6 +41,9 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 from mc_server_dashboard_api.community.domain.value_objects import CommunityName
 from mc_server_dashboard_api.config import load_settings
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.fleet.adapters.real_time_events import (
+    InProcessRealTimeEvents,
+)
 from mc_server_dashboard_api.servers.adapters import (
     lifecycle_lock as lifecycle_lock_mod,
 )
@@ -127,7 +130,7 @@ async def _seed_server(
         await uow.communities.add(community)
         await uow.commit()
     server = await CreateServer(
-        uow=ServersUnitOfWork(factory),
+        uow=ServersUnitOfWork(factory, InProcessRealTimeEvents()),
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=FakeFileStore(),
