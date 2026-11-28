@@ -130,17 +130,25 @@ services:
     # or a committed config. The bucket is auto-created by SeaweedFS on first PUT,
     # so no init job is needed.
     #
-    # WHAT THIS BINDS, and who can reach it. `netstat -lntp` inside this container
-    # with the entrypoint flags as they stood on 2026-08-02, before
-    # -s3.port.iceberg=0 was added below (4.40; the surface was first reported in
-    # #2599 / #2616), shows NINE TCP listeners, not one:
+    # WHAT THIS BINDS, and who can reach it. `netstat -ltnup` inside this
+    # container on chrislusf/seaweedfs:4.54, run outside compose with the
+    # entrypoint and command line below as they stood before -s3.port.lance=0 was
+    # added (2026-11-28, issue #4207), shows NINE TCP listeners, not one, each on
+    # the container address and on 127.0.0.1, and no UDP listener of weed's:
     #
     #   8333   S3 gateway (access/secret keys from .env)
     #   8888   filer HTTP        9333   master HTTP     8080   volume HTTP
-    #   8181   Iceberg REST     18333   S3 gRPC        18080  volume gRPC
+    #   9101   Lance Namespace  18333   S3 gRPC        18080  volume gRPC
     #  18888   filer gRPC       19333   master gRPC
     #
-    # Credential enforcement, probed uncredentialed against that probe's flags:
+    # Two catalog listeners are closed by flag below: 8181 Iceberg REST
+    # (-s3.port.iceberg=0, already on the line for that listing, so 8181 is not
+    # in it) and 9101 Lance Namespace (-s3.port.lance=0). The other eight bind.
+    # The first enumeration, on 4.40 with the flags as they stood on 2026-08-02
+    # (the surface was first reported in #2599 / #2616), showed the same eight
+    # and 8181; 9101 is new since then.
+    #
+    # Credential enforcement, probed uncredentialed on 2026-08-02 against 4.40:
     # 8333 rejects every data-path call (403; its /status probe answers 200,
     # which is what the healthcheck below uses). 8181 rejects catalog calls
     # (/v1/namespaces 403) but serves /v1/config open. 8888 filer answers 200
@@ -169,16 +177,26 @@ services:
     # its result: 2026-08-25, on the canonical host after a deploy, GET
     # http://seaweedfs:8181/ from the `api` container was refused (Errno 111).
     # That deploy ran 4.41 too — the pin moved on 2026-08-26 — so it does not
-    # extend the record to the pinned version either. Re-check command and long
-    # form: docs/app/SECURITY.md, the (‡) footnote.
+    # extend the record to the pinned version either. On 4.54 the 2026-11-28
+    # listing above has no 8181, with the flag; it sent no request to 8181.
+    # Re-check command and long form: docs/app/SECURITY.md, the (‡) footnote.
     #
-    # THAT RE-PROBE DOES NOT SUPERSEDE THE 2026-08-02 ENUMERATION, which is why
-    # the enumeration above is still dated 2026-08-02: the 2026-08-25 probe was
-    # a single connect to 8181 from one peer, and re-ran neither the `netstat`
-    # listing nor the uncredentialed calls behind the other eight rows. Those
-    # still rest on the 2026-08-02 probe against 4.40, by the owner decision on
-    # #2626 (2026-08-20): the rest of the surface is unchanged by design and
-    # needs no re-probe.
+    # 9101 NO LONGER BINDS: the entrypoint below passes -s3.port.lance=0, which
+    # `weed server -h` on 4.54 documents as "Lance Namespace server listen port
+    # (0 to disable) (default 9101)". Verified 2026-11-28 against
+    # chrislusf/seaweedfs:4.54 outside compose, on a throwaway internal network:
+    # with the flag 9101 is absent from `netstat -ltnup` and a peer container's
+    # connect to 9101 is refused; without it a peer's GET / on 9101 answers 404.
+    # The other eight listeners are unchanged. The re-probe from an `mcsd`
+    # peer after a deploy has not been run yet. Re-check command and long form:
+    # docs/app/SECURITY.md, the (‡) footnote.
+    #
+    # THE LISTING DOES NOT RE-PROBE CREDENTIALS. The 2026-11-28 run read
+    # `netstat` and sent peer requests to 9101 and 8333/status only, and the
+    # 2026-08-25 probe was a single connect to 8181 from one peer. Neither re-ran the uncredentialed calls
+    # behind the other eight rows. Those still rest on the 2026-08-02 probe
+    # against 4.40, by the owner decision on #2626 (2026-08-20): the rest of the
+    # surface is unchanged by design and needs no re-probe.
     #
     # THE OTHER EIGHT ARE UNCHANGED, and that is an ACCEPTED RESIDUAL, not a
     # pending fix (decided on #2626, 2026-08-20). The peers left on `mcsd` are
@@ -223,6 +241,8 @@ services:
         # manual recovery").
         # -s3.port.iceberg=0 drops the Iceberg REST catalog listener (8181) from
         # the surface enumerated above; nothing in this deployment uses it.
+        # -s3.port.lance=0 drops the Lance Namespace listener (9101) the same way
+        # (issue #4207); nothing in this deployment uses it either.
         # -volume.minFreeSpace=5 (a percent) makes every volume read-only while
         # less than 5% of /data's filesystem is free, instead of SeaweedFS's 1%
         # default. On a single host that filesystem is usually the root one, which
@@ -230,7 +250,7 @@ services:
         # they still have room (issue #4149, from #4085). Reads, deletes and vacuum
         # keep working, and the volumes turn writable again once space is back
         # (docs/dev/DEPLOYMENT.md Section 5, "Disk headroom").
-        exec weed server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -master.garbageThreshold=0.1 -s3.port.iceberg=0 -volume.minFreeSpace=5
+        exec weed server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -master.garbageThreshold=0.1 -s3.port.iceberg=0 -s3.port.lance=0 -volume.minFreeSpace=5
     environment:
       # `:-` (empty default), NOT `:?`: compose interpolates a service's env even
       # when its profile is inactive, so a `:?` here would break the fs opt-out
