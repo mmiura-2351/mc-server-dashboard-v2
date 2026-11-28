@@ -108,6 +108,7 @@ def shell_tokens(command: str) -> list[tuple[str, bool]]:
     tokens: list[tuple[str, bool]] = []
     word: str | None = None
     quote = ""
+    redirect = -1  # index of the last unquoted ``<`` or ``>``
     index = 0
     while index < len(command):
         char = command[index]
@@ -136,7 +137,7 @@ def shell_tokens(command: str) -> list[tuple[str, bool]]:
                 index += 1
             continue
         elif char in "&|" and (
-            (word or "")[-1:] in ("<", ">") or (char == "&" and following == ">")
+            redirect == index - 1 or (char == "&" and following == ">")
         ):
             word = (word or "") + char  # part of a redirect: 2>&1, >|, &>
         elif char in ";&|()\n":
@@ -145,6 +146,8 @@ def shell_tokens(command: str) -> list[tuple[str, bool]]:
                 word = None
             tokens.append((char, True))
         else:
+            if char in "<>":
+                redirect = index
             word = (word or "") + char
         index += 1
     if quote:
@@ -422,6 +425,8 @@ CASES = [
     ("gh issue edit 3 &>/dev/null --add-label approved", False, True),
     ("gh issue list --label approved 2>&1 | head -3", False, False),
     ("(cd /tmp && gh issue list --label approved) && gh pr list", False, False),
+    # A quoted ``<`` or ``>`` starts no redirect: the ``|`` after it is a pipe.
+    ('echo "<b>"|gh issue edit 77 --add-label approved', False, True),
     # A command substitution is an argument, not the end of the call.
     ("gh issue edit $(cat nums.txt) --add-label approved", False, True),
     (
