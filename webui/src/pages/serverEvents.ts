@@ -23,15 +23,19 @@ import { EventsSocketClient, wsOrigin } from "./eventsSocket.ts";
 /** The subscribable streams (the GAP marker is always delivered, never asked). */
 export type Stream = "status" | "log" | "metrics";
 
+/** A server's backup retention policy, as the API stores it (#1841). */
+export type RetentionPolicy = Record<string, unknown>;
+
 /**
  * A parsed status frame. It sets the server state fields it carries: an
  * observed transition carries `state` + optional crash detail, a change of the
  * server's intent carries `desiredState` (#3428), a placement or release
- * carries `assignedWorkerId`, `null` once released (#3818), and a refusal of
+ * carries `assignedWorkerId`, `null` once released (#3818), a refusal of
  * the stop's final snapshot carries `finalSnapshotRefusal`, which a release
- * clears to `null` (#4054). `reason` names a crash the Worker classified (e.g.
- * `forge_install_failed`, issue #1093); it is empty for an unclassified crash
- * and for every other state.
+ * clears to `null` (#4054), and a write of the backup retention policy carries
+ * `backupRetention`, `null` once cleared (#4169). `reason` names a crash the
+ * Worker classified (e.g. `forge_install_failed`, issue #1093); it is empty for
+ * an unclassified crash and for every other state.
  */
 export interface StatusFrame {
   kind: "status";
@@ -39,6 +43,7 @@ export interface StatusFrame {
   desiredState?: string;
   assignedWorkerId?: string | null;
   finalSnapshotRefusal?: string | null;
+  backupRetention?: RetentionPolicy | null;
   detail: string;
   reason: string;
 }
@@ -73,9 +78,9 @@ export interface Crash {
  * dropped status frames (#1795):
  * the server's persisted observed state and, when the API reports them, its
  * desired state (#3428), assigned Worker (#3818), last crash and whether the
- * reconciler leaves that crash alone (#3281), and the final-snapshot refusal
- * (#4054). The live `detail` of any other state is not stored, so it has no
- * counterpart.
+ * reconciler leaves that crash alone (#3281), the final-snapshot refusal
+ * (#4054) and the backup retention policy (#4169). The live `detail` of any
+ * other state is not stored, so it has no counterpart.
  */
 export interface SnapshotFrame {
   kind: "snapshot";
@@ -85,6 +90,7 @@ export interface SnapshotFrame {
   crash?: Crash;
   crashNotRestarted?: boolean;
   finalSnapshotRefusal?: string | null;
+  backupRetention?: RetentionPolicy | null;
 }
 
 /** A gap marker: the client fell behind and missed events (best-effort). */
@@ -157,6 +163,24 @@ export function refusalOf(payload: object): string | null | undefined {
 }
 
 /**
+ * The `backup_retention` a status or snapshot payload carries: the server's
+ * policy, `null` for none, or `undefined` when the payload does not carry it
+ * (or carries something that is neither).
+ */
+export function retentionOf(
+  payload: object,
+): RetentionPolicy | null | undefined {
+  if (!("backup_retention" in payload)) {
+    return undefined;
+  }
+  const { backup_retention } = payload;
+  return backup_retention === null ||
+    (typeof backup_retention === "object" && !Array.isArray(backup_retention))
+    ? (backup_retention as RetentionPolicy | null)
+    : undefined;
+}
+
+/**
  * The last crash a snapshot payload carries, or `undefined` when it does not
  * carry both fields as a string or `null`.
  */
@@ -202,11 +226,13 @@ export function parseServerFrame(raw: string): ServerFrame | null {
     };
     const assignedWorkerId = assignmentOf(payload);
     const finalSnapshotRefusal = refusalOf(payload);
+    const backupRetention = retentionOf(payload);
     if (
       typeof state !== "string" &&
       typeof desired_state !== "string" &&
       assignedWorkerId === undefined &&
-      finalSnapshotRefusal === undefined
+      finalSnapshotRefusal === undefined &&
+      backupRetention === undefined
     ) {
       return null;
     }
@@ -216,6 +242,7 @@ export function parseServerFrame(raw: string): ServerFrame | null {
       ...(typeof desired_state === "string" && { desiredState: desired_state }),
       ...(assignedWorkerId !== undefined && { assignedWorkerId }),
       ...(finalSnapshotRefusal !== undefined && { finalSnapshotRefusal }),
+      ...(backupRetention !== undefined && { backupRetention }),
       detail: typeof detail === "string" ? detail : "",
       reason: typeof reason === "string" ? reason : "",
     };
@@ -230,6 +257,7 @@ export function parseServerFrame(raw: string): ServerFrame | null {
     }
     const assignedWorkerId = assignmentOf(payload);
     const finalSnapshotRefusal = refusalOf(payload);
+    const backupRetention = retentionOf(payload);
     const crash = crashOf(payload);
     const { crash_not_restarted } = payload as {
       crash_not_restarted?: unknown;
@@ -244,6 +272,7 @@ export function parseServerFrame(raw: string): ServerFrame | null {
         crashNotRestarted: crash_not_restarted,
       }),
       ...(finalSnapshotRefusal !== undefined && { finalSnapshotRefusal }),
+      ...(backupRetention !== undefined && { backupRetention }),
     };
   }
   if (stream === "log") {

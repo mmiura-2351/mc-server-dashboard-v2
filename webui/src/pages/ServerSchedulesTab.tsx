@@ -832,9 +832,9 @@ function ScheduleDialog({
       // create: the dialog would stay open and a retry would refuse its own
       // name (409). It is reported on its own and the schedule is kept.
       try {
-        // The policy shown came from the cached server read, and nothing
-        // announces one set from another session since: read it afresh and
-        // leave a policy that now exists in place.
+        // The policy shown came from the cached server, which the status
+        // frame of one set from another session may not have reached yet
+        // (#4169): read it afresh and leave a policy that now exists in place.
         const current = await api.get(
           apiPath("/api/communities/{community_id}/servers/{server_id}", {
             community_id: communityId,

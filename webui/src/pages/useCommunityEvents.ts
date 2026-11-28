@@ -42,6 +42,7 @@ import {
   type StatusEvent,
 } from "./communityEvents.ts";
 import { observeRestResponses, stamp } from "./restReads.ts";
+import type { RetentionPolicy } from "./serverEvents.ts";
 import { NOT_RESTARTED_CRASH_REASONS } from "./serverState.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
@@ -57,6 +58,7 @@ type Fields = Partial<
     | "desired_state"
     | "assigned_worker_id"
     | "final_snapshot_refusal"
+    | "backup_retention"
     | "crash_not_restarted"
   >
 >;
@@ -85,14 +87,16 @@ export function useCommunityEvents(communityId: string): boolean {
     let pollTimer: ReturnType<typeof setInterval> | null = null;
 
     // The live observed and desired states, assignments, final-snapshot
-    // refusals and whether the reconciler leaves each crash alone, not yet
-    // superseded by a REST read, each stamped with when it was received
-    // (#3213). They are stamped apart, as different frames carry them (#3428,
-    // #3818, #4054, #3281): a read can supersede one and not another.
+    // refusals, backup retention policies and whether the reconciler leaves
+    // each crash alone, not yet superseded by a REST read, each stamped with
+    // when it was received (#3213). They are stamped apart, as different
+    // frames carry them (#3428, #3818, #4054, #4169, #3281): a read can
+    // supersede one and not another.
     const observed = new Map<string, Stamped>();
     const desired = new Map<string, Stamped>();
     const assigned = new Map<string, Stamped<string | null>>();
     const refused = new Map<string, Stamped<string | null>>();
+    const retained = new Map<string, Stamped<RetentionPolicy | null>>();
     const notRestarted = new Map<string, Stamped<boolean>>();
     // The latest snapshot's server set, until a REST read supersedes it.
     let members: { ids: Set<string>; at: number } | null = null;
@@ -110,12 +114,14 @@ export function useCommunityEvents(communityId: string): boolean {
       const intent = desired.get(id);
       const worker = assigned.get(id);
       const refusal = refused.get(id);
+      const retention = retained.get(id);
       const held = notRestarted.get(id);
       if (
         state === undefined &&
         intent === undefined &&
         worker === undefined &&
         refusal === undefined &&
+        retention === undefined &&
         held === undefined
       ) {
         return null;
@@ -125,6 +131,7 @@ export function useCommunityEvents(communityId: string): boolean {
         ...(intent !== undefined && { desired_state: intent.value }),
         ...(worker !== undefined && { assigned_worker_id: worker.value }),
         ...(refusal !== undefined && { final_snapshot_refusal: refusal.value }),
+        ...(retention !== undefined && { backup_retention: retention.value }),
         ...(held !== undefined && { crash_not_restarted: held.value }),
       };
     };
@@ -160,6 +167,7 @@ export function useCommunityEvents(communityId: string): boolean {
           ...desired.keys(),
           ...assigned.keys(),
           ...refused.keys(),
+          ...retained.keys(),
         ].some((id) => !listed.has(id)) ||
         [...changes].some(
           ([id, change]) => change.value === "created" && !listed.has(id),
@@ -181,6 +189,7 @@ export function useCommunityEvents(communityId: string): boolean {
           desired,
           assigned,
           refused,
+          retained,
           notRestarted,
           changes,
         ]) {
@@ -214,12 +223,12 @@ export function useCommunityEvents(communityId: string): boolean {
 
     // A status frame sets the states it carries: an observed transition, a
     // change of the server's intent (#3428), a placement or release (#3818),
-    // or a final-snapshot refusal (#4054). Whether the reconciler leaves a
-    // crash alone is the API's rule, a crash newer than every write to the row
-    // with a reason that recurs, whose running-intent term `crashNotRestarted`
-    // checks (#3281): a crashed frame is the newest thing about the row, so
-    // its reason decides, and an intent frame is a newer write, which clears
-    // it.
+    // a final-snapshot refusal (#4054), or a retention policy written or
+    // cleared (#4169). Whether the reconciler leaves a crash alone is the
+    // API's rule, a crash newer than every write to the row with a reason that
+    // recurs, whose running-intent term `crashNotRestarted` checks (#3281): a
+    // crashed frame is the newest thing about the row, so its reason decides,
+    // and an intent frame is a newer write, which clears it.
     const applyStatus = (event: StatusEvent) => {
       const at = stamp();
       let held: boolean | undefined;
@@ -247,6 +256,9 @@ export function useCommunityEvents(communityId: string): boolean {
           at,
         });
       }
+      if (event.backupRetention !== undefined) {
+        retained.set(event.serverId, { value: event.backupRetention, at });
+      }
       const carried: Fields = {
         ...(event.state !== undefined && { observed_state: event.state }),
         ...(event.desiredState !== undefined && {
@@ -257,6 +269,9 @@ export function useCommunityEvents(communityId: string): boolean {
         }),
         ...(event.finalSnapshotRefusal !== undefined && {
           final_snapshot_refusal: event.finalSnapshotRefusal,
+        }),
+        ...(event.backupRetention !== undefined && {
+          backup_retention: event.backupRetention,
         }),
         ...(held !== undefined && { crash_not_restarted: held }),
       };
@@ -271,6 +286,7 @@ export function useCommunityEvents(communityId: string): boolean {
       desired.clear();
       assigned.clear();
       refused.clear();
+      retained.clear();
       notRestarted.clear();
       changes.clear();
       for (const s of servers) {
@@ -283,6 +299,9 @@ export function useCommunityEvents(communityId: string): boolean {
         }
         if (s.finalSnapshotRefusal !== undefined) {
           refused.set(s.serverId, { value: s.finalSnapshotRefusal, at });
+        }
+        if (s.backupRetention !== undefined) {
+          retained.set(s.serverId, { value: s.backupRetention, at });
         }
         if (s.crashNotRestarted !== undefined) {
           notRestarted.set(s.serverId, { value: s.crashNotRestarted, at });
