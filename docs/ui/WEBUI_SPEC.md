@@ -617,9 +617,11 @@ installed or changed, so the request is safe to send again. An outage that
 strikes the working-set step **after** the plugin was recorded is not a 503 on
 any of these routes, nor on remove / enable / disable / side: the routes answer
 the generic 500. Install, catalog install, update, enable, disable and side take
-the record back first (#4001), so the plugin list and the working set both show
-the state from before the request. Remove has already deleted the record, so
-its jar may stay in the working set. A path the store refuses on that step is a
+the record back when the jar's write, rename or delete fails (#4001), so the
+plugin list shows the state from before the request. An update removes its old
+jar after that, and an outage there leaves the new version recorded with the old
+jar still in the working set. Remove has already deleted the record, so its jar
+may stay in the working set. A path the store refuses on that step is a
 `422` naming the store's reason (`invalid_path`, `name_too_long`) on these six
 routes, with nothing changed (#4001).
 

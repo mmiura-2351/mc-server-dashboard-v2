@@ -1114,15 +1114,14 @@ async def enable_plugin(
     """Enable a disabled plugin (plugin:manage).
 
     The new state is committed before the working set is reconciled, and taken
-    back when that step fails (issue #4001), so the plugin list and the working
-    set stay as they were; a path the store refuses is a 422 that names it, such
-    as ``name_too_long``. When that step needs the plugin's jar -- the
-    working-set file is gone -- and the jar is missing from the
-    content-addressed cache too, the route answers ``409``
-    ``plugin_jar_missing`` (issue #3323) over the committed state: the plugin
-    list shows it, the working set holds no file for the plugin, and repeating the
-    request is a no-op. Removing the plugin and installing it again restores its
-    jar.
+    back when that step fails (issue #4001), so the plugin list stays as it was;
+    a path the store refuses is a 422 that names it, such as ``name_too_long``.
+    When that step needs the plugin's jar -- the working-set file is gone -- and
+    the jar is missing from the content-addressed cache too, the route answers
+    ``409`` ``plugin_jar_missing`` (issue #3323) over the committed state: the
+    plugin list shows it, the working set holds no file for the plugin, and
+    repeating the request is a no-op. Removing the plugin and installing it again
+    restores its jar.
     """
 
     try:
@@ -1204,15 +1203,14 @@ async def disable_plugin(
     """Disable an enabled plugin (plugin:manage).
 
     The new state is committed before the working set is reconciled, and taken
-    back when that step fails (issue #4001), so the plugin list and the working
-    set stay as they were; a path the store refuses is a 422 that names it, such
-    as ``name_too_long``. When that step needs the plugin's jar -- the
-    working-set file is gone -- and the jar is missing from the
-    content-addressed cache too, the route answers ``409``
-    ``plugin_jar_missing`` (issue #3323) over the committed state: the plugin
-    list shows it, the working set holds no file for the plugin, and repeating the
-    request is a no-op. Removing the plugin and installing it again restores its
-    jar.
+    back when that step fails (issue #4001), so the plugin list stays as it was;
+    a path the store refuses is a 422 that names it, such as ``name_too_long``.
+    When that step needs the plugin's jar -- the working-set file is gone -- and
+    the jar is missing from the content-addressed cache too, the route answers
+    ``409`` ``plugin_jar_missing`` (issue #3323) over the committed state: the
+    plugin list shows it, the working set holds no file for the plugin, and
+    repeating the request is a no-op. Removing the plugin and installing it again
+    restores its jar.
     """
 
     try:
@@ -1299,13 +1297,13 @@ async def set_plugin_side(
     from the content-addressed cache. At-rest gated (409 ``server_unsettled``).
 
     The new side is committed before the working set is reconciled, and taken
-    back when that step fails (issue #4001), so the plugin list and the working
-    set stay as they were; a path the store refuses is a 422 that names it, such
-    as ``name_too_long``. When the jar to materialize is missing from the cache,
-    the route answers ``409`` ``plugin_jar_missing`` (issue #3323) over the
-    committed side: the plugin list shows it, the working set holds no file for
-    the plugin, and repeating the request is a no-op. Removing the plugin and
-    installing it again restores its jar.
+    back when that step fails (issue #4001), so the plugin list stays as it was;
+    a path the store refuses is a 422 that names it, such as ``name_too_long``.
+    When the jar to materialize is missing from the cache, the route answers
+    ``409`` ``plugin_jar_missing`` (issue #3323) over the committed side: the
+    plugin list shows it, the working set holds no file for the plugin, and
+    repeating the request is a no-op. Removing the plugin and installing it again
+    restores its jar.
     """
 
     try:
