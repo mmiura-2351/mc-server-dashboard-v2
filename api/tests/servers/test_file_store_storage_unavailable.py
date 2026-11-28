@@ -28,9 +28,10 @@ The ``write_file`` case where the file is replaced but the generation is not
 bumped is the window issue #3279 describes. It is pinned here as the aftermath
 it is, not fixed.
 
-The fs backend is not driven: its file operations raise a raw ``OSError`` for a
-device fault and never the storage outage type, so there is nothing for the seam
-to translate there.
+The fs backend is not driven: it raises the same storage outage type for a
+device fault (issue #3316, pinned for every Port method in
+``tests/storage/test_outage_contract.py``), and only the object stub can fail
+one exact call of a multi-call operation.
 """
 
 from __future__ import annotations

@@ -81,6 +81,12 @@ class ReleaseHeldServer:
         Worker report lands between the read and the release.
         """
 
+        # A server of another community is not found before the claim (issue
+        # #4077): the claim's 409 would say that it exists and is converging.
+        async with self.uow:
+            found = await self.uow.servers.get_by_id(server_id)
+        if found is None or found.community_id != community_id:
+            raise ServerNotFoundError(str(server_id.value))
         with self.stop_convergence.claim(server_id):
             async with self.uow:
                 server = await self.uow.servers.get_by_id(server_id)

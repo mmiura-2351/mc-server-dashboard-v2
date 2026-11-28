@@ -5,7 +5,7 @@ import warnings
 
 from mcsd.relay.v1 import relay_pb2 as mcsd_dot_relay_dot_v1_dot_relay__pb2
 
-GRPC_GENERATED_VERSION = '1.81.2'
+GRPC_GENERATED_VERSION = '1.85.3'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 

@@ -27,6 +27,7 @@ error rather than a silent EOF.
 
 from __future__ import annotations
 
+import abc
 import asyncio
 import contextlib
 import contextvars
@@ -36,6 +37,7 @@ import errno
 import functools
 import gzip
 import hashlib
+import inspect
 import io
 import logging
 import os
@@ -57,7 +59,7 @@ from collections.abc import (
 )
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, ParamSpec, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 from mc_server_dashboard_api.archive_member import (
     STORAGE_HEADER_LIMITS,
@@ -161,13 +163,14 @@ _DEFAULT_MAX_RESTORE_BYTES = 8 * 1024 * 1024 * 1024
 _LOCK_POLL_INITIAL_SECONDS = 0.005
 _LOCK_POLL_MAX_SECONDS = 0.1
 
-# The errnos an fs backup operation translates to a retryable "store unavailable"
-# outcome (issue #2555). The object backend answers a backend 5xx / transport
-# failure with ``ObjectStoreUnavailableError`` on every backup route (issues #2378,
-# #2405); the fs backend — the M1 default — used to re-raise its raw ``OSError``
-# unchanged, so the identical physical fault was a 503 on one backend and an opaque
-# 500 on the other. Translating these at the fs backup boundary (the
-# ``_translate_io_faults`` decorator below) closes that split: the servers seam maps
+# The errnos every fs Port operation translates to a retryable "store unavailable"
+# outcome (issues #2555, #3316). The object backend answers a backend 5xx /
+# transport failure with ``ObjectStoreUnavailableError`` on every Port operation
+# (issues #2378, #2405); the fs backend — the M1 default — used to re-raise its raw
+# ``OSError`` unchanged, so the identical physical fault was a 503 on one backend
+# and an opaque 500 on the other. Translating these at the fs Port boundary (the
+# ``_translating_io_faults_on`` class decorator below, and the stream generators
+# for the bytes a stream yields) closes that split: the servers seams map
 # :class:`StorageUnavailableError` to the same ``503 storage_unavailable`` for both.
 #
 # TRANSLATED — transient device/mount faults a retry can plausibly clear:
@@ -232,8 +235,8 @@ _STORE_UNAVAILABLE_ERRNOS = frozenset(
 # ends it (``gc_pass``).
 _STORE_UNREACHABLE_ERRNOS = _STORE_UNAVAILABLE_ERRNOS - {errno.EBUSY}
 
-_P = ParamSpec("_P")
 _R = TypeVar("_R")
+_C = TypeVar("_C", bound=type)
 
 
 @contextlib.contextmanager
@@ -243,7 +246,7 @@ def _translating_io_faults() -> Iterator[None]:
     The fs counterpart of the object client's ``_translating_backend_faults``
     (issue #2555): a transient device/mount fault (``_STORE_UNAVAILABLE_ERRNOS``)
     surfaces as the same retryable storage type the object backend raises, which the
-    servers backup seam then maps to the identical ``503 storage_unavailable``.
+    servers seams then map to the identical ``503 storage_unavailable``.
 
     Every other ``OSError`` propagates unchanged: the excluded standing conditions
     (EACCES / EPERM / EROFS / ENOSPC / EDQUOT) stay a 500, and the read-side miss
@@ -261,24 +264,45 @@ def _translating_io_faults() -> Iterator[None]:
         raise
 
 
-def _translate_io_faults(
-    fn: Callable[_P, Coroutine[Any, Any, _R]],
-) -> Callable[_P, Coroutine[Any, Any, _R]]:
-    """Decorate an async backup Port method with :func:`_translating_io_faults`.
+def _translating_io_faults_on(port: type[abc.ABC]) -> Callable[[_C], _C]:
+    """Apply :func:`_translating_io_faults` to every method of the Port ``port``.
 
-    Keeps the errno policy in one place (issue #2555) while touching each wrapped
-    method by a single line and leaving its body — and its typed signature, so the
-    ``Storage`` override stays sound — unchanged. The streaming ``open_backup`` is
-    NOT a coroutine, so it applies the same context manager inside its generator
-    (:func:`_io_fault_translating_stream`) instead.
+    The whole adapter has one errno posture (issues #2555, #3316): each abstract
+    method of ``port`` is wrapped where the decorated class defines it, so no Port
+    operation, one added later included, raises a transient fault as a raw
+    ``OSError``. The wrapper is the outermost layer, so the adapter's own errno
+    handling inside an operation (a miss turned into :class:`NotFoundError`, a gone
+    JAR store into :class:`StorageUnreachableError`) still sees the raw ``OSError``
+    first. A coroutine is translated for its whole run, a plain method for its call.
+    The streams a plain method returns do their I/O later, as they are iterated, so
+    the generators that make them (:func:`_file_stream`,
+    :func:`_leased_file_stream`, :func:`_tar_stream`) translate it themselves.
     """
 
-    @functools.wraps(fn)
-    async def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
-        with _translating_io_faults():
-            return await fn(*args, **kwargs)
+    def apply(cls: _C) -> _C:
+        for name in port.__abstractmethods__:
+            setattr(cls, name, _translating(vars(cls)[name]))
+        return cls
 
-    return wrapper
+    return apply
+
+
+def _translating(method: Callable[..., Any]) -> Callable[..., Any]:
+    if inspect.iscoroutinefunction(method):
+
+        @functools.wraps(method)
+        async def translated_coroutine(*args: Any, **kwargs: Any) -> Any:
+            with _translating_io_faults():
+                return await method(*args, **kwargs)
+
+        return translated_coroutine
+
+    @functools.wraps(method)
+    def translated(*args: Any, **kwargs: Any) -> Any:
+        with _translating_io_faults():
+            return method(*args, **kwargs)
+
+    return translated
 
 
 def _make_spool(prefix: str, suffix: str, directory: Path | None) -> Path:
@@ -757,24 +781,6 @@ async def _writing_off_loop(
     await out.close()
 
 
-def _io_fault_translating_stream(inner: ByteStream) -> AsyncIterator[bytes]:
-    """Wrap a backup egress stream so an I/O fault mid-read translates (issue #2555).
-
-    ``open_backup`` returns a lazily-opened stream, so a transient device/mount
-    fault strikes during iteration, not at the call. The servers seam already
-    iterates the stream and maps :class:`StorageUnavailableError` on the locating
-    half of the read (before any byte is on the wire) to ``503``; a fault once the
-    body is flowing aborts the response the same way the object path's does.
-    """
-
-    async def _gen() -> AsyncIterator[bytes]:
-        with _translating_io_faults():
-            async for chunk in inner:
-                yield chunk
-
-    return _gen()
-
-
 class _FsSnapshotHandle(SnapshotHandle):
     """Names one ``incoming/<transfer-id>/`` staging area for an in-flight snapshot."""
 
@@ -788,6 +794,7 @@ class _FsSnapshotHandle(SnapshotHandle):
         self.consumed = False
 
 
+@_translating_io_faults_on(Storage)
 class FsStorage(Storage):
     """Filesystem-backed :class:`Storage`.
 
@@ -2164,7 +2171,6 @@ class FsStorage(Storage):
 
     # --- backup archive create / list / restore / delete (Section 3.3) -----
 
-    @_translate_io_faults
     async def create_backup_from_current(
         self,
         community_id: CommunityId,
@@ -2229,7 +2235,6 @@ class FsStorage(Storage):
             raise
         _fsync_dir(archive.parent)
 
-    @_translate_io_faults
     async def list_backups(
         self, community_id: CommunityId, server_id: ServerId
     ) -> list[BackupKey]:
@@ -2245,14 +2250,12 @@ class FsStorage(Storage):
             if name.endswith(".tar.gz")
         ]
 
-    @_translate_io_faults
     async def list_backup_entries(
         self, community_id: CommunityId, server_id: ServerId
     ) -> list[BackupEntry]:
         backups = self._server_root(community_id, server_id) / "backups"
         return await asyncio.to_thread(_list_backup_entries, backups)
 
-    @_translate_io_faults
     async def restore_backup(
         self,
         community_id: CommunityId,
@@ -2319,7 +2322,6 @@ class FsStorage(Storage):
         self._release_staging(staging)
         return report
 
-    @_translate_io_faults
     async def check_backup_health(
         self, community_id: CommunityId, server_id: ServerId, key: BackupKey
     ) -> WorkingSetReport:
@@ -2400,7 +2402,6 @@ class FsStorage(Storage):
         finally:
             release()
 
-    @_translate_io_faults
     async def prune_to_final_snapshot(
         self,
         community_id: CommunityId,
@@ -2550,7 +2551,6 @@ class FsStorage(Storage):
         if publisher is not None:
             self._write_marker(server_root, generation, None)
 
-    @_translate_io_faults
     async def delete_backup(
         self, community_id: CommunityId, server_id: ServerId, key: BackupKey
     ) -> None:
@@ -2581,13 +2581,10 @@ class FsStorage(Storage):
         # an unknown key and a delete racing the open take the same NotFoundError
         # path (issue #2341).
         archive = self._backup_path(community_id, server_id, key)
-        return _io_fault_translating_stream(
-            _file_stream(
-                archive, byte_range, not_found=f"backup not found: {key.value}"
-            )
+        return _file_stream(
+            archive, byte_range, not_found=f"backup not found: {key.value}"
         )
 
-    @_translate_io_faults
     async def put_backup(
         self,
         community_id: CommunityId,
@@ -2620,7 +2617,6 @@ class FsStorage(Storage):
         await asyncio.to_thread(_fsync_dir, backups)
         return key
 
-    @_translate_io_faults
     async def backup_size(
         self, community_id: CommunityId, server_id: ServerId, key: BackupKey
     ) -> int:
@@ -3586,65 +3582,74 @@ def _tar_stream(
     """
 
     async def _gen() -> AsyncIterator[bytes]:
-        directory, on_close = await open_source()
-        # The stream and its writer each hold the lease, and the later to finish
-        # releases it: a cancel can stop the stream's wait for the writer while
-        # the writer is still reading the snapshot (issue #3577).
-        release = _released_by_last(on_close, 2)
-        writing = False
-        try:
-            read_fd, write_fd = os.pipe()
-            holder: list[BaseException] = []
+        with _translating_io_faults():
+            directory, on_close = await open_source()
+            # The stream and its writer each hold the lease, and the later to finish
+            # releases it: a cancel can stop the stream's wait for the writer while
+            # the writer is still reading the snapshot (issue #3577).
+            release = _released_by_last(on_close, 2)
+            writing = False
             try:
-                writer = threading.Thread(
-                    target=_tar_into_fd,
-                    args=(directory, write_fd, member_hook, holder, exclude, release),
-                    daemon=True,
-                )
-                writer.start()
-            except BaseException:
-                # No writer owns ``write_fd`` and no read job uses ``read_fd``.
-                os.close(read_fd)
-                os.close(write_fd)
-                raise
-            writing = True
-            loop = asyncio.get_running_loop()
-            reading: asyncio.Future[bytes] | None = None
-            try:
-                while True:
-                    # Shielded, so a cancel leaves ``reading`` pending until its
-                    # thread has finished with ``read_fd``.
-                    reading = loop.run_in_executor(None, os.read, read_fd, _CHUNK)
-                    chunk = await asyncio.shield(reading)
-                    if not chunk:
-                        break
-                    yield chunk
-            finally:
-                # Closing the read end unblocks a writer parked on a full pipe (its
-                # next write raises BrokenPipeError, which the writer swallows), so
-                # join never hangs on early consumer close. A cancel can leave a
-                # read job that has not yet entered ``os.read``; closing under it
-                # would let another open reuse the fd number and the job read that
-                # file instead (issue #3582), so the job's done-callback closes it,
-                # and marks the fault no one is left to observe retrieved (#3584).
-                if reading is not None and not reading.done():
-                    reading.add_done_callback(
-                        functools.partial(
-                            _release_after_read, functools.partial(os.close, read_fd)
-                        )
+                read_fd, write_fd = os.pipe()
+                holder: list[BaseException] = []
+                try:
+                    writer = threading.Thread(
+                        target=_tar_into_fd,
+                        args=(
+                            directory,
+                            write_fd,
+                            member_hook,
+                            holder,
+                            exclude,
+                            release,
+                        ),
+                        daemon=True,
                     )
-                else:
+                    writer.start()
+                except BaseException:
+                    # No writer owns ``write_fd`` and no read job uses ``read_fd``.
                     os.close(read_fd)
-                await asyncio.to_thread(writer.join)
-            # The writer finished and we drained to EOF: if it failed mid-tar, the
-            # EOF we saw was a truncation, so re-raise its error to the consumer.
-            if holder:
-                raise holder[0]
-        finally:
-            if writing:
-                release()
-            else:
-                on_close()
+                    os.close(write_fd)
+                    raise
+                writing = True
+                loop = asyncio.get_running_loop()
+                reading: asyncio.Future[bytes] | None = None
+                try:
+                    while True:
+                        # Shielded, so a cancel leaves ``reading`` pending until its
+                        # thread has finished with ``read_fd``.
+                        reading = loop.run_in_executor(None, os.read, read_fd, _CHUNK)
+                        chunk = await asyncio.shield(reading)
+                        if not chunk:
+                            break
+                        yield chunk
+                finally:
+                    # Closing the read end unblocks a writer parked on a full pipe (its
+                    # next write raises BrokenPipeError, which the writer swallows), so
+                    # join never hangs on early consumer close. A cancel can leave a
+                    # read job that has not yet entered ``os.read``; closing under it
+                    # would let another open reuse the fd number and the job read that
+                    # file instead (issue #3582), so the job's done-callback closes it,
+                    # and marks the fault no one is left to observe retrieved (#3584).
+                    if reading is not None and not reading.done():
+                        reading.add_done_callback(
+                            functools.partial(
+                                _release_after_read,
+                                functools.partial(os.close, read_fd),
+                            )
+                        )
+                    else:
+                        os.close(read_fd)
+                    await asyncio.to_thread(writer.join)
+                # The writer finished and we drained to EOF: if it failed mid-tar, the
+                # EOF we saw was a truncation, so re-raise its error to the consumer.
+                if holder:
+                    raise holder[0]
+            finally:
+                if writing:
+                    release()
+                else:
+                    on_close()
 
     return _gen()
 
@@ -4090,24 +4095,25 @@ def _file_stream(
     """
 
     async def _gen() -> AsyncIterator[bytes]:
-        handle = await _open_readable(path, not_found)
-        reader = _OffLoopReader(handle)
-        try:
-            remaining = None
-            if byte_range is not None:
-                first, last = byte_range
-                await reader.run(handle.seek, first)
-                remaining = last - first + 1
-            while remaining is None or remaining > 0:
-                want = _CHUNK if remaining is None else min(_CHUNK, remaining)
-                chunk = await reader.run(handle.read, want)
-                if not chunk:
-                    return
-                if remaining is not None:
-                    remaining -= len(chunk)
-                yield chunk
-        finally:
-            await reader.close()
+        with _translating_io_faults():
+            handle = await _open_readable(path, not_found)
+            reader = _OffLoopReader(handle)
+            try:
+                remaining = None
+                if byte_range is not None:
+                    first, last = byte_range
+                    await reader.run(handle.seek, first)
+                    remaining = last - first + 1
+                while remaining is None or remaining > 0:
+                    want = _CHUNK if remaining is None else min(_CHUNK, remaining)
+                    chunk = await reader.run(handle.read, want)
+                    if not chunk:
+                        return
+                    if remaining is not None:
+                        remaining -= len(chunk)
+                    yield chunk
+            finally:
+                await reader.close()
 
     return _gen()
 
@@ -4139,16 +4145,17 @@ def _leased_file_stream(
     """
 
     async def _gen() -> AsyncIterator[bytes]:
-        handle, on_close = await open_source()
-        reader = _OffLoopReader(_ClosedThenReleased(handle, on_close))
-        try:
-            while True:
-                chunk = await reader.run(handle.read, _CHUNK)
-                if not chunk:
-                    return
-                yield chunk
-        finally:
-            await reader.close()
+        with _translating_io_faults():
+            handle, on_close = await open_source()
+            reader = _OffLoopReader(_ClosedThenReleased(handle, on_close))
+            try:
+                while True:
+                    chunk = await reader.run(handle.read, _CHUNK)
+                    if not chunk:
+                        return
+                    yield chunk
+            finally:
+                await reader.close()
 
     return _gen()
 
@@ -4615,6 +4622,7 @@ def _counted(total: int, chunk: bytes, max_bytes: int) -> int:
     return total
 
 
+@_translating_io_faults_on(WorkingSetView)
 class _FsWorkingSetView(WorkingSetView):
     """Pinned read-only view of a working set for the fs adapter (issue #1966).
 

@@ -231,13 +231,23 @@ async def test_a_release_refuses_while_a_stop_convergence_holds_the_claim() -> N
 
 
 class _ReportLandsAfterTheRead(FakeServerRepository):
-    """A Worker report lands between the release's read and its write."""
+    """A Worker report lands between the release's read and its write.
+
+    The read is the release's second, under the claim: the first is its
+    community check (issue #4077).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._reads = 0
 
     async def get_by_id(self, server_id: ServerId) -> Server | None:
         server = await super().get_by_id(server_id)
-        row = self.by_id[server_id]
-        row.observed_state = ObservedState.RUNNING
-        row.observed_at = _NOW
+        self._reads += 1
+        if self._reads == 2:
+            row = self.by_id[server_id]
+            row.observed_state = ObservedState.RUNNING
+            row.observed_at = _NOW
         return server
 
 

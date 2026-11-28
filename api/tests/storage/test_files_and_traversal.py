@@ -36,6 +36,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     NotFoundError,
     PathOccupiedError,
     PathTraversalError,
+    StorageUnavailableError,
     SymlinkRefusedError,
 )
 from mc_server_dashboard_api.storage.domain.port import SubtreeExtent
@@ -226,6 +227,18 @@ def _open_fails(monkeypatch: pytest.MonkeyPatch, target: Path, err: int) -> None
     monkeypatch.setattr(fs_module, "open", _fake_open, raising=False)
 
 
+def _raised_errno(exc: BaseException) -> int | None:
+    """The errno of a failure an operation propagated rather than called a miss.
+
+    A transient fault such as EIO propagates as ``StorageUnavailableError`` over
+    the ``OSError`` (issue #3316), and a standing one such as EACCES as itself.
+    """
+
+    fault = exc.__cause__ if isinstance(exc, StorageUnavailableError) else exc
+    assert isinstance(fault, OSError)
+    return fault.errno
+
+
 async def test_read_file_on_a_symlink_loop_is_not_found(tmp_path: Path) -> None:
     """The read path's answer, which the stream paths have to agree with."""
 
@@ -281,9 +294,9 @@ async def test_open_file_stream_propagates_a_non_miss_open_failure(
     await publish(storage, community, server, {"f": b"DATA"})
     _open_fails(monkeypatch, snapshot_dir(tmp_path, community, server) / "f", err)
 
-    with pytest.raises(OSError) as caught:
+    with pytest.raises((OSError, StorageUnavailableError)) as caught:
         await drain(storage.open_file_stream(community, server, RelPath("f")))
-    assert caught.value.errno == err
+    assert _raised_errno(caught.value) == err
 
 
 @pytest.mark.parametrize("err", [errno.EACCES, errno.EIO])
@@ -297,9 +310,9 @@ async def test_view_file_stream_propagates_a_non_miss_open_failure(
     async with storage.open_working_set_view(community, server) as view:
         _open_fails(monkeypatch, snapshot_dir(tmp_path, community, server) / "f", err)
 
-        with pytest.raises(OSError) as caught:
+        with pytest.raises((OSError, StorageUnavailableError)) as caught:
             await drain(view.open_file_stream(RelPath("f")))
-        assert caught.value.errno == err
+        assert _raised_errno(caught.value) == err
 
 
 @pytest.mark.parametrize("err", [errno.EACCES, errno.EIO])
@@ -310,9 +323,9 @@ async def test_open_jar_propagates_a_non_miss_open_failure(
     key = await storage.put_jar(stream_of(b"jar-bytes"))
     _open_fails(monkeypatch, storage._jar_path(key), err)
 
-    with pytest.raises(OSError) as caught:
+    with pytest.raises((OSError, StorageUnavailableError)) as caught:
         await drain(storage.open_jar(key))
-    assert caught.value.errno == err
+    assert _raised_errno(caught.value) == err
 
 
 # --- a delete racing a NON-streaming read (issue #2394) ----------------------
@@ -565,9 +578,9 @@ async def test_list_dir_propagates_a_non_vanish_child_failure(
     await publish(storage, community, server, {"d/keep": b"DATA", "d/bad": b"DATA"})
     _child_stat_fails(monkeypatch, "bad", err)
 
-    with pytest.raises(OSError) as caught:
+    with pytest.raises((OSError, StorageUnavailableError)) as caught:
         await storage.list_dir(community, server, RelPath("d"))
-    assert caught.value.errno == err
+    assert _raised_errno(caught.value) == err
 
 
 @pytest.mark.parametrize("err", [errno.EACCES, errno.EIO, errno.ENOTDIR])
@@ -581,9 +594,9 @@ async def test_view_list_dir_propagates_a_non_vanish_child_failure(
     async with storage.open_working_set_view(community, server) as view:
         _child_stat_fails(monkeypatch, "bad", err)
 
-        with pytest.raises(OSError) as caught:
+        with pytest.raises((OSError, StorageUnavailableError)) as caught:
             await view.list_dir(RelPath("d"))
-        assert caught.value.errno == err
+        assert _raised_errno(caught.value) == err
 
 
 async def test_list_dir_of_a_directory_deleted_after_the_snapshot_is_not_found(
