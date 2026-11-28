@@ -2683,9 +2683,10 @@ security
 (CONFIGURATION.md Section 6.1). The session routes every server-scoped command —
 hydrate/snapshot as well as lifecycle/file commands — to a per-server lane off
 the receive loop: one server's commands run serially (start/stop never
-interleave), but distinct servers' lanes run concurrently under a bounded
-concurrency cap, so a slow transfer or graceful stop never delays another
-server's command.
+interleave; only a console line or a join runs beside a snapshot,
+CONTROL_PLANE.md Section 4.2), but distinct servers' lanes run concurrently
+under a bounded concurrency cap, so a slow transfer or graceful stop never
+delays another server's command.
 
 **Lifecycle wiring (FR-DATA-4).** `StartServer` hydrates before the launch (the
 API issues a hydrate trigger, then `StartServer`). A stop takes the final

@@ -1479,9 +1479,9 @@ const defaultFsckRetryDelay = 2 * time.Second
 // under the snapshot command's one deadline (snapshotContext), so none of them
 // can run past it; a save that uses the whole cap leaves at most 420 s of the
 // API's 600 s default (control.snapshot_timeout_seconds) for the rest. While it
-// waits, auto-save is off and the snapshot holds the server's lane and one of
-// the Worker's command slots. Tests shrink both (the cap through
-// Manager.settleBudget).
+// waits, auto-save is off and the snapshot holds the server's lane against every
+// command but a console line or a join, and one of the Worker's command slots.
+// Tests shrink both (the cap through Manager.settleBudget).
 const (
 	defaultSettlePollInterval = 2 * time.Second
 	snapshotSettleCap         = 180 * time.Second
@@ -1745,9 +1745,9 @@ func (m *Manager) snapshotBody(ctx, cmdCtx context.Context, cmd session.Command,
 		// The running-id snapshot takes NO reservation across its quiesce window, and
 		// that is safe (issue #829, item 4):
 		//   - Same stream: SnapshotTrigger and a StopServer/RestartServer for one id are
-		//     queued on the same per-server lane (session dispatcher, #95) and run
-		//     serially in FIFO order; the snapshot runs inline holding a concurrency
-		//     slot and does not detach, so a same-stream stop cannot overlap it.
+		//     queued on the same per-server lane (session dispatcher, #95), which runs a
+		//     stop or restart only once the snapshot ahead of it has returned, so a
+		//     same-stream stop cannot overlap it.
 		//   - Cross stream: an old dropped stream's snapshot can still be running when a
 		//     new stream's lane runs a stop/restart, which (holding no reservation here)
 		//     evicts and terminates the process mid-tar. The worst this yields is a TORN
