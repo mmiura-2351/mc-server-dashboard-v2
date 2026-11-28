@@ -1392,17 +1392,17 @@ class TestAssignEndpoint:
 
 
 class TestUnassignEndpoint:
-    def test_unassign_store_outage_is_503(self) -> None:
-        # Reading or clearing server.properties hit a store outage (issue #3233).
+    def test_unassign_properties_storage_failure_is_503(self) -> None:
+        # Reading or clearing server.properties failed (issues #3233, #3278).
         # Both precede the row's delete, so the assignment stands and unassigning
-        # again is all the caller has to do.
-        uc = _FakeUseCase(error=ServerFileStorageUnavailableError("nope"))
+        # again is all the caller has to do: the 503 assign's write answers.
+        uc = _FakeUseCase(error=WorkingSetSeedFailedError("nope"))
         recorder = RecordingAuditRecorder()
         app = _assignment_app(unassign=uc, recorder=recorder)
         with TestClient(app) as client:  # type: ignore[arg-type]
             resp = client.delete(_ASSIGN_PATH)
         assert resp.status_code == 503
-        assert resp.json()["reason"] == "storage_unavailable"
+        assert resp.json()["reason"] == "seed_failed"
         assert recorder.events == []
 
     def test_unassign_204(self) -> None:
