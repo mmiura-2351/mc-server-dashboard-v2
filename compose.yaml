@@ -267,7 +267,21 @@ services:
         # they still have room (issue #4149, from #4085). Reads, deletes and vacuum
         # keep working, and the volumes turn writable again once space is back
         # (docs/dev/DEPLOYMENT.md Section 5, "Disk headroom").
-        exec su-exec seaweed weed -logtostderr=true server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -master.garbageThreshold=0.1 -s3.port.iceberg=0 -s3.port.lance=0 -volume.minFreeSpace=5
+        # -volume.max=70 is the store's volume budget, 8 when unset (issue
+        # #2786). The bucket `mcsd` and the filer's metadata log (collection
+        # "") are two collections, and each asks for 7 volumes at its first
+        # write. At 8, the first to ask took 7 and the other got 1 ("create 7
+        # volume, created 1: Not enough data nodes found!"), and the store sat
+        # at 8/8 with no slot left to grow; the live store was mcsd 7 + log 1.
+        # 14 slots give both their 7 in either order. The other 56 leave the
+        # bucket up to 63 volumes of 30 GiB, 1890 GiB, more than a 2 TB disk
+        # holds, so the 5% minimum above stops the store before the count
+        # does. A slot costs nothing until a volume is grown into it. 0 (one
+        # slot per 30 GiB of free disk) is not used: on a 200 GiB filesystem it
+        # gave 6 slots, the bucket took all 6, and the metadata log got none
+        # and failed every write (docs/dev/DEPLOYMENT.md Section 5, "Disk
+        # headroom").
+        exec su-exec seaweed weed -logtostderr=true server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -master.garbageThreshold=0.1 -s3.port.iceberg=0 -s3.port.lance=0 -volume.minFreeSpace=5 -volume.max=70
     environment:
       # `:-` (empty default), NOT `:?`: compose interpolates a service's env even
       # when its profile is inactive, so a `:?` here would break the fs opt-out

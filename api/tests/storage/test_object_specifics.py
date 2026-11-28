@@ -840,7 +840,7 @@ async def test_check_reachable_raises_on_unreachable_backend() -> None:
     misconfigured deployment fails fast instead of degrading silently."""
 
     class _UnreachableClient:
-        async def list_objects(self, prefix: str) -> list[object]:
+        async def ping(self) -> None:
             raise ConnectionError("Connection refused")
 
     @asynccontextmanager
