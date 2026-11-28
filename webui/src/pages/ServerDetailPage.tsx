@@ -1695,7 +1695,7 @@ function Settings({
     normalizeState(server.desired_state),
     server.assigned_worker_id !== null,
   );
-  const held = writeRefusal === "server_assigned";
+  const saveHeld = writeRefusal === "server_assigned";
   const saveHeldId = useId();
   const exportHeldId = useId();
   const canExport = can("file:read", { serverId: server.id });
@@ -1937,7 +1937,7 @@ function Settings({
         </label>
         <ConfigEditor rows={rows} disabled={!canUpdate} onChange={setRows} />
         <p className="field-hint">{t("serverDetail.settings.atRestHint")}</p>
-        {held && (
+        {saveHeld && (
           <p className="field-hint" id={saveHeldId}>
             {t(serverAssignedKey(refusal))}
           </p>
@@ -1951,9 +1951,9 @@ function Settings({
             !cpuAllocationOk ||
             !slugOk ||
             save.isPending ||
-            held
+            saveHeld
           }
-          aria-describedby={held ? saveHeldId : undefined}
+          aria-describedby={saveHeld ? saveHeldId : undefined}
           onClick={() => save.mutate()}
         >
           {t("serverDetail.settings.save")}
@@ -1973,7 +1973,7 @@ function Settings({
             <div>
               <strong>{t("serverDetail.danger.exportTitle")}</strong>
               <div className="desc">{t("serverDetail.danger.exportDesc")}</div>
-              {held && (
+              {writeRefusal === "server_assigned" && (
                 <div className="field-hint" id={exportHeldId}>
                   {t(serverAssignedKey(refusal))}
                 </div>
@@ -1983,7 +1983,9 @@ function Settings({
               type="button"
               className="btn"
               disabled={exportMutation.isPending || writeRefusal !== null}
-              aria-describedby={held ? exportHeldId : undefined}
+              aria-describedby={
+                writeRefusal === "server_assigned" ? exportHeldId : undefined
+              }
               onClick={() => exportMutation.mutate()}
             >
               {t("serverDetail.danger.exportButton")}
