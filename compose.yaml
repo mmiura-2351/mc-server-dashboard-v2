@@ -238,9 +238,10 @@ services:
         # re-owns /data only when the top directory is not seaweed's. That misses
         # an existing volume: Docker copied the image's seaweed-owned /data onto
         # it, and the weed that ran as root before #4206 created every file
-        # below it as root. So every start re-owns the whole tree. It holds a few
-        # dozen volume and filer files, so that is quick. The identities file
-        # above stays root's, mode 0644, which seaweed can read.
+        # below it as root. So every start re-owns the whole tree. That tree is
+        # the volume files and the filer's metadata store, not one file per
+        # object, so the walk is short. The identities file above stays root's,
+        # mode 0644, which seaweed can read.
         chown -R seaweed:seaweed /data
         # -logtostderr=true sends weed's log to stderr only, which `docker logs`
         # and the json-file bound above read. Without it, glog also writes every

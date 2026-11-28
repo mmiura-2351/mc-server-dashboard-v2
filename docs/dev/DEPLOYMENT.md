@@ -1879,7 +1879,7 @@ container was replaced, so the existing stamp still describes what is running.
 >
 > ```sh
 > docker compose exec seaweedfs grep '^Uid:' /proc/1/status   # Uid: 1000 1000 1000 1000
-> docker compose exec seaweedfs ls -A /tmp                     # prints nothing
+> docker compose exec seaweedfs find /tmp -name 'weed.*'       # prints nothing
 > docker compose ps seaweedfs                                  # STATUS ends in (healthy)
 > ```
 >
