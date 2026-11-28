@@ -18,6 +18,11 @@ import { FileTooLargeToEditError, UnencodableTextError } from "./fileText.ts";
 export interface FileErrorPresentation {
   key: TranslationKey;
   params?: Record<string, string | number>;
+  /**
+   * The problem's `detail`, shown as it is under the message: the API's own
+   * English text, never translated (issue #3892).
+   */
+  detail?: string;
 }
 
 /** Select the Files-tab toast presentation for a failed operation. */
@@ -98,7 +103,11 @@ export function fileOperationErrorPresentation(
         case "invalid_archive":
           // An extract upload whose archive does not read back (issue #3769):
           // the generic message would not say the file itself is the problem.
-          return { key: "files.error.invalidArchive" };
+          // A `detail` names the header limit the archive broke (issue #3810),
+          // which the message cannot, so it shows too (issue #3892).
+          return error.detail === undefined || error.detail === ""
+            ? { key: "files.error.invalidArchive" }
+            : { key: "files.error.invalidArchive", detail: error.detail };
         default:
           return { key: "files.error.invalidInput" };
       }

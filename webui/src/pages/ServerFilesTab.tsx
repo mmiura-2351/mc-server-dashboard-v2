@@ -552,7 +552,12 @@ export function ServerFilesTab({
       return;
     }
     const presentation = fileOperationErrorPresentation(error);
-    showToast(t(presentation.key, presentation.params), "error");
+    showToast(
+      t(presentation.key, presentation.params),
+      "error",
+      undefined,
+      presentation.detail,
+    );
   };
 
   const listKey = ["files", "list", communityId, server.id, dir];

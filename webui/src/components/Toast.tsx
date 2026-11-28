@@ -24,6 +24,9 @@ export type ToastVariant = "success" | "error";
 interface Toast {
   id: number;
   message: string;
+  // The API's own words under the message, such as which archive member was
+  // refused: fixed English text, shown as it is and never translated.
+  detail: string | undefined;
   variant: ToastVariant;
   // What the toast is about, such as a server's id; a repeat collapses only
   // into a toast with the same scope.
@@ -35,7 +38,12 @@ interface Toast {
 }
 
 interface ToastContextValue {
-  showToast: (message: string, variant: ToastVariant, scope?: string) => void;
+  showToast: (
+    message: string,
+    variant: ToastVariant,
+    scope?: string,
+    detail?: string,
+  ) => void;
 }
 
 const ToastContext = createContext<ToastContextValue | null>(null);
@@ -157,7 +165,12 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const showToast = useCallback(
-    (message: string, variant: ToastVariant, scope?: string) => {
+    (
+      message: string,
+      variant: ToastVariant,
+      scope?: string,
+      detail?: string,
+    ) => {
       const id = Date.now() + Math.random();
       raisesRef.current += 1;
       const raisedAt = raisesRef.current;
@@ -168,6 +181,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
                 (toast) =>
                   toast.variant === "error" &&
                   toast.message === message &&
+                  toast.detail === detail &&
                   toast.scope === scope,
               )
             : undefined;
@@ -182,7 +196,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         }
         return [
           ...makeRoom(prev, variant),
-          { id, message, variant, scope, count: 1, raisedAt },
+          { id, message, detail, variant, scope, count: 1, raisedAt },
         ];
       });
     },
@@ -320,6 +334,11 @@ function ToastItem({
     >
       <span id={messageId} className="toast-message">
         {toast.message}
+        {toast.detail !== undefined && (
+          <span className="toast-detail" lang="en">
+            {toast.detail}
+          </span>
+        )}
       </span>
       {toast.count > 1 && (
         <span className="toast-count">

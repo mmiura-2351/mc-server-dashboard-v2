@@ -193,6 +193,11 @@ describe("fileOperationErrorPresentation", () => {
       { key: "files.error.invalidArchive" },
     ],
     [
+      "shows no detail for an archive refusal whose detail is empty (#3892)",
+      new ApiError(422, { reason: "invalid_archive", detail: "" }),
+      { key: "files.error.invalidArchive" },
+    ],
+    [
       "maps an otherwise invalid input",
       new ApiError(422, { reason: "unknown_validation_reason" }),
       { key: "files.error.invalidInput" },

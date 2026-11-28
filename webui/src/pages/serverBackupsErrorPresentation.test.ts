@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { en } from "../i18n/en.ts";
 import { ja } from "../i18n/ja.ts";
 import {
+  backupErrorDetail,
   backupErrorPresentation,
   backupRestoreErrorPresentation,
 } from "./serverBackupsErrorPresentation.ts";
@@ -110,6 +111,16 @@ describe("backupErrorPresentation", () => {
       expect(backupErrorPresentation(undefined, undefined, fallback)).toBe(key);
     },
   );
+});
+
+describe("backupErrorDetail", () => {
+  // Without a detail the invalid-archive message shows alone (issue #3892).
+  it.each([
+    ["no", undefined],
+    ["an empty", ""],
+  ])("shows none for an invalid_archive with %s detail", (_label, detail) => {
+    expect(backupErrorDetail("invalid_archive", detail)).toBeUndefined();
+  });
 });
 
 describe("backupRestoreErrorPresentation", () => {
