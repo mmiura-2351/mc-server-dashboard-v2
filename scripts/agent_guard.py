@@ -85,6 +85,9 @@ SUBAGENT_REASON = (
 # A here-document body is text, not commands: ``cat > body.md <<EOF ... EOF``.
 HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1.*?^\s*\2\s*$", re.DOTALL | re.MULTILINE)
 
+# An environment assignment before a command: ``GH_CONFIG_DIR=~/.config/gh gh``.
+ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
 # Used only when the command cannot be tokenised (unbalanced quotes).
 FALLBACK_LABEL = re.compile(
     r"\bgh\s+(?:issue|pr)\s+(?:create|new|edit)\b[^\n;|&]*?"
@@ -154,8 +157,9 @@ def shell_tokens(command: str) -> list[tuple[str, bool]]:
 def gh_invocations(command: str) -> list[list[str]]:
     """Return the argument list of every ``gh`` call in ``command``.
 
-    A call starts at a ``gh`` word that is not itself an argument of a ``gh``
-    call, and ends at the next ``;``, ``&``, ``|`` or line break. A ``$(...)``
+    A call starts at a word ``gh``, or one that ends in ``/gh``, that is
+    neither an argument of a ``gh`` call nor an environment assignment, and
+    ends at the next ``;``, ``&``, ``|`` or line break. A ``$(...)``
     inside a call does not end it: the call goes on after the ``)``, with the
     ``$`` left among its arguments. The ``gh`` calls inside the parentheses
     are returned as well.
@@ -167,7 +171,7 @@ def gh_invocations(command: str) -> list[list[str]]:
         if not is_operator:
             if current is not None:
                 current.append(text)
-            elif text == "gh" or text.endswith("/gh"):
+            elif (text == "gh" or text.endswith("/gh")) and not ASSIGNMENT.match(text):
                 current = []
                 calls.append(current)
         elif text == "(":
@@ -355,6 +359,12 @@ CASES = [
     ("gh pr edit 7 --add-label Approved", False, True),
     ('gh api -X POST repos/o/r/issues/12/labels -f "labels[]=approved"', False, True),
     ("cd /tmp && GH_PAGER= /usr/bin/gh issue edit 12 -l approved", False, True),
+    (
+        "GH_CONFIG_DIR=/home/x/.config/gh gh issue edit 77 --add-label approved",
+        False,
+        True,
+    ),
+    ("GH_CONFIG_DIR=/home/x/.config/gh gh issue create --title t --body b", True, True),
     ("gh issue edit 12 --add-label 'approved", False, True),
     ("gh issue create --title t --label bug,low-priority", True, True),
     ("gh api repos/o/r/issues -f title=t -f body=b", True, True),
