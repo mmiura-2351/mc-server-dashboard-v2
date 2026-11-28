@@ -356,6 +356,26 @@ describe("ServerBackupsTab create / upload / download / delete", () => {
     );
   });
 
+  // A stop holds its Worker until the final snapshot settles, and the API
+  // refuses a manual backup until the release (409 server_assigned, #3998):
+  // Create is held, with the reason (#4146).
+  it("holds Create with the reason while a stopped server is still assigned", async () => {
+    routeGet({
+      srv: {
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: "worker-a",
+      },
+    });
+    await openBackups();
+
+    const create = await screen.findByRole("button", {
+      name: t("backups.create"),
+    });
+    expect(create).toBeDisabled();
+    expect(create).toHaveAccessibleDescription(t("common.serverAssigned"));
+  });
+
   it("uploads a chosen file via multipart with progress", async () => {
     routeGet();
     mockPostFormWithProgress.mockResolvedValue(backup());

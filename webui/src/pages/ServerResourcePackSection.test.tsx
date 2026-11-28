@@ -524,6 +524,54 @@ describe("ServerResourcePackSection — unsettled mutation errors", () => {
   );
 });
 
+describe("ServerResourcePackSection — storage failure", () => {
+  // Reading or writing server.properties failed before the assignment changed,
+  // so the same action is safe to retry (#3278): the assign's write answers
+  // 503 seed_failed, the reads and the unassign's write 503 storage_unavailable.
+  it.each([
+    ["seed_failed", "assign", null],
+    ["storage_unavailable", "unassign", ASSIGNMENT],
+  ] as const)(
+    "toasts a retryable storage message on a 503 %s (%s)",
+    async (reason, action, assignment) => {
+      routeGet({ assignment });
+      const failed = new ApiError(503, { reason });
+      if (action === "assign") {
+        mockApi.post.mockRejectedValue(failed);
+      } else {
+        mockApi.delete.mockRejectedValue(failed);
+      }
+      await openSettings();
+
+      if (action === "assign") {
+        fireEvent.click(
+          await screen.findByRole("button", {
+            name: t("serverDetail.resourcePack.assign"),
+          }),
+        );
+        const select = await screen.findByRole("combobox");
+        fireEvent.change(select, { target: { value: PACK.id } });
+        fireEvent.click(dialogSubmit());
+      } else {
+        fireEvent.click(
+          await screen.findByRole("button", {
+            name: t("serverDetail.resourcePack.remove"),
+          }),
+        );
+        fireEvent.click(removeConfirm());
+      }
+
+      expect(
+        (
+          await screen.findByText(
+            t("serverDetail.resourcePack.storageUnavailable"),
+          )
+        ).closest(".toast"),
+      ).not.toBeNull();
+    },
+  );
+});
+
 describe("ServerResourcePackSection — a server the stop still holds", () => {
   // A stop holds its Worker until the final snapshot settles, and the API
   // refuses an assign or unassign until the release (409 server_assigned,
