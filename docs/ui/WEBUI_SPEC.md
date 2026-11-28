@@ -401,8 +401,8 @@ Global resource pack library (not community-scoped) and per-server assignment.
 
 | Path | Notes |
 |---|---|
-| `WS /communities/{cid}/servers/{sid}/events?streams=status,log,metrics,notification` | Typed frames `{stream, ts, payload}`. `status`: `{state, detail, reason}` for an observed transition (`reason`: the crash reason the Worker classified — `forge_install_failed` / `forge_install_out_of_memory` / `forge_install_java_incompatible` — or `""`; CONTROL_PLANE.md Section 6), `{desired_state}` for a change of the server's intent, `{assigned_worker_id}` for a placement or release (a release also carries `final_snapshot_refusal: null`), or `{final_snapshot_refusal}` for a refusal of a stop's final snapshot recorded or cleared, each carried by the frame of the write that changed it (see below) · `log`: `{line, stream}` · `metrics`: `{cpu_millis, memory_bytes, player_count}` · `notification`: `{kind, title, detail}` (operator notice) · `gap`: client fell behind (always delivered) · `snapshot`: `{state, desired_state, assigned_worker_id, crash_reason, crash_detail, crash_not_restarted, final_snapshot_refusal}` (see below). |
-| `WS /communities/{cid}/events` | Community-wide **status + notification + servers** firehose; frames carry `server_id`. `servers`: `{change}`, `created` or `deleted`: the server the frame names joined or left the community's server set (see below). `snapshot`: `{servers: [{server_id, state, desired_state, assigned_worker_id, crash_reason, crash_detail, crash_not_restarted, final_snapshot_refusal}]}` with `server_id: null` (see below). |
+| `WS /communities/{cid}/servers/{sid}/events?streams=status,log,metrics,notification` | Typed frames `{stream, ts, payload}`. `status`: `{state, detail, reason}` for an observed transition (`reason`: the crash reason the Worker classified — `forge_install_failed` / `forge_install_out_of_memory` / `forge_install_java_incompatible` — or `""`; CONTROL_PLANE.md Section 6), `{desired_state}` for a change of the server's intent, `{assigned_worker_id}` for a placement or release (a release also carries `final_snapshot_refusal: null`), `{final_snapshot_refusal}` for a refusal of a stop's final snapshot recorded or cleared, or `{backup_retention}` for a write of the backup retention policy (`null` once cleared), each carried by the frame of the write that changed it (see below) · `log`: `{line, stream}` · `metrics`: `{cpu_millis, memory_bytes, player_count}` · `notification`: `{kind, title, detail}` (operator notice) · `gap`: client fell behind (always delivered) · `snapshot`: `{state, desired_state, assigned_worker_id, crash_reason, crash_detail, crash_not_restarted, final_snapshot_refusal, backup_retention}` (see below). |
+| `WS /communities/{cid}/events` | Community-wide **status + notification + servers** firehose; frames carry `server_id`. `servers`: `{change}`, `created` or `deleted`: the server the frame names joined or left the community's server set (see below). `snapshot`: `{servers: [{server_id, state, desired_state, assigned_worker_id, crash_reason, crash_detail, crash_not_restarted, final_snapshot_refusal, backup_retention}]}` with `server_id: null` (see below). |
 
 Missed frames are never replayed (delivery is best-effort), so a connection
 that carries status opens with a **`snapshot`** frame and gets a fresh one
@@ -414,8 +414,9 @@ previous gap was being delivered, since that gap's snapshot already covers
 them): the persisted observed and desired states, the assigned Worker
 (`assigned_worker_id`, `null` when none), the last crash (`crash_reason` and
 `crash_detail`, both `null` unless the server is crashed, and
-`crash_not_restarted`) and the final-snapshot refusal
-(`final_snapshot_refusal`, `null` when none) of the stream's scope, read together from each server's row — the server for the per-server stream (only when `status` is among the
+`crash_not_restarted`), the final-snapshot refusal
+(`final_snapshot_refusal`, `null` when none) and the backup retention policy
+(`backup_retention`, `null` when none) of the stream's scope, read together from each server's row — the server for the per-server stream (only when `status` is among the
 subscribed streams), every server of the community for the community stream.
 Its `ts` is the time the snapshot was read. Its `crash_reason` and `crash_detail`
 are the stored `reason` and `detail` of the crashed `status` frame. The live
@@ -480,6 +481,13 @@ next refused retry after a write of the refusal whose commit failed, since that
 commit may have landed unpublished. An API restart in between loses that, and a
 reload shows the refusal (#4152).
 
+Every write of a server's backup retention policy publishes a `status` frame
+`{backup_retention}` too, after the write that made it commits (#4169): the
+policy as stored by `PUT …/{sid}/backups/retention`, or `null` from its
+`DELETE`. A write that stores the policy the server already holds publishes
+it again, which is harmless: status frames are idempotent sets. A write whose
+transaction rolls back publishes nothing.
+
 Every change of a community's server set publishes a `servers` frame on the
 community stream, after the write that made it commits (#3308): `{change:
 "created"}` for a server created or imported, `{change: "deleted"}` for one
@@ -493,10 +501,11 @@ old ones until its next read of the list.
 
 A client applies each `status` frame by setting the fields it carries, so
 another tab's dashboard offers the actions of the current intent without a
-reload (#3428), gates Start and Stop on the current assignment (#3818), and
-shows a held server's notice and release by the current refusal (#4057). A
-frame that carries only `final_snapshot_refusal` is one of these, not a
-malformed frame.
+reload (#3428), gates Start and Stop on the current assignment (#3818) and
+shows a held server's notice and release by the current refusal (#4057), and
+an open Backups or Schedules tab shows the current retention policy and its
+keep-all warning (#4169). A frame that carries only `final_snapshot_refusal`,
+or only `backup_retention`, is one of these, not a malformed frame.
 
 Ordering: the subscription is registered before the snapshot is read, so every
 status transition published from then on reaches the subscriber's buffer.
@@ -514,15 +523,15 @@ drops — the newer write publishes its own frame after the older one, so the
 client still ends on the newer state.
 
 Residual (#3307): that last step holds for sequential writes only. Each write
-publishes when its own commit returns, so two writes of one server's state or
-assignment made on different database connections publish in the order their
-commit acknowledgements reach the API's event loop, which can differ from the order
-the database committed them in. The frame of the earlier commit can then be
+publishes when its own commit returns, so two writes of one server's state,
+assignment or retention policy made on different database connections publish
+in the order their commit acknowledgements reach the API's event loop, which
+can differ from the order the database committed them in. The frame of the earlier commit can then be
 published last, and a client is left on that older value until the next frame
 that carries the same field for the server (a status frame for the observed
 state, an intent frame for the desired state, an assignment frame for the
-Worker), the snapshot that follows a reconnect or a `gap` that dropped status,
-or a REST refetch that starts after the stale frame. Closing this needs
+Worker, a retention frame for the policy), the snapshot that follows a
+reconnect or a `gap` that dropped status, or a REST refetch that starts after the stale frame. Closing this needs
 per-server sequencing of status frames, tracked separately in #3307.
 
 Auth: browsers pass the access token via `Sec-WebSocket-Protocol` as two

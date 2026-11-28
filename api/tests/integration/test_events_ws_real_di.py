@@ -578,6 +578,7 @@ async def test_server_stream_carries_the_desired_state_snapshot_and_change(
                 "crash_detail": None,
                 "crash_not_restarted": False,
                 "final_snapshot_refusal": None,
+                "backup_retention": None,
             },
         ),
         ("status", {"desired_state": "stopped"}),
@@ -622,6 +623,7 @@ async def test_community_stream_carries_the_desired_state_snapshot_and_change(
                         "crash_detail": None,
                         "crash_not_restarted": False,
                         "final_snapshot_refusal": None,
+                        "backup_retention": None,
                     }
                 ]
             },
@@ -637,7 +639,7 @@ async def _seed_operator(
     db_url: str, community: CommunityId, user_id: uuid.UUID
 ) -> None:
     """Make ``user_id`` a second member of ``community``, one who creates and
-    deletes servers."""
+    deletes servers and sets their backup retention."""
 
     engine = create_async_engine(db_url)
     try:
@@ -656,7 +658,11 @@ async def _seed_operator(
             id=RoleId.new(),
             community_id=community,
             name=RoleName("Builder"),
-            permissions={Permission("server:create"), Permission("server:delete")},
+            permissions={
+                Permission("server:create"),
+                Permission("server:delete"),
+                Permission("backup:schedule"),
+            },
             created_at=_NOW,
             updated_at=_NOW,
         )
@@ -741,6 +747,72 @@ async def test_community_stream_carries_servers_another_member_creates_and_delet
         ("servers", created_id, {"change": "created"}),
         ("servers", doomed_id, {"change": "deleted"}),
     ]
+
+
+# --- a server's backup retention policy over the real graph (issue #4169) ---
+
+
+async def test_server_stream_carries_the_retention_policy_another_member_writes(
+    _database: str,
+) -> None:
+    """A detail page sees a retention policy another member sets or clears.
+
+    The writes go through the REST routes and the composition root's units of
+    work, and the socket reads the app's own bus. The snapshot carries the
+    policy the server held when the socket connected.
+    """
+
+    watcher = make_user()
+    community = await _seed_member(_database, watcher.id.value)
+    operator = make_user(username="bob", email="bob@example.com")
+    await _seed_operator(_database, community, operator.id.value)
+    app = create_app()
+    app.dependency_overrides[get_current_user_ws] = lambda: make_authentication(watcher)
+    app.dependency_overrides[get_current_user] = lambda: operator
+    app.dependency_overrides[get_audit_recorder] = RecordingAuditRecorder
+    app.dependency_overrides[get_version_catalog] = _OneVersionCatalog
+    app.dependency_overrides[get_servers_file_store] = FakeFileStore
+    app.dependency_overrides[get_servers_backup_store] = FakeBackupArchiveStore
+    client = _client(app)
+    created = client.post(
+        f"/api/communities/{community.value}/servers",
+        json={
+            "name": "survival",
+            "mc_edition": "java",
+            "mc_version": "1.21.1",
+            "server_type": "vanilla",
+            "config": {},
+        },
+    )
+    assert created.status_code == 201, created.text
+    server_id = created.json()["id"]
+    server = f"/api/communities/{community.value}/servers/{server_id}"
+    kept = client.put(f"{server}/backups/retention", json={"keep_last": 3})
+    assert kept.status_code == 200, kept.text
+    with client.websocket_connect(f"{server}/events") as ws:
+        snapshot = ws.receive_json()
+        tiered = client.put(
+            f"{server}/backups/retention",
+            json={"daily": 7, "weekly": 4, "monthly": 0},
+        )
+        assert tiered.status_code == 200, tiered.text
+        cleared = client.delete(f"{server}/backups/retention")
+        assert cleared.status_code == 204, cleared.text
+        _publish(
+            client,
+            app.state.real_time_events,
+            server_id=server_id,
+            event=notification_event(kind="race_over", title="race over"),
+        )
+        frames = _frames_until_race_over(ws)
+    assert [(frame["stream"], frame["payload"]) for frame in frames] == [
+        ("status", {"backup_retention": {"daily": 7, "weekly": 4, "monthly": 0}}),
+        ("status", {"backup_retention": None}),
+    ]
+    assert (snapshot["stream"], snapshot["payload"].get("backup_retention")) == (
+        "snapshot",
+        {"keep_last": 3},
+    )
 
 
 # --- mid-stream re-authentication over the real graph (issue #3227) ----------

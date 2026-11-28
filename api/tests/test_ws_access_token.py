@@ -159,6 +159,7 @@ def _events_app() -> FastAPI:
         crash_reason = None
         crash_detail = None
         final_snapshot_refusal = None
+        backup_retention = None
 
         def crash_not_restarted(self) -> bool:
             return False

@@ -2660,20 +2660,30 @@ def get_set_backup_retention(
     request: Request,
     backup_store: Annotated[BackupArchiveStore, Depends(get_servers_backup_store)],
 ) -> SetBackupRetention:
-    """Assemble the :class:`SetBackupRetention` use case (backup:schedule, #1841)."""
+    """Assemble the :class:`SetBackupRetention` use case (backup:schedule, #1841).
+
+    The unit of work publishes the policy in the server's status frame (issue
+    #4169).
+    """
 
     session_factory = create_session_factory(get_engine(request))
     return SetBackupRetention(
-        uow=ServersUnitOfWork(session_factory),
+        uow=ServersUnitOfWork(session_factory, request.app.state.real_time_events),
         prune=_prune_scheduled_backups(request, backup_store),
     )
 
 
 def get_clear_backup_retention(request: Request) -> ClearBackupRetention:
-    """Assemble the :class:`ClearBackupRetention` use case (backup:schedule, #1841)."""
+    """Assemble the :class:`ClearBackupRetention` use case (backup:schedule, #1841).
+
+    The unit of work publishes the cleared policy in the server's status frame
+    (issue #4169).
+    """
 
     session_factory = create_session_factory(get_engine(request))
-    return ClearBackupRetention(uow=ServersUnitOfWork(session_factory))
+    return ClearBackupRetention(
+        uow=ServersUnitOfWork(session_factory, request.app.state.real_time_events)
+    )
 
 
 def get_download_backup(

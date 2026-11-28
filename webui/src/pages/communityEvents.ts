@@ -23,7 +23,12 @@ import {
   EventsSocketClient,
   wsOrigin,
 } from "./eventsSocket.ts";
-import { assignmentOf, refusalOf } from "./serverEvents.ts";
+import {
+  assignmentOf,
+  type RetentionPolicy,
+  refusalOf,
+  retentionOf,
+} from "./serverEvents.ts";
 
 // Re-exported for the existing tests / callers that import it from here.
 export { backoffDelayMs };
@@ -33,11 +38,12 @@ export { backoffDelayMs };
  * It sets the server state fields it carries: an observed transition carries
  * `state`, a change of the server's intent carries `desiredState` (#3428), a
  * placement or release carries `assignedWorkerId`, `null` once released
- * (#3818), and a refusal of the stop's final snapshot carries
- * `finalSnapshotRefusal`, which a release clears to `null` (#4054). A
- * `crashed` transition also carries the crash reason the Worker classified,
- * `""` when none, which decides whether the reconciler leaves the crash alone
- * (#3281).
+ * (#3818), a refusal of the stop's final snapshot carries
+ * `finalSnapshotRefusal`, which a release clears to `null` (#4054), and a
+ * write of the backup retention policy carries `backupRetention`, `null` once
+ * cleared (#4169). A `crashed` transition also carries the crash reason the
+ * Worker classified, `""` when none, which decides whether the reconciler
+ * leaves the crash alone (#3281).
  */
 export interface StatusEvent {
   serverId: string;
@@ -45,14 +51,15 @@ export interface StatusEvent {
   desiredState?: string;
   assignedWorkerId?: string | null;
   finalSnapshotRefusal?: string | null;
+  backupRetention?: RetentionPolicy | null;
   crashReason?: string;
 }
 
 /**
  * One server of the status snapshot: its observed state and, when the API
  * reports them, its desired state (#3428), assigned Worker (#3818), whether
- * the reconciler leaves its crash alone (#3281) and the final-snapshot refusal
- * (#4054).
+ * the reconciler leaves its crash alone (#3281), the final-snapshot refusal
+ * (#4054) and the backup retention policy (#4169).
  */
 export interface SnapshotEntry {
   serverId: string;
@@ -61,6 +68,7 @@ export interface SnapshotEntry {
   assignedWorkerId?: string | null;
   crashNotRestarted?: boolean;
   finalSnapshotRefusal?: string | null;
+  backupRetention?: RetentionPolicy | null;
 }
 
 /**
@@ -171,11 +179,13 @@ export function parseCommunityFrame(raw: string): CommunityFrame | null {
   };
   const assignedWorkerId = assignmentOf(payload);
   const finalSnapshotRefusal = refusalOf(payload);
+  const backupRetention = retentionOf(payload);
   if (
     typeof state !== "string" &&
     typeof desired_state !== "string" &&
     assignedWorkerId === undefined &&
-    finalSnapshotRefusal === undefined
+    finalSnapshotRefusal === undefined &&
+    backupRetention === undefined
   ) {
     return null;
   }
@@ -186,6 +196,7 @@ export function parseCommunityFrame(raw: string): CommunityFrame | null {
     ...(typeof desired_state === "string" && { desiredState: desired_state }),
     ...(assignedWorkerId !== undefined && { assignedWorkerId }),
     ...(finalSnapshotRefusal !== undefined && { finalSnapshotRefusal }),
+    ...(backupRetention !== undefined && { backupRetention }),
     ...(state === "crashed" && {
       crashReason: typeof reason === "string" ? reason : "",
     }),
@@ -247,8 +258,8 @@ function parseServerSet(
 
 /**
  * Parse a SNAPSHOT frame's `{servers: [{server_id, state, desired_state,
- * assigned_worker_id, crash_not_restarted, final_snapshot_refusal}]}`
- * payload. A malformed entry
+ * assigned_worker_id, crash_not_restarted, final_snapshot_refusal,
+ * backup_retention}]}` payload. A malformed entry
  * rejects the whole frame: a partial snapshot would misreport the community's
  * server set.
  */
@@ -274,6 +285,7 @@ function parseSnapshot(payload: unknown): CommunityFrame | null {
     }
     const assignedWorkerId = assignmentOf(entry as object);
     const finalSnapshotRefusal = refusalOf(entry as object);
+    const backupRetention = retentionOf(entry as object);
     parsed.push({
       serverId: server_id,
       state,
@@ -283,6 +295,7 @@ function parseSnapshot(payload: unknown): CommunityFrame | null {
         crashNotRestarted: crash_not_restarted,
       }),
       ...(finalSnapshotRefusal !== undefined && { finalSnapshotRefusal }),
+      ...(backupRetention !== undefined && { backupRetention }),
     });
   }
   return { kind: "snapshot", servers: parsed };

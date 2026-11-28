@@ -43,6 +43,7 @@ import { stripMinecraftCodes } from "./mcFormat.ts";
 import { observeRestResponses, stamp } from "./restReads.ts";
 import {
   type Crash,
+  type RetentionPolicy,
   ServerEventsClient,
   type ServerFrame,
 } from "./serverEvents.ts";
@@ -230,14 +231,15 @@ export function useServerEvents(
     const key = serverKey(communityId, serverId);
 
     // The live observed and desired states, assignment, final-snapshot
-    // refusal, last crash and whether the reconciler leaves it alone, not yet
-    // superseded by a REST read, each stamped with when it was received
-    // (#3213). They are stamped apart, as different frames carry them (#3428,
-    // #3818, #4054, #3281).
+    // refusal, backup retention policy, last crash and whether the reconciler
+    // leaves it alone, not yet superseded by a REST read, each stamped with
+    // when it was received (#3213). They are stamped apart, as different
+    // frames carry them (#3428, #3818, #4054, #4169, #3281).
     let observed: { value: string; at: number } | null = null;
     let desired: { value: string; at: number } | null = null;
     let assigned: { value: string | null; at: number } | null = null;
     let refusal: { value: string | null; at: number } | null = null;
+    let retention: { value: RetentionPolicy | null; at: number } | null = null;
     let crash: { value: Crash; at: number } | null = null;
     let notRestarted: { value: boolean; at: number } | null = null;
 
@@ -254,6 +256,7 @@ export function useServerEvents(
           | "desired_state"
           | "assigned_worker_id"
           | "final_snapshot_refusal"
+          | "backup_retention"
           | "crash_reason"
           | "crash_detail"
           | "crash_not_restarted"
@@ -288,6 +291,9 @@ export function useServerEvents(
         if (refusal !== null && refusal.at < readStartedAt) {
           refusal = null;
         }
+        if (retention !== null && retention.at < readStartedAt) {
+          retention = null;
+        }
         if (crash !== null && crash.at < readStartedAt) {
           crash = null;
         }
@@ -299,6 +305,7 @@ export function useServerEvents(
           ...(desired !== null && { desired_state: desired.value }),
           ...(assigned !== null && { assigned_worker_id: assigned.value }),
           ...(refusal !== null && { final_snapshot_refusal: refusal.value }),
+          ...(retention !== null && { backup_retention: retention.value }),
           ...(crash !== null && crashFields(crash.value)),
           ...(notRestarted !== null && {
             crash_not_restarted: notRestarted.value,
@@ -325,6 +332,13 @@ export function useServerEvents(
     const applyRefusal = (value: string | null) => {
       refusal = { value, at: stamp() };
       patch({ final_snapshot_refusal: value });
+    };
+
+    // The backup retention policy, `null` once cleared (#4169): the Backups
+    // tab's editor and the keep-all warning follow it.
+    const applyRetention = (value: RetentionPolicy | null) => {
+      retention = { value, at: stamp() };
+      patch({ backup_retention: value });
     };
 
     // The last crash (#3281), which the crash banner explains: a crashed
@@ -375,6 +389,9 @@ export function useServerEvents(
         if (frame.finalSnapshotRefusal !== undefined) {
           applyRefusal(frame.finalSnapshotRefusal);
         }
+        if (frame.backupRetention !== undefined) {
+          applyRetention(frame.backupRetention);
+        }
         if (frame.state !== undefined) {
           applyState(frame.state);
           // The API stores this report's reason and detail as the last
@@ -400,6 +417,9 @@ export function useServerEvents(
         }
         if (frame.finalSnapshotRefusal !== undefined) {
           applyRefusal(frame.finalSnapshotRefusal);
+        }
+        if (frame.backupRetention !== undefined) {
+          applyRetention(frame.backupRetention);
         }
         applyState(frame.state);
         if (frame.crash !== undefined) {
