@@ -49,6 +49,7 @@ import {
 import { serverKey } from "./serverKey.ts";
 import {
   atRestWriteRefusal,
+  type FinalSnapshotRefusal,
   finalSnapshotRefusal,
   normalizeState,
   serverAssignedKey,
@@ -68,9 +69,15 @@ type RetentionPolicyBody = components["schemas"]["RetentionPolicyBody"];
 function backupErrorKey(
   error: unknown,
   fallback?: TranslationKey,
+  refusal?: FinalSnapshotRefusal | null,
 ): TranslationKey {
   const problem = error instanceof ApiError ? error : undefined;
-  return backupErrorPresentation(problem?.status, problem?.reason, fallback);
+  return backupErrorPresentation(
+    problem?.status,
+    problem?.reason,
+    fallback,
+    refusal,
+  );
 }
 
 export function ServerBackupsTab({
@@ -113,20 +120,24 @@ export function ServerBackupsTab({
 
   const stopped = normalizeState(server.observed_state) === "stopped";
   // A stop holds its Worker until the final snapshot settles, and the API
-  // refuses a restore until the release (409 server_assigned, #3998): the
-  // server reads stopped by then, so the dialog holds its confirm.
+  // refuses a restore and a manual backup until the release (409
+  // server_assigned, #3998): the server reads stopped by then, so the dialog
+  // holds its confirm and the toolbar holds Create (#4146). A running server's
+  // Create stays offered: it takes the snapshot path.
   const held =
     atRestWriteRefusal(
       normalizeState(server.observed_state),
       normalizeState(server.desired_state),
       server.assigned_worker_id !== null,
     ) === "server_assigned";
+  const refusal = finalSnapshotRefusal(server.final_snapshot_refusal);
+  const createHeldId = useId();
 
   const onError = (error: unknown) => {
     if (onForbidden(error)) {
       return;
     }
-    showToast(t(backupErrorKey(error)), "error");
+    showToast(t(backupErrorKey(error, undefined, refusal)), "error");
   };
 
   const statsQuery = useQuery({
@@ -337,7 +348,8 @@ export function ServerBackupsTab({
             <button
               type="button"
               className="btn primary"
-              disabled={busy}
+              disabled={busy || held}
+              aria-describedby={held ? createHeldId : undefined}
               onClick={() => create.mutate()}
             >
               {t("backups.create")}
@@ -367,6 +379,11 @@ export function ServerBackupsTab({
                 e.target.value = "";
               }}
             />
+            {held && (
+              <span className="field-hint" id={createHeldId}>
+                {t(serverAssignedKey(refusal))}
+              </span>
+            )}
           </>
         )}
       </div>

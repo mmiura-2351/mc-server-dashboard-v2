@@ -362,7 +362,7 @@ async def test_a_plugin_install_holds_no_lock_and_no_connection_while_it_parses(
         )
     )
     try:
-        await parsing.wait()
+        await asyncio.wait_for(parsing.wait(), 10)
         assert isinstance(engine.pool, QueuePool)
         assert engine.pool.checkedout() == 0
         async with lock.hold(server.id):

@@ -12,6 +12,9 @@ import json
 import os
 import zipfile
 
+from mc_server_dashboard_api.servers.application.zip_entries import (
+    has_more_entries_than,
+)
 from mc_server_dashboard_api.servers.domain.errors import InvalidResourcePackError
 
 # Safety limits.
@@ -58,12 +61,13 @@ def validate_and_normalize(content: bytes, *, _depth: int = 0) -> bytes:
     if not zipfile.is_zipfile(io.BytesIO(content)):
         raise InvalidResourcePackError("not a valid zip")
 
+    # Safety: entry count, before the zip is opened, which builds an entry per
+    # directory record (issue #3936).
+    if has_more_entries_than(content, _MAX_ENTRY_COUNT):
+        raise InvalidResourcePackError("too many entries")
+
     with zipfile.ZipFile(io.BytesIO(content)) as zf:
         infos = zf.infolist()
-
-        # Safety: entry count.
-        if len(infos) > _MAX_ENTRY_COUNT:
-            raise InvalidResourcePackError("too many entries")
 
         # Safety: path traversal and decompressed size.
         # Count actual decompressed bytes via chunked reads so a single

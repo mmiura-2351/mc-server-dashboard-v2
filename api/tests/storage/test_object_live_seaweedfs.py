@@ -322,6 +322,10 @@ async def test_fresh_bucketless_store_reads_as_empty_then_write_creates_it() -> 
     storage = ObjectStorage(factory)
 
     try:
+        # Boot probes the store before it sweeps (issue #945), and a bucketless
+        # store answers the probe as it did the full listing (issue #3949).
+        assert _ENDPOINT is not None
+        await storage.check_reachable(endpoint=_ENDPOINT, bucket=_FRESH_BUCKET)
         # The exact path that crash-looped: the startup sweep over a bucketless store.
         await storage.sweep()
 

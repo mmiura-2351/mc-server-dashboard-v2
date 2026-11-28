@@ -12,6 +12,7 @@ at-rest copy and feeds the Modrinth download cache.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 
 from mc_server_dashboard_api.servers.domain.plugin_cache_store import (
@@ -30,9 +31,10 @@ async def ingest_into_cache(cache: PluginCacheStore, content: bytes) -> str:
     """Store jar ``content`` in the cache and return its SHA-256 content address.
 
     The store dedups on its content key, so a second install of identical bytes
-    skips the upload and reuses the cached blob.
+    skips the upload and reuses the cached blob. The hash runs off the event loop,
+    since it takes seconds for a jar near the 512 MiB cap (issue #3936).
     """
 
-    sha256 = hashlib.sha256(content).hexdigest()
+    sha256 = (await asyncio.to_thread(hashlib.sha256, content)).hexdigest()
     await cache.put(sha256, _bytes_stream(content))
     return sha256
